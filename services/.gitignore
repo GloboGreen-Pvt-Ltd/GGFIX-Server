@@ -1,0 +1,71 @@
+# =========================
+# Maven (ignore target in all services)
+# =========================
+*/target/
+target/
+
+# =========================
+# Gradle
+# =========================
+*/build/
+build/
+.gradle/
+
+# =========================
+# Spring Boot logs
+# =========================
+*.log
+logs/
+log/
+*.pid
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# IDE / Editor
+# =========================
+.idea/
+.vscode/
+*.iml
+.project
+.classpath
+.settings/
+
+# Cursor AI
+.cursor/
+.cursorignore
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Java compiled / packaged files
+# =========================
+*.class
+*.jar
+*.war
+*.ear
+
+# =========================
+# Temporary files
+# =========================
+tmp/
+temp/
+*.tmp
+*.swp
+
+# =========================
+# Test reports / coverage
+# =========================
+coverage/
+jacoco.exec
+surefire-reports/

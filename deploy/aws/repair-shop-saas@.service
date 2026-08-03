@@ -1,0 +1,20 @@
+[Unit]
+Description=Repair Shop SaaS service %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=repairshop
+Group=repairshop
+WorkingDirectory=/opt/repair-shop-saas/services/%i
+EnvironmentFile=/opt/repair-shop-saas/.env
+ExecStart=/opt/repair-shop-saas/bin/run-service %i
+SuccessExitStatus=143
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+

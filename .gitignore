@@ -1,0 +1,26 @@
+# Maven build output
+**/target/
+*.class
+
+# env & secrets
+.env
+
+# local H2 data
+data/
+*.db
+*.lock.db
+*.trace.db
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# logs
+*.log
+
+# OS
+.DS_Store
