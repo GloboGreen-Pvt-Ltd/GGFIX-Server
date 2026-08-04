@@ -54,8 +54,18 @@ server {
     location /pickup/       { proxy_pass http://127.0.0.1:8088/; }
     location /notification/ { proxy_pass http://127.0.0.1:8089/; }
     location /subscription/ { proxy_pass http://127.0.0.1:8090/; }
-    location /master/       { proxy_pass http://127.0.0.1:8091/; }
     location /order/        { proxy_pass http://127.0.0.1:8092/; }
+
+    # master-data-service also serves @RequestMapping("/media") and the actuator,
+    # so /master/ cannot simply stop stripping. Longest-prefix wins:
+    #   /master/brands          -> :8091/master/brands   (clean, preferred)
+    #   /master/master/brands   -> :8091/master/brands   (legacy, shipped APKs)
+    #   /master/media/upload    -> :8091/media/upload
+    #   /master/actuator/health -> :8091/actuator/health
+    location /master/master/   { proxy_pass http://127.0.0.1:8091/master/; }
+    location /master/media/    { proxy_pass http://127.0.0.1:8091/media/; }
+    location /master/actuator/ { proxy_pass http://127.0.0.1:8091/actuator/; }
+    location /master/          { proxy_pass http://127.0.0.1:8091/master/; }
 
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
