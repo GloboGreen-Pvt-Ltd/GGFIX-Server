@@ -21,13 +21,10 @@
     <properties>
         <java.version>25</java.version>
         <jjwt.version>0.12.5</jjwt.version>
-        <aws.sdk.version>2.32.11</aws.sdk.version>
         <springdoc.version>2.8.17</springdoc.version>
     </properties>
 
     <modules>
-        <!-- Library, not a service. Must build before the modules that depend on it. -->
-        <module>common-media</module>
         <module>auth-service</module>
         <module>user-service</module>
         <module>shop-service</module>
@@ -57,18 +54,6 @@
 
     <dependencyManagement>
         <dependencies>
-            <!--
-                AWS SDK v2 BOM. Media (device images, KYC documents, shop artwork)
-                lives in S3 behind the media.ggfix.in CloudFront distribution; the
-                BOM keeps the s3/auth/regions artifacts on one version.
-            -->
-            <dependency>
-                <groupId>software.amazon.awssdk</groupId>
-                <artifactId>bom</artifactId>
-                <version>${aws.sdk.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
             <dependency>
                 <groupId>io.jsonwebtoken</groupId>
                 <artifactId>jjwt-api</artifactId>

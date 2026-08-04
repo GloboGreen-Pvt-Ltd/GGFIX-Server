@@ -17,18 +17,6 @@ server:
 app:
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
-  media:
-    # S3 behind the media.ggfix.in CloudFront distribution. No credentials here:
-    # the SDK's default chain resolves them from the EC2 instance role in prod and
-    # from the environment or ~/.aws locally. Leaving bucket blank disables S3
-    # uploads and leaves the rest of master-data working.
-    bucket: ${MEDIA_S3_BUCKET:}
-    region: ${MEDIA_S3_REGION:ap-south-1}
-    public-base-url: ${MEDIA_PUBLIC_BASE_URL:https://media.ggfix.in}
-    max-image-bytes: ${MEDIA_MAX_IMAGE_BYTES:5242880}
-    # Safe to cache forever: every upload writes a NEW key, so a replacement is
-    # never a rewrite of an existing object and needs no CDN invalidation.
-    cache-control: ${MEDIA_CACHE_CONTROL:public,max-age=31536000,immutable}
   cloudinary:
     # If any of cloud-name / api-key / api-secret is blank, MediaController
     # falls back to inline base64 data URIs.

@@ -65,12 +65,6 @@
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
-        <!-- Shared S3 media storage for owner KYC and shop artwork. -->
-        <dependency>
-            <groupId>com.repairshop.saas</groupId>
-            <artifactId>common-media</artifactId>
-            <version>${project.version}</version>
-        </dependency>
     </dependencies>
 
     <build>
