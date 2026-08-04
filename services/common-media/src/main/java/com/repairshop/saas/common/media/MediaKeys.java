@@ -1,4 +1,4 @@
-package com.repairshop.saas.masterdata.media;
+package com.repairshop.saas.common.media;
 
 import java.util.Locale;
 import java.util.UUID;

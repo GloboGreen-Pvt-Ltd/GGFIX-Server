@@ -6,12 +6,12 @@ import com.repairshop.saas.masterdata.entity.MasterBrand;
 import com.repairshop.saas.masterdata.entity.MasterDeviceCategory;
 import com.repairshop.saas.masterdata.entity.MasterDeviceSeries;
 import com.repairshop.saas.masterdata.entity.MasterModel;
-import com.repairshop.saas.masterdata.media.ImageValidator;
-import com.repairshop.saas.masterdata.media.MediaKeys;
-import com.repairshop.saas.masterdata.media.MediaProperties;
-import com.repairshop.saas.masterdata.media.MediaValidationException;
-import com.repairshop.saas.masterdata.media.S3StorageService;
-import com.repairshop.saas.masterdata.media.Slugify;
+import com.repairshop.saas.common.media.MediaUploadValidator;
+import com.repairshop.saas.common.media.MediaKeys;
+import com.repairshop.saas.common.media.MediaProperties;
+import com.repairshop.saas.common.media.MediaValidationException;
+import com.repairshop.saas.common.media.S3StorageService;
+import com.repairshop.saas.common.media.Slugify;
 import com.repairshop.saas.masterdata.repository.MasterBrandRepository;
 import com.repairshop.saas.masterdata.repository.MasterCategoryBrandMappingRepository;
 import com.repairshop.saas.masterdata.repository.MasterDeviceCategoryRepository;
@@ -63,7 +63,7 @@ public class ModelMediaService {
     private final MasterDeviceCategoryRepository categoryRepo;
     private final MasterDeviceSeriesRepository seriesRepo;
     private final MasterCategoryBrandMappingRepository mappingRepo;
-    private final ImageValidator validator;
+    private final MediaUploadValidator validator;
     private final S3StorageService storage;
     private final MediaProperties props;
     private final TransactionTemplate tx;
@@ -73,7 +73,7 @@ public class ModelMediaService {
                              MasterDeviceCategoryRepository categoryRepo,
                              MasterDeviceSeriesRepository seriesRepo,
                              MasterCategoryBrandMappingRepository mappingRepo,
-                             ImageValidator validator,
+                             MediaUploadValidator validator,
                              S3StorageService storage,
                              MediaProperties props,
                              TransactionTemplate tx) {
@@ -95,7 +95,7 @@ public class ModelMediaService {
     // ------------------------------------------------------------------ create --
 
     public ModelImageResponse createWithImage(ModelCreateForm form, MultipartFile file) {
-        ImageValidator.ValidatedImage image = validator.validate(file);
+        MediaUploadValidator.ValidatedUpload image = validator.validateImage(file);
 
         String modelName = form.getModelName() == null ? "" : form.getModelName().trim();
         if (modelName.isEmpty()) {
@@ -163,7 +163,7 @@ public class ModelMediaService {
      * to a model with no image at all.
      */
     public ModelImageResponse replaceImage(UUID modelId, MultipartFile file) {
-        ImageValidator.ValidatedImage image = validator.validate(file);
+        MediaUploadValidator.ValidatedUpload image = validator.validateImage(file);
 
         MasterModel existing = modelRepo.findById(modelId)
                 .orElseThrow(() -> new MediaValidationException("No model with id " + modelId + "."));

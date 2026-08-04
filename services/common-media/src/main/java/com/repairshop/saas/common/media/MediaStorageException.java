@@ -1,4 +1,4 @@
-package com.repairshop.saas.masterdata.media;
+package com.repairshop.saas.common.media;
 
 /**
  * S3 refused or failed the operation — credentials, bucket policy, network, or an

@@ -1,4 +1,4 @@
-package com.repairshop.saas.masterdata.media;
+package com.repairshop.saas.common.media;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
@@ -29,6 +29,13 @@ public class MediaProperties {
 
     /** Per-image ceiling in bytes. Spring's multipart limit is the outer guard. */
     private long maxImageBytes = 5L * 1024 * 1024;
+
+    /**
+     * Per-document ceiling. Higher than images on purpose: a scanned Aadhaar or a
+     * multi-page GST certificate is routinely larger than a product photo, and
+     * rejecting a customer's real document is worse than storing a few extra MB.
+     */
+    private long maxDocumentBytes = 10L * 1024 * 1024;
 
     /**
      * Cache-Control written onto every uploaded object. Filenames carry a unique
@@ -82,6 +89,14 @@ public class MediaProperties {
 
     public void setMaxImageBytes(long maxImageBytes) {
         this.maxImageBytes = maxImageBytes;
+    }
+
+    public long getMaxDocumentBytes() {
+        return maxDocumentBytes;
+    }
+
+    public void setMaxDocumentBytes(long maxDocumentBytes) {
+        this.maxDocumentBytes = maxDocumentBytes;
     }
 
     public String getCacheControl() {

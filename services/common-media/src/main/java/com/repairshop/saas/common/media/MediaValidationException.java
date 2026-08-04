@@ -1,4 +1,4 @@
-package com.repairshop.saas.masterdata.media;
+package com.repairshop.saas.common.media;
 
 /**
  * The caller's input cannot produce a valid media object — unsupported MIME type,

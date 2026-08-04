@@ -20,22 +20,11 @@
         <dependency><groupId>io.jsonwebtoken</groupId><artifactId>jjwt-jackson</artifactId><scope>runtime</scope></dependency>
         <dependency><groupId>org.springdoc</groupId><artifactId>springdoc-openapi-starter-webmvc-ui</artifactId></dependency>
         <dependency><groupId>org.projectlombok</groupId><artifactId>lombok</artifactId><optional>true</optional></dependency>
-        <!--
-            S3 media storage. apache-client and netty are excluded in favour of the
-            JDK's own HTTP client: it drops several MB of transitive deps off the fat
-            jar, which matters on the t3.micro that runs all twelve services.
-        -->
+        <!-- Shared S3 media storage (slug rules, validation, upload/delete). -->
         <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>s3</artifactId>
-            <exclusions>
-                <exclusion><groupId>software.amazon.awssdk</groupId><artifactId>apache-client</artifactId></exclusion>
-                <exclusion><groupId>software.amazon.awssdk</groupId><artifactId>netty-nio-client</artifactId></exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>url-connection-client</artifactId>
+            <groupId>com.repairshop.saas</groupId>
+            <artifactId>common-media</artifactId>
+            <version>${project.version}</version>
         </dependency>
         <!-- /media/upload talks to Cloudinary via RestTemplate (no SDK dep needed). -->
     </dependencies>

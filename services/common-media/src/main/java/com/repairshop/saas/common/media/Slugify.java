@@ -1,4 +1,4 @@
-package com.repairshop.saas.masterdata.media;
+package com.repairshop.saas.common.media;
 
 import java.text.Normalizer;
 import java.util.Locale;

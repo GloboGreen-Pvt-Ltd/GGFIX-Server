@@ -1,4 +1,4 @@
-package com.repairshop.saas.masterdata.media;
+package com.repairshop.saas.common.media;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
