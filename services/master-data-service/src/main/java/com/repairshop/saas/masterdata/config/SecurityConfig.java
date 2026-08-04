@@ -45,6 +45,12 @@ public class SecurityConfig {
                         // Uploads are authenticated; everything else (catalog reads,
                         // /media/ping health) stays public.
                         .requestMatchers("/media/upload").authenticated()
+                        // S3-backed model images. Same reasoning as /media/upload —
+                        // these write objects into the paid media.ggfix.in bucket and
+                        // create catalogue rows, so they must never be anonymous.
+                        .requestMatchers("/master/models/with-image").authenticated()
+                        .requestMatchers("/master/models/*/image").authenticated()
+                        .requestMatchers("/master/models/media-path/preview").authenticated()
                         .anyRequest().permitAll())
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();
