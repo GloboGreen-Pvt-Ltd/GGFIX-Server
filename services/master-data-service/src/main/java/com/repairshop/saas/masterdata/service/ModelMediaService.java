@@ -170,6 +170,17 @@ public class ModelMediaService {
 
         // Legacy rows (Cloudinary-era) have no folder yet; derive it now from the
         // taxonomy they already carry so they migrate on first replacement.
+        // ~4% of live models have no series (measured across 825 rows). The folder
+        // genuinely needs one, so this cannot be papered over — but the generic
+        // "categoryId, brandId and seriesId are all required" reads as a client
+        // mistake, and on this path the client sent none of them. Name the real fix.
+        if (existing.getSeriesId() == null || existing.getCategoryId() == null
+                || existing.getBrandId() == null) {
+            throw new MediaValidationException(
+                    "'" + existing.getName() + "' has no category, brand and series set, so there is "
+                            + "nowhere to file its image. Set them on the model first, then upload.");
+        }
+
         // Derived every time rather than read back from a stored column: the folder
         // is a pure function of the taxonomy, so recomputing it is cheaper than the
         // schema needed to remember it.
