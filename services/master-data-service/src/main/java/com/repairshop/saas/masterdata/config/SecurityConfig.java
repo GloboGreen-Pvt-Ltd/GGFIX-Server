@@ -53,6 +53,7 @@ public class SecurityConfig {
                         .requestMatchers("/master/models/media-path/preview").authenticated()
                         .requestMatchers("/master/device-categories/*/image").authenticated()
                         .requestMatchers("/master/brands/*/image").authenticated()
+                        .requestMatchers("/master/banners/*/image").authenticated()
                         .anyRequest().permitAll())
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();

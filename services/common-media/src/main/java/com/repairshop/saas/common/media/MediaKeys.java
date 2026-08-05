@@ -37,6 +37,12 @@ public final class MediaKeys {
     public static final String SHOP_OWNER_ROOT = "shopowner";
     public static final String SHOP_ROOT = "shops";
     public static final String MASTER_CATEGORIES_ROOT = "master/categories";
+    /**
+     * Banners sit at the root rather than under master/, because they are customer-app
+     * promotional content rather than catalogue taxonomy — and because that is the
+     * path that was asked for: media.ggfix.in/banner/<title>.jpg
+     */
+    public static final String BANNER_ROOT = "banner";
     public static final String MASTER_BRANDS_ROOT = "master/brands";
 
     /**
@@ -101,6 +107,11 @@ public final class MediaKeys {
     public static String masterCategoryImageKey(String categoryName, String extension) {
         return MASTER_CATEGORIES_ROOT + "/"
                 + uniqueName(Slugify.requireSlug(categoryName, "category"), extension);
+    }
+
+    /** Home-screen banner: {@code banner/slider-1-8ab31f04.jpg}, named from its title. */
+    public static String bannerImageKey(String title, String extension) {
+        return BANNER_ROOT + "/" + uniqueName(Slugify.requireSlug(title, "banner title"), extension);
     }
 
     /** Brand artwork: {@code master/brands/vivo-4c7d1e02.png}. */

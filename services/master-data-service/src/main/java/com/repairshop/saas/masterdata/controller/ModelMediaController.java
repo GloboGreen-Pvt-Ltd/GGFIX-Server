@@ -123,4 +123,20 @@ public class ModelMediaController {
                                                                   @RequestParam("image") MultipartFile image) {
         return ResponseEntity.ok(taxonomyService.uploadBrandImage(id, image));
     }
+
+    /**
+     * Upload or replace a home-screen banner image.
+     *
+     * <pre>
+     * POST /master/banners/{id}/image   (multipart/form-data)
+     *   image  file  (jpeg | png | webp)
+     * </pre>
+     *
+     * Lands at {@code banner/slider-1-8ab31f04.jpg} — keyed on the banner's title.
+     */
+    @PostMapping(value = "/banners/{id}/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<TaxonomyImageResponse> uploadBannerImage(@PathVariable UUID id,
+                                                                   @RequestParam("image") MultipartFile image) {
+        return ResponseEntity.ok(taxonomyService.uploadBannerImage(id, image));
+    }
 }

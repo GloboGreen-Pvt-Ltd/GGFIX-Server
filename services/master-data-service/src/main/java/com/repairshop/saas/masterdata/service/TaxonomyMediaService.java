@@ -5,8 +5,10 @@ import com.repairshop.saas.common.media.MediaUploadValidator;
 import com.repairshop.saas.common.media.MediaValidationException;
 import com.repairshop.saas.common.media.S3StorageService;
 import com.repairshop.saas.masterdata.dto.TaxonomyImageResponse;
+import com.repairshop.saas.masterdata.entity.MasterBanner;
 import com.repairshop.saas.masterdata.entity.MasterBrand;
 import com.repairshop.saas.masterdata.entity.MasterDeviceCategory;
+import com.repairshop.saas.masterdata.repository.MasterBannerRepository;
 import com.repairshop.saas.masterdata.repository.MasterBrandRepository;
 import com.repairshop.saas.masterdata.repository.MasterDeviceCategoryRepository;
 import org.slf4j.Logger;
@@ -44,17 +46,20 @@ public class TaxonomyMediaService {
 
     private final MasterDeviceCategoryRepository categoryRepo;
     private final MasterBrandRepository brandRepo;
+    private final MasterBannerRepository bannerRepo;
     private final MediaUploadValidator validator;
     private final S3StorageService storage;
     private final TransactionTemplate tx;
 
     public TaxonomyMediaService(MasterDeviceCategoryRepository categoryRepo,
                                 MasterBrandRepository brandRepo,
+                                MasterBannerRepository bannerRepo,
                                 MediaUploadValidator validator,
                                 S3StorageService storage,
                                 TransactionTemplate tx) {
         this.categoryRepo = categoryRepo;
         this.brandRepo = brandRepo;
+        this.bannerRepo = bannerRepo;
         this.validator = validator;
         this.storage = storage;
         this.tx = tx;
@@ -110,6 +115,42 @@ public class TaxonomyMediaService {
             });
         } catch (RuntimeException e) {
             log.error("Brand {} update failed after upload; removing orphaned object {}", brandId, key, e);
+            storage.deleteQuietly(key);
+            throw e;
+        }
+    }
+
+    /**
+     * Upload or replace a home-screen banner image.
+     *
+     * Keyed on the banner's title — {@code banner/slider-1-8ab31f04.jpg} — so the
+     * bucket reads the way the admin list does. A banner with no title cannot be
+     * keyed, and is rejected rather than filed under something invented.
+     */
+    public TaxonomyImageResponse uploadBannerImage(UUID bannerId, MultipartFile file) {
+        MasterBanner banner = bannerRepo.findById(bannerId)
+                .orElseThrow(() -> new MediaValidationException("No banner with id " + bannerId + "."));
+        if (banner.getTitle() == null || banner.getTitle().isBlank()) {
+            throw new MediaValidationException(
+                    "This banner has no title, so its image cannot be named. Set a title first.");
+        }
+
+        MediaUploadValidator.ValidatedUpload upload = validator.validateImage(file);
+        String key = MediaKeys.bannerImageKey(banner.getTitle(), upload.extension());
+        String url = storage.put(key, upload.bytes(), upload.contentType());
+
+        try {
+            return tx.execute(status -> {
+                MasterBanner row = bannerRepo.findById(bannerId).orElseThrow();
+                row.setImageUrl(url);
+                row.setImageBase64(null);
+                MasterBanner saved = bannerRepo.save(row);
+                log.info("Banner {} image -> {}", bannerId, key);
+                return new TaxonomyImageResponse(saved.getId(), saved.getTitle(), key, saved.getImageUrl(),
+                        upload.originalName(), upload.contentType(), upload.size());
+            });
+        } catch (RuntimeException e) {
+            log.error("Banner {} update failed after upload; removing orphaned object {}", bannerId, key, e);
             storage.deleteQuietly(key);
             throw e;
         }
