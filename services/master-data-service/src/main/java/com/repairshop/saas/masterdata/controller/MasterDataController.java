@@ -75,6 +75,33 @@ public class MasterDataController {
     }
 
     // ---- Models ----
+
+    /**
+     * Every model, in one request, without the base64 weight.
+     *
+     * The admin previously assembled this list with one call per brand — 55
+     * sequential round-trips — because a full listing had once exhausted the heap.
+     * ModelListItem drops the inline data: URIs that accounted for 82% of the bytes,
+     * so the whole catalogue now fits comfortably in a single response.
+     *
+     * Optional filters keep the existing per-brand and per-series views working off
+     * the same endpoint.
+     */
+    @GetMapping("/models")
+    public ResponseEntity<List<ModelListItem>> listModels(
+            @RequestParam(value = "brandId", required = false) UUID brandId,
+            @RequestParam(value = "seriesId", required = false) UUID seriesId) {
+        List<MasterModel> rows;
+        if (seriesId != null) {
+            rows = modelRepo.findBySeriesIdOrderByName(seriesId);
+        } else if (brandId != null) {
+            rows = modelRepo.findByBrandIdOrderByName(brandId);
+        } else {
+            rows = modelRepo.findAll(org.springframework.data.domain.Sort.by("name"));
+        }
+        return ResponseEntity.ok(rows.stream().map(ModelListItem::from).toList());
+    }
+
     @GetMapping("/brands/{brandId}/models")
     public ResponseEntity<List<MasterModel>> getModelsByBrand(@PathVariable UUID brandId) {
         return ResponseEntity.ok(modelRepo.findByBrandIdOrderByName(brandId));
