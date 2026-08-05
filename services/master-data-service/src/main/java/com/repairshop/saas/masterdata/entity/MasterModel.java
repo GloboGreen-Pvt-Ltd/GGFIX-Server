@@ -110,37 +110,4 @@ public class MasterModel {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "ram_storage")
     private List<String> ramStorage = new ArrayList<>();
-
-    /*
-     * ---- S3 media (migration 79) -------------------------------------------
-     * imageUrl above still holds the legacy Cloudinary URL (or an inline base64
-     * data URI) for rows created before the move to media.ggfix.in. New uploads
-     * populate the keys below instead, and the public URL is composed at read time
-     * rather than stored, so the CDN hostname never ends up baked into a row.
-     */
-
-    /**
-     * Folder shared by every image of this model, e.g. {@code mobile/vivo/y-series/vivo-y20}.
-     * Derived from category/brand/series/name and stable across image replacements.
-     */
-    @Column(name = "media_folder_key", length = 512)
-    private String mediaFolderKey;
-
-    /**
-     * Full S3 object key, e.g. {@code mobile/vivo/y-series/vivo-y20/main-a82f5c1.jpg}.
-     * The leaf changes on every upload — that is what defeats CDN and browser caching.
-     */
-    @Column(name = "image_key", length = 768)
-    private String imageKey;
-
-    /** Filename as uploaded. Display and audit only; never used to build the key. */
-    @Column(name = "image_original_name", length = 255)
-    private String imageOriginalName;
-
-    /** MIME type as validated from the file's own bytes, not as claimed by the client. */
-    @Column(name = "image_content_type", length = 100)
-    private String imageContentType;
-
-    @Column(name = "image_size_bytes")
-    private Long imageSizeBytes;
 }
