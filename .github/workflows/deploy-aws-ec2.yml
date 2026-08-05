@@ -48,10 +48,23 @@ jobs:
       API_DOMAIN: ${{ inputs.api_domain || 'api.ggfix.in' }}
       CERTBOT_EMAIL: ${{ secrets.CERTBOT_EMAIL }}
       SKIP_TLS: ${{ inputs.skip_tls && '1' || '0' }}
+      # Which RDS the services talk to. Both resolve to empty unless the matching
+      # repository variables exist, and deploy-from-artifact.sh then falls back to
+      # its own ggfixservice defaults — so a deploy is pointed at a different
+      # database by setting two variables, with no commit and no code change, and
+      # moved back by deleting them.
+      DB_HOST: ${{ vars.DB_HOST }}
+      DB_NAME: ${{ vars.DB_NAME }}
       # RDS credential. Not defaulted in deploy-from-artifact.sh because this
       # repository is public; on a host that already has a .env the previous
       # value is reused, so this can be empty for redeploys.
-      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      #
+      # DB_PASSWORD_OVERRIDE goes with the variables above. Repointing at another
+      # database needs that database's password, and overwriting DB_PASSWORD to
+      # supply it would destroy the original: secrets are write-only, and the next
+      # deploy rewrites the copy in the EC2 .env too. A separate secret means the
+      # switch is undone by deleting it, with the original still intact.
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD_OVERRIDE || secrets.DB_PASSWORD }}
 
     steps:
       - name: Checkout source code
@@ -317,7 +330,7 @@ jobs:
             -p "$EC2_PORT" \
             -o StrictHostKeyChecking=yes \
             "$EC2_USER@$EC2_HOST" \
-            "API_DOMAIN='$API_DOMAIN' CERTBOT_EMAIL='${CERTBOT_EMAIL:-}' SKIP_TLS='$SKIP_TLS' DB_PASSWORD='${DB_PASSWORD:-}' bash -s" <<'REMOTE_SCRIPT'
+            "API_DOMAIN='$API_DOMAIN' CERTBOT_EMAIL='${CERTBOT_EMAIL:-}' SKIP_TLS='$SKIP_TLS' DB_HOST='${DB_HOST:-}' DB_NAME='${DB_NAME:-}' DB_PASSWORD='${DB_PASSWORD:-}' bash -s" <<'REMOTE_SCRIPT'
           set -euo pipefail
 
           DEPLOY_DIR="$HOME/ggfix-deploy"
