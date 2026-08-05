@@ -30,4 +30,11 @@ public interface MasterModelRepository extends JpaRepository<MasterModel, UUID> 
             + "SELECT 1 FROM jsonb_array_elements_text(m.model_number) AS e WHERE upper(e) = upper(:code))",
             nativeQuery = true)
     List<MasterModel> findByModelNumberContainingIgnoreCase(@Param("code") String code);
+
+    /**
+     * Name uniqueness within a brand, matching the uq_model_brand_name constraint.
+     * Derived from brand_id and name only — no new columns, so it is safe against the
+     * production schema as it stands.
+     */
+    boolean existsByBrandIdAndNameIgnoreCase(UUID brandId, String name);
 }
