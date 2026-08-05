@@ -72,6 +72,18 @@ ensure_env_file() {
   cloud_folder="$(read_env_value CLOUDINARY_FOLDER)"
   cloud_folder="${cloud_folder:-ggfix/master}"
 
+  # S3 media (media.ggfix.in). Read back from the existing .env first so a value set
+  # on the box survives — this heredoc REWRITES .env on every deploy, so anything not
+  # carried through here is silently lost and uploads start failing again.
+  # Credentials are deliberately absent: the SDK resolves them from the EC2 instance
+  # role, which needs s3:PutObject/s3:DeleteObject on the bucket.
+  aws_region="$(read_env_value AWS_REGION)"
+  aws_region="${aws_region:-ap-south-1}"
+  aws_bucket="$(read_env_value AWS_S3_BUCKET)"
+  aws_bucket="${aws_bucket:-ggfix-media-1762}"
+  aws_base_url="$(read_env_value AWS_S3_BASE_URL)"
+  aws_base_url="${aws_base_url:-https://media.ggfix.in}"
+
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
 DB_HOST=$RDS_DB_HOST
 DB_PORT=$RDS_DB_PORT
@@ -84,6 +96,9 @@ CLOUDINARY_CLOUD_NAME=$cloud_name
 CLOUDINARY_API_KEY=$cloud_key
 CLOUDINARY_API_SECRET=$cloud_secret
 CLOUDINARY_FOLDER=$cloud_folder
+AWS_REGION=$aws_region
+AWS_S3_BUCKET=$aws_bucket
+AWS_S3_BASE_URL=$aws_base_url
 JAVA_OPTS="-Xms64m -Xmx160m"
 SERVICES="$SERVICES_DEFAULT"
 EOF
