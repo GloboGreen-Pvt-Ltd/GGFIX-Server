@@ -54,6 +54,7 @@ public class SecurityConfig {
                         .requestMatchers("/master/device-categories/*/image").authenticated()
                         .requestMatchers("/master/brands/*/image").authenticated()
                         .requestMatchers("/master/banners/*/image").authenticated()
+                        .requestMatchers("/master/model-compatibility/*/image").authenticated()
                         .anyRequest().permitAll())
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();

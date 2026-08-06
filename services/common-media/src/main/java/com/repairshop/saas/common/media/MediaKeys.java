@@ -24,6 +24,9 @@ import java.util.UUID;
  *
  * Master taxonomy    master/categories/{slug}-{id}.{ext}
  *                    master/brands/{slug}-{id}.{ext}
+ *
+ * Part-box photo    master/model-compatibility/{box-no}-{id}.{ext}
+ *                    master/model-compatibility/a-12-9d3f7b10.jpg
  * </pre>
  *
  * The catalogue layout is the reason this is folder-shaped rather than a flat
@@ -44,6 +47,8 @@ public final class MediaKeys {
      */
     public static final String BANNER_ROOT = "banner";
     public static final String MASTER_BRANDS_ROOT = "master/brands";
+    /** Reference photos of the spare part held in each compatibility box. */
+    public static final String MASTER_COMPATIBILITY_ROOT = "master/model-compatibility";
 
     /**
      * Hex characters of randomness in each filename. Uniqueness is what stops
@@ -118,6 +123,18 @@ public final class MediaKeys {
     public static String masterBrandImageKey(String brandName, String extension) {
         return MASTER_BRANDS_ROOT + "/"
                 + uniqueName(Slugify.requireSlug(brandName, "brand"), extension);
+    }
+
+    /**
+     * Reference photo for a spare-part box: {@code master/model-compatibility/a-12-9d3f7b10.jpg}.
+     *
+     * Keyed on the box NUMBER rather than its name, because the number is unique
+     * (migration 79) and is how the shelf is labelled — the bucket then reads the
+     * way the shelf does.
+     */
+    public static String modelCompatibilityImageKey(String boxNo, String extension) {
+        return MASTER_COMPATIBILITY_ROOT + "/"
+                + uniqueName(Slugify.requireSlug(boxNo, "box no"), extension);
     }
 
     // ------------------------------------------------------------------ helpers --

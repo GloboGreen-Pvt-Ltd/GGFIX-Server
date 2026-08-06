@@ -139,4 +139,23 @@ public class ModelMediaController {
                                                                    @RequestParam("image") MultipartFile image) {
         return ResponseEntity.ok(taxonomyService.uploadBannerImage(id, image));
     }
+
+    /**
+     * Upload or replace the reference photo on a Model Compatibility box.
+     *
+     * <pre>
+     * POST /master/model-compatibility/{id}/image   (multipart/form-data)
+     *   image  file  (jpeg | png | webp)
+     * </pre>
+     *
+     * Lands at {@code master/model-compatibility/a-12-9d3f7b10.jpg} — keyed on the
+     * box number. The rest of the box's CRUD lives on
+     * {@link ModelCompatibilityController}; only the multipart upload is here, with
+     * the other S3-backed uploads.
+     */
+    @PostMapping(value = "/model-compatibility/{id}/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<TaxonomyImageResponse> uploadCompatibilityImage(@PathVariable UUID id,
+                                                                          @RequestParam("image") MultipartFile image) {
+        return ResponseEntity.ok(taxonomyService.uploadCompatibilityImage(id, image));
+    }
 }

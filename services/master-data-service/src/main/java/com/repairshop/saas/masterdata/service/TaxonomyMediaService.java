@@ -8,9 +8,11 @@ import com.repairshop.saas.masterdata.dto.TaxonomyImageResponse;
 import com.repairshop.saas.masterdata.entity.MasterBanner;
 import com.repairshop.saas.masterdata.entity.MasterBrand;
 import com.repairshop.saas.masterdata.entity.MasterDeviceCategory;
+import com.repairshop.saas.masterdata.entity.ModelCompatibility;
 import com.repairshop.saas.masterdata.repository.MasterBannerRepository;
 import com.repairshop.saas.masterdata.repository.MasterBrandRepository;
 import com.repairshop.saas.masterdata.repository.MasterDeviceCategoryRepository;
+import com.repairshop.saas.masterdata.repository.ModelCompatibilityRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -47,6 +49,7 @@ public class TaxonomyMediaService {
     private final MasterDeviceCategoryRepository categoryRepo;
     private final MasterBrandRepository brandRepo;
     private final MasterBannerRepository bannerRepo;
+    private final ModelCompatibilityRepository compatibilityRepo;
     private final MediaUploadValidator validator;
     private final S3StorageService storage;
     private final TransactionTemplate tx;
@@ -54,12 +57,14 @@ public class TaxonomyMediaService {
     public TaxonomyMediaService(MasterDeviceCategoryRepository categoryRepo,
                                 MasterBrandRepository brandRepo,
                                 MasterBannerRepository bannerRepo,
+                                ModelCompatibilityRepository compatibilityRepo,
                                 MediaUploadValidator validator,
                                 S3StorageService storage,
                                 TransactionTemplate tx) {
         this.categoryRepo = categoryRepo;
         this.brandRepo = brandRepo;
         this.bannerRepo = bannerRepo;
+        this.compatibilityRepo = compatibilityRepo;
         this.validator = validator;
         this.storage = storage;
         this.tx = tx;
@@ -151,6 +156,46 @@ public class TaxonomyMediaService {
             });
         } catch (RuntimeException e) {
             log.error("Banner {} update failed after upload; removing orphaned object {}", bannerId, key, e);
+            storage.deleteQuietly(key);
+            throw e;
+        }
+    }
+
+    /**
+     * Upload or replace the reference photo on a Model Compatibility box.
+     *
+     * Keyed on the box NUMBER — {@code master/model-compatibility/a-12-9d3f7b10.jpg} —
+     * which migration 79 keeps unique, so the bucket browses the way the shelf is
+     * labelled. Id-scoped like the others: the box has to be saved before its photo
+     * can be named, which is why the admin form uploads after the save rather than
+     * before it.
+     */
+    public TaxonomyImageResponse uploadCompatibilityImage(UUID compatibilityId, MultipartFile file) {
+        ModelCompatibility box = compatibilityRepo.findById(compatibilityId)
+                .orElseThrow(() -> new MediaValidationException(
+                        "No compatibility box with id " + compatibilityId + "."));
+        if (box.getBoxNo() == null || box.getBoxNo().isBlank()) {
+            throw new MediaValidationException(
+                    "This box has no Box No, so its image cannot be named. Set a Box No first.");
+        }
+
+        MediaUploadValidator.ValidatedUpload upload = validator.validateImage(file);
+        String key = MediaKeys.modelCompatibilityImageKey(box.getBoxNo(), upload.extension());
+        String url = storage.put(key, upload.bytes(), upload.contentType());
+
+        try {
+            return tx.execute(status -> {
+                ModelCompatibility row = compatibilityRepo.findById(compatibilityId).orElseThrow();
+                row.setReferenceImageUrl(url);
+                ModelCompatibility saved = compatibilityRepo.save(row);
+                log.info("Compatibility box {} image -> {}", compatibilityId, key);
+                return new TaxonomyImageResponse(saved.getId(), saved.getBoxNo(), key,
+                        saved.getReferenceImageUrl(),
+                        upload.originalName(), upload.contentType(), upload.size());
+            });
+        } catch (RuntimeException e) {
+            log.error("Compatibility box {} update failed after upload; removing orphaned object {}",
+                    compatibilityId, key, e);
             storage.deleteQuietly(key);
             throw e;
         }
