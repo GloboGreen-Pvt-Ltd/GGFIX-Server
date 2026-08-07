@@ -34,6 +34,17 @@ public class ModelCompatibility {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    /**
+     * Which part type this box holds -> model_compatibility_types.id. Drives the
+     * admin sidebar's child entries.
+     *
+     * Nullable: boxes created before migration 80 have no type, and guessing one
+     * would be worse than leaving it unset. An untyped box still shows under
+     * "All" so it never vanishes from the screen.
+     */
+    @Column(name = "part_type_id")
+    private UUID partTypeId;
+
     /** Shelf label, e.g. "A-12". Unique case-insensitively (see migration 79). */
     @Column(name = "box_no", nullable = false, length = 60)
     private String boxNo;

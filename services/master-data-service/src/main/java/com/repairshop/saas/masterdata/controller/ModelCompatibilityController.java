@@ -5,9 +5,11 @@ import com.repairshop.saas.masterdata.entity.CompatibleModelRef;
 import com.repairshop.saas.masterdata.entity.MasterBrand;
 import com.repairshop.saas.masterdata.entity.MasterModel;
 import com.repairshop.saas.masterdata.entity.ModelCompatibility;
+import com.repairshop.saas.masterdata.entity.ModelCompatibilityType;
 import com.repairshop.saas.masterdata.repository.MasterBrandRepository;
 import com.repairshop.saas.masterdata.repository.MasterModelRepository;
 import com.repairshop.saas.masterdata.repository.ModelCompatibilityRepository;
+import com.repairshop.saas.masterdata.repository.ModelCompatibilityTypeRepository;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -41,16 +43,116 @@ import java.util.stream.Collectors;
 public class ModelCompatibilityController {
 
     private final ModelCompatibilityRepository repo;
+    private final ModelCompatibilityTypeRepository typeRepo;
     private final MasterModelRepository modelRepo;
     private final MasterBrandRepository brandRepo;
 
     public ModelCompatibilityController(ModelCompatibilityRepository repo,
+                                        ModelCompatibilityTypeRepository typeRepo,
                                         MasterModelRepository modelRepo,
                                         MasterBrandRepository brandRepo) {
         this.repo = repo;
+        this.typeRepo = typeRepo;
         this.modelRepo = modelRepo;
         this.brandRepo = brandRepo;
     }
+
+    /* ------------------------------------------------------- part types -- */
+
+    /**
+     * The part types the admin sidebar builds its child entries from. Ordered by
+     * sort_order then name, so the menu order is data, not a code constant.
+     */
+    @GetMapping("/model-compatibility-types")
+    public ResponseEntity<List<ModelCompatibilityType>> listTypes() {
+        return ResponseEntity.ok(typeRepo.findAllByOrderBySortOrderAscNameAsc());
+    }
+
+    @PostMapping("/model-compatibility-types")
+    public ResponseEntity<?> createType(@RequestBody ModelCompatibilityType req) {
+        String name = trimToNull(req.getName());
+        if (name == null) return badRequest("Type name is required.");
+
+        Optional<ModelCompatibilityType> clash = typeRepo.findByNameIgnoreCase(name);
+        if (clash.isPresent()) return conflict("A part type named \"" + name + "\" already exists.");
+
+        String slug = uniqueSlug(trimToNull(req.getSlug()) != null ? req.getSlug() : name, null);
+        ModelCompatibilityType e = ModelCompatibilityType.builder()
+                .name(name)
+                .slug(slug)
+                .sortOrder(req.getSortOrder() == null ? nextSortOrder() : req.getSortOrder())
+                .isActive(req.getIsActive() == null || req.getIsActive())
+                .build();
+        return ResponseEntity.status(HttpStatus.CREATED).body(typeRepo.save(e));
+    }
+
+    @PutMapping("/model-compatibility-types/{id}")
+    public ResponseEntity<?> updateType(@PathVariable UUID id, @RequestBody ModelCompatibilityType req) {
+        Optional<ModelCompatibilityType> found = typeRepo.findById(id);
+        if (found.isEmpty()) return ResponseEntity.notFound().build();
+        ModelCompatibilityType e = found.get();
+
+        if (req.getName() != null) {
+            String name = trimToNull(req.getName());
+            if (name == null) return badRequest("Type name cannot be blank.");
+            Optional<ModelCompatibilityType> clash = typeRepo.findByNameIgnoreCase(name);
+            if (clash.isPresent() && !clash.get().getId().equals(id)) {
+                return conflict("A part type named \"" + name + "\" already exists.");
+            }
+            // The slug follows a rename, so the sidebar link keeps matching the
+            // label. Bookmarks to the old slug break — acceptable for an internal
+            // admin, and the alternative is a menu whose URL contradicts its text.
+            e.setName(name);
+            e.setSlug(uniqueSlug(name, id));
+        }
+        if (req.getSortOrder() != null) e.setSortOrder(req.getSortOrder());
+        if (req.getIsActive() != null) e.setIsActive(req.getIsActive());
+        return ResponseEntity.ok(typeRepo.save(e));
+    }
+
+    /**
+     * Refuses while boxes still point at the type. Deleting anyway would leave
+     * those boxes reachable only from "All", which reads as data loss.
+     */
+    @DeleteMapping("/model-compatibility-types/{id}")
+    public ResponseEntity<?> deleteType(@PathVariable UUID id) {
+        if (!typeRepo.existsById(id)) return ResponseEntity.notFound().build();
+        long inUse = repo.countByPartTypeId(id);
+        if (inUse > 0) {
+            return conflict("That type still holds " + inUse + " box" + (inUse == 1 ? "" : "es")
+                    + ". Move them to another type first.");
+        }
+        typeRepo.deleteById(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    private int nextSortOrder() {
+        return typeRepo.findAll().stream()
+                .map(ModelCompatibilityType::getSortOrder)
+                .filter(java.util.Objects::nonNull)
+                .max(Integer::compareTo)
+                .orElse(0) + 10;
+    }
+
+    /**
+     * Slugify, then de-duplicate with a numeric suffix. Two types named closely
+     * enough to collide ("Mobile Case" / "Mobile-Case") would otherwise trip the
+     * unique index with a 500 instead of just being filed as mobile-case-2.
+     */
+    private String uniqueSlug(String source, UUID selfId) {
+        String base = source == null ? "" : source.trim().toLowerCase()
+                .replaceAll("[^a-z0-9]+", "-").replaceAll("^-+|-+$", "");
+        if (base.isBlank()) base = "type";
+        String candidate = base;
+        for (int n = 2; n < 1000; n++) {
+            Optional<ModelCompatibilityType> hit = typeRepo.findBySlugIgnoreCase(candidate);
+            if (hit.isEmpty() || (selfId != null && hit.get().getId().equals(selfId))) return candidate;
+            candidate = base + "-" + n;
+        }
+        return base + "-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    /* ------------------------------------------------------------ boxes -- */
 
     /**
      * All boxes, newest ordering rules first: sort_order then box number.
@@ -68,9 +170,25 @@ public class ModelCompatibilityController {
     public ResponseEntity<List<ModelCompatibility>> list(
             @RequestParam(value = "modelId", required = false) UUID modelId,
             @RequestParam(value = "brandId", required = false) UUID brandId,
+            @RequestParam(value = "typeId", required = false) UUID typeId,
+            @RequestParam(value = "type", required = false) String typeSlug,
             @RequestParam(value = "activeOnly", required = false) Boolean activeOnly) {
 
         List<ModelCompatibility> rows = repo.findAllByOrderBySortOrderAscBoxNoAsc();
+
+        // The admin sidebar links by slug (?type=tempered-glass) so the URL reads;
+        // an unknown slug filters to nothing rather than silently listing every
+        // box, which would look like the menu entry did nothing.
+        UUID wantedType = typeId;
+        if (wantedType == null && typeSlug != null && !typeSlug.isBlank()) {
+            Optional<ModelCompatibilityType> t = typeRepo.findBySlugIgnoreCase(typeSlug.trim());
+            if (t.isEmpty()) return ResponseEntity.ok(List.of());
+            wantedType = t.get().getId();
+        }
+        if (wantedType != null) {
+            final UUID want = wantedType;
+            rows = rows.stream().filter(r -> want.equals(r.getPartTypeId())).toList();
+        }
 
         if (Boolean.TRUE.equals(activeOnly)) {
             rows = rows.stream().filter(r -> !Boolean.FALSE.equals(r.getIsActive())).toList();
@@ -111,7 +229,12 @@ public class ModelCompatibilityController {
             return badRequest(e.getMessage());
         }
 
+        if (req.getPartTypeId() != null && !typeRepo.existsById(req.getPartTypeId())) {
+            return badRequest("No part type exists for id " + req.getPartTypeId() + ".");
+        }
+
         ModelCompatibility e = ModelCompatibility.builder()
+                .partTypeId(req.getPartTypeId())
                 .boxNo(boxNo)
                 .boxName(boxName)
                 .models(models)
@@ -155,6 +278,12 @@ public class ModelCompatibilityController {
             } catch (UnknownModelException ex) {
                 return badRequest(ex.getMessage());
             }
+        }
+        if (req.getPartTypeId() != null) {
+            if (!typeRepo.existsById(req.getPartTypeId())) {
+                return badRequest("No part type exists for id " + req.getPartTypeId() + ".");
+            }
+            e.setPartTypeId(req.getPartTypeId());
         }
         if (req.getReferenceImageUrl() != null) e.setReferenceImageUrl(trimToNull(req.getReferenceImageUrl()));
         if (req.getNotes() != null) e.setNotes(trimToNull(req.getNotes()));

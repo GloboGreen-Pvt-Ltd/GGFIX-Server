@@ -18,4 +18,7 @@ public interface ModelCompatibilityRepository extends JpaRepository<ModelCompati
      * constraint-violation 500.
      */
     Optional<ModelCompatibility> findByBoxNoIgnoreCase(String boxNo);
+
+    /** Guards type deletion: a type still holding boxes is refused, not silently orphaned. */
+    long countByPartTypeId(UUID partTypeId);
 }

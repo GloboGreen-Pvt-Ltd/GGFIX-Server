@@ -21,6 +21,9 @@ import java.util.UUID;
 @Setter
 public class ModelCompatibilityRequest {
 
+    /** model_compatibility_types.id. Null leaves the box untyped. */
+    private UUID partTypeId;
+
     private String boxNo;
 
     private String boxName;
