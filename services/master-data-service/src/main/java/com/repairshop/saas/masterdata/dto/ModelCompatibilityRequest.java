@@ -24,6 +24,16 @@ public class ModelCompatibilityRequest {
     /** model_compatibility_types.id. Null leaves the box untyped. */
     private UUID partTypeId;
 
+    /**
+     * Explicitly move a box back to "no type".
+     *
+     * Needed because null means "leave as is" on every other field, and it has
+     * to keep meaning that here: the admin's Active toggle sends {"isActive":…}
+     * alone, and treating its absent partTypeId as "clear" would silently strip
+     * the type off a box every time someone switched it off.
+     */
+    private Boolean clearPartType;
+
     private String boxNo;
 
     private String boxName;

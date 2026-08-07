@@ -279,7 +279,9 @@ public class ModelCompatibilityController {
                 return badRequest(ex.getMessage());
             }
         }
-        if (req.getPartTypeId() != null) {
+        if (Boolean.TRUE.equals(req.getClearPartType())) {
+            e.setPartTypeId(null);
+        } else if (req.getPartTypeId() != null) {
             if (!typeRepo.existsById(req.getPartTypeId())) {
                 return badRequest("No part type exists for id " + req.getPartTypeId() + ".");
             }
