@@ -179,15 +179,32 @@ public class ModelCompatibilityController {
         // The admin sidebar links by slug (?type=tempered-glass) so the URL reads;
         // an unknown slug filters to nothing rather than silently listing every
         // box, which would look like the menu entry did nothing.
-        UUID wantedType = typeId;
-        if (wantedType == null && typeSlug != null && !typeSlug.isBlank()) {
-            Optional<ModelCompatibilityType> t = typeRepo.findBySlugIgnoreCase(typeSlug.trim());
-            if (t.isEmpty()) return ResponseEntity.ok(List.of());
-            wantedType = t.get().getId();
+        boolean typeAsked = typeId != null || (typeSlug != null && !typeSlug.isBlank());
+        ModelCompatibilityType wanted = null;
+        if (typeId != null) {
+            wanted = typeRepo.findById(typeId).orElse(null);
+        } else if (typeSlug != null && !typeSlug.isBlank()) {
+            wanted = typeRepo.findBySlugIgnoreCase(typeSlug.trim()).orElse(null);
         }
-        if (wantedType != null) {
-            final UUID want = wantedType;
-            rows = rows.stream().filter(r -> want.equals(r.getPartTypeId())).toList();
+        if (typeAsked && wanted == null) return ResponseEntity.ok(List.of());
+
+        if (wanted != null) {
+            final UUID wantId = wanted.getId();
+            final String wantName = String.valueOf(wanted.getName()).trim();
+            rows = rows.stream()
+                    .filter(r -> wantId.equals(r.getPartTypeId())
+                            // Name fallback: a box left untyped but NAMED for the
+                            // type — "Display", "Charge Connector" — still lists
+                            // under it. The shop names boxes after what they hold,
+                            // so requiring the dropdown as well would hide a box
+                            // that is already, obviously, filed correctly.
+                            //
+                            // Only for untyped boxes: an explicit part type always
+                            // wins, so deliberately filing a box named "Display"
+                            // under Connector is never overridden by its name.
+                            || (r.getPartTypeId() == null
+                                && wantName.equalsIgnoreCase(String.valueOf(r.getBoxName()).trim())))
+                    .toList();
         }
 
         if (Boolean.TRUE.equals(activeOnly)) {
