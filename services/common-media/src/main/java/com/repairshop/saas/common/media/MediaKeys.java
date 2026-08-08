@@ -147,10 +147,13 @@ public final class MediaKeys {
      * to "file" rather than producing a key that starts with a dash.
      */
     public static String uploadKey(String folder, String slot, String extension) {
+        // slugify() returns NULL for anything that slugs to nothing — including a
+        // null or blank input. Most callers send no slot at all, so both results
+        // have to be treated as absent rather than dereferenced.
         String dir = Slugify.slugify(folder);
         String stem = Slugify.slugify(slot);
-        if (stem.isBlank()) stem = "file";
-        return (dir.isBlank() ? "" : dir + "/") + uniqueName(stem, extension);
+        if (stem == null) stem = "file";
+        return (dir == null ? "" : dir + "/") + uniqueName(stem, extension);
     }
 
     // ------------------------------------------------------------------ helpers --
