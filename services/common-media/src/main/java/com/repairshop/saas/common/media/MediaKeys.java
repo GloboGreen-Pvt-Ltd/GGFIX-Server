@@ -137,6 +137,22 @@ public final class MediaKeys {
                 + uniqueName(Slugify.requireSlug(boxNo, "box no"), extension);
     }
 
+    /**
+     * Generic upload key for the shared /media/upload endpoint:
+     * {@code Devicefiles/front-3f9c11ab.jpg}.
+     *
+     * The caller names a FOLDER and a SLOT, never a path — the same rule as every
+     * other key here. Both are slugified, so a folder of "../../etc" or a slot
+     * with a slash cannot escape the prefix it was given. A blank slot falls back
+     * to "file" rather than producing a key that starts with a dash.
+     */
+    public static String uploadKey(String folder, String slot, String extension) {
+        String dir = Slugify.slugify(folder);
+        String stem = Slugify.slugify(slot);
+        if (stem.isBlank()) stem = "file";
+        return (dir.isBlank() ? "" : dir + "/") + uniqueName(stem, extension);
+    }
+
     // ------------------------------------------------------------------ helpers --
 
     private static String uniqueName(String stem, String extension) {

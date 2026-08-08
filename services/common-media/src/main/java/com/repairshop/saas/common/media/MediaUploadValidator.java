@@ -27,6 +27,14 @@ public class MediaUploadValidator {
             EnumSet.of(MediaFileType.JPEG, MediaFileType.PNG, MediaFileType.WEBP);
     private static final Set<MediaFileType> DOCUMENTS =
             EnumSet.of(MediaFileType.JPEG, MediaFileType.PNG, MediaFileType.WEBP, MediaFileType.PDF);
+    /**
+     * The generic /media/upload set: artwork PLUS what a booking captures — a
+     * device walk-around video and a complaint voice note. PDF is deliberately
+     * excluded; nothing uploads certificates through that endpoint.
+     */
+    private static final Set<MediaFileType> MEDIA =
+            EnumSet.of(MediaFileType.JPEG, MediaFileType.PNG, MediaFileType.WEBP,
+                    MediaFileType.MP4, MediaFileType.WEBM, MediaFileType.M4A, MediaFileType.MP3);
 
     private final MediaProperties props;
 
@@ -64,6 +72,17 @@ public class MediaUploadValidator {
     /** KYC and certificates: the image types plus PDF, at the larger document limit. */
     public ValidatedUpload validateDocument(MultipartFile file) {
         return validate(file, DOCUMENTS, props.getMaxDocumentBytes());
+    }
+
+    /**
+     * Device files and voice notes.
+     *
+     * Sized on the LARGER of the two limits: a few seconds of phone video dwarfs
+     * a photo, and the servlet's own multipart ceiling still caps the request
+     * whatever this allows.
+     */
+    public ValidatedUpload validateMedia(MultipartFile file) {
+        return validate(file, MEDIA, Math.max(props.getMaxImageBytes(), props.getMaxDocumentBytes()));
     }
 
     private ValidatedUpload validate(MultipartFile file, Set<MediaFileType> allowed, long maxBytes) {
