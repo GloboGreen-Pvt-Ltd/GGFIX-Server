@@ -323,6 +323,11 @@ public class TicketService {
                     "RE_ESTIMATED_CONFIRMED",
                     "Service Re-estimated",
                     "SHOP");
+            // The event alone only feeds the Service History rail. The owner's
+            // Re-Estimated list and the card badge both read ticket.status, so
+            // without this the booking stayed "Service Accepted" (= CREATED) and
+            // the Re-Estimated tile counted 0 while the timeline said otherwise.
+            markReEstimated(ticket);
         }
         // Shop-side approval flip (owner ticked "Customer Repair Approval" in
         // the edit flow): light up CUSTOMER_APPROVED. Customer-side approval
@@ -670,6 +675,39 @@ public class TicketService {
         if (currentIdx >= 0 && targetIdx >= 0 && targetIdx < currentIdx) return;
         t.setStatus(target);
         ticketRepository.save(t);
+        customerOrderMirrorService.mirrorOnUpsert(t);
+    }
+
+    /**
+     * Move a re-estimated ticket to QUOTED.
+     *
+     * Deliberately NOT routed through advanceTicketStatusForWorkCode: that one
+     * is forward-only and consults the admin-managed master work-status table,
+     * neither of which fits here. A re-estimate is a re-quote — the price the
+     * customer agreed to no longer holds, which is why update() already clears
+     * customerApproval and re-emits WAITING_FOR_CUSTOMER_APPROVAL on a re-edit
+     * after approval. So APPROVED / IN_REPAIR are walked BACK to QUOTED rather
+     * than left alone; otherwise the very bookings most in need of re-approval
+     * would be the ones missing from the owner's Re-Estimated list.
+     *
+     * READY and beyond are left untouched: past that point the repair is done
+     * and a price change is a billing adjustment, not a re-quote. Demoting
+     * would unwind the invoice / handover chain that LIFECYCLE_ORDER gates.
+     */
+    private void markReEstimated(Ticket t) {
+        String current = t.getStatus() == null ? "CREATED" : t.getStatus().trim().toUpperCase();
+        if (current.isBlank()) current = "CREATED";
+        if ("QUOTED".equals(current)) return;
+        // Terminal — a cancelled or returned job is not back in the queue.
+        if ("CANCELLED".equals(current) || "RETURNED".equals(current)) return;
+        int currentIdx = LIFECYCLE_ORDER.indexOf(current);
+        int repairIdx = LIFECYCLE_ORDER.indexOf("IN_REPAIR");
+        // Unknown status → leave it be rather than guess where it sits.
+        if (currentIdx < 0 || currentIdx > repairIdx) return;
+        t.setStatus("QUOTED");
+        ticketRepository.save(t);
+        // Re-mirror: update() already mirrored above with the pre-re-estimate
+        // status, so repair_bookings.status would otherwise stay behind.
         customerOrderMirrorService.mirrorOnUpsert(t);
     }
 
