@@ -37,4 +37,13 @@ public interface MasterModelRepository extends JpaRepository<MasterModel, UUID> 
      * production schema as it stands.
      */
     boolean existsByBrandIdAndNameIgnoreCase(UUID brandId, String name);
+
+    /**
+     * How many models still point at one image URL. Read after a replacement commits,
+     * to decide whether the superseded object can be deleted: an upload produces a
+     * unique key every time, but image_url is also editable by hand on the admin
+     * form, so two rows CAN hold the same URL. A non-zero count means deleting the
+     * object would break a row that is still using it.
+     */
+    long countByImageUrl(String imageUrl);
 }

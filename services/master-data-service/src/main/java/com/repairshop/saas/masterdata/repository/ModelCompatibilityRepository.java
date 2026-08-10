@@ -21,4 +21,10 @@ public interface ModelCompatibilityRepository extends JpaRepository<ModelCompati
 
     /** Guards type deletion: a type still holding boxes is refused, not silently orphaned. */
     long countByPartTypeId(UUID partTypeId);
+
+    /**
+     * Boxes still using one reference photo — the guard before deleting a superseded
+     * one. Two boxes holding the same part legitimately share a photo.
+     */
+    long countByReferenceImageUrl(String referenceImageUrl);
 }

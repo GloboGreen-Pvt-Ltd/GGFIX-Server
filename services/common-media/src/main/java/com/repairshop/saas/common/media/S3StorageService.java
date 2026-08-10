@@ -101,17 +101,46 @@ public class S3StorageService {
      * letting a cleanup failure surface would turn a successful save into an error
      * response, or mask the original exception being propagated. A leaked object is
      * logged at WARN and is recoverable by prefix sweep; a lost update is not.
+     *
+     * @return true when the delete was issued and accepted. Callers on the rollback
+     *         path ignore this; the replacement path reports it to the admin, which
+     *         is the difference between "the old image is gone" and "the old image
+     *         is still sitting in the bucket".
      */
-    public void deleteQuietly(String key) {
+    public boolean deleteQuietly(String key) {
         if (key == null || key.isBlank() || !isEnabled()) {
-            return;
+            return false;
         }
         try {
             delete(key);
+            return true;
         } catch (RuntimeException e) {
             log.warn("Orphaned S3 object s3://{}/{} — delete failed and was swallowed: {}",
                     props.getBucket(), key, e.getMessage());
+            return false;
         }
+    }
+
+    /**
+     * Remove the object a replacement superseded, given the URL the record used to
+     * hold and the key it holds now.
+     *
+     * Call this only AFTER the new URL is committed. Two things have to be true for
+     * anything to be deleted, and both are checked here rather than at each call
+     * site: the old URL must resolve to a key in our own bucket
+     * ({@link MediaProperties#keyForPublicUrl}), and it must not be the key just
+     * written — re-uploading the identical object under the same key would otherwise
+     * delete the live image. Whether the key belongs to THIS kind of record is the
+     * caller's check, since only it knows the expected layout.
+     *
+     * @return true when an object was actually removed
+     */
+    public boolean deleteSupersededQuietly(String previousUrl, String currentKey) {
+        String previousKey = props.keyForPublicUrl(previousUrl);
+        if (previousKey == null || previousKey.equals(currentKey)) {
+            return false;
+        }
+        return deleteQuietly(previousKey);
     }
 
     private void requireEnabled() {

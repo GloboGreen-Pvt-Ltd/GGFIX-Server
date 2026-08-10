@@ -150,7 +150,8 @@ public class ModelMediaService {
             throw e;
         }
 
-        return toResponse(saved, folderKey, imageKey, image);
+        // A create has no previous image, so there is never anything to clean up.
+        return toResponse(saved, folderKey, imageKey, image, null, false);
     }
 
     // ----------------------------------------------------------------- replace --
@@ -160,7 +161,8 @@ public class ModelMediaService {
      *
      * The previous object is removed only once the new key is committed, so an
      * interrupted replacement degrades to "still showing the old image" rather than
-     * to a model with no image at all.
+     * to a model with no image at all. See {@link #removeSupersededImage} for what
+     * has to hold before anything is deleted.
      */
     public ModelImageResponse replaceImage(UUID modelId, MultipartFile file) {
         MediaUploadValidator.ValidatedUpload image = validator.validateImage(file);
@@ -195,6 +197,9 @@ public class ModelMediaService {
         String newKey = MediaKeys.modelImageKey(folderKey, image.extension());
         String newUrl = storage.put(newKey, image.bytes(), image.contentType());
 
+        // Read before the update, because the row is about to stop pointing at it.
+        String previousUrl = existing.getImageUrl();
+
         MasterModel saved;
         try {
             saved = tx.execute(status -> {
@@ -212,14 +217,46 @@ public class ModelMediaService {
             throw e;
         }
 
-        /*
-         * The superseded object is deliberately NOT deleted. Without image_key stored
-         * we cannot prove which key the old URL pointed at, and guessing from the URL
-         * risks deleting a live object. A stale object costs a few KB; a wrong delete
-         * breaks a product image.
-         */
+        boolean previousRemoved = removeSupersededImage(previousUrl, newKey);
 
-        return toResponse(saved, folderKey, newKey, image);
+        return toResponse(saved, folderKey, newKey, image, previousUrl, previousRemoved);
+    }
+
+    /**
+     * Delete the object the replacement superseded, strictly after the commit.
+     *
+     * This used to be left in the bucket, on the grounds that image_key is not stored
+     * so the old key could not be proven. It can: the stored URL is composed from the
+     * key by {@link com.repairshop.saas.common.media.MediaProperties#publicUrl}, so
+     * {@code keyForPublicUrl} inverts it exactly — a data URI or a Cloudinary link
+     * resolves to nothing and is left alone. Two further conditions before anything
+     * is removed, because a wrong delete breaks a live product image:
+     *
+     * <ul>
+     *   <li>the key must have the catalogue shape, so a hand-pasted URL pointing at a
+     *       category tile or a banner cannot take that other record's image with it;</li>
+     *   <li>no other model may still reference it — uploads always mint a unique key,
+     *       but image_url is editable by hand on the admin form, so sharing is possible.</li>
+     * </ul>
+     *
+     * Failure here is swallowed: the replacement has already succeeded, and turning a
+     * saved model into an error response over a leaked object would be the worse
+     * outcome. The result is reported to the admin instead.
+     */
+    private boolean removeSupersededImage(String previousUrl, String newKey) {
+        String previousKey = props.keyForPublicUrl(previousUrl);
+        if (previousKey == null || previousKey.equals(newKey)) {
+            return false;
+        }
+        if (!MediaKeys.isModelImageKey(previousKey)) {
+            log.info("Keeping {} — not a model image key, so it may belong to another record", previousKey);
+            return false;
+        }
+        if (modelRepo.countByImageUrl(previousUrl) > 0) {
+            log.info("Keeping {} — still referenced by another model", previousKey);
+            return false;
+        }
+        return storage.deleteSupersededQuietly(previousUrl, newKey);
     }
 
     // ----------------------------------------------------------------- preview --
@@ -303,7 +340,8 @@ public class ModelMediaService {
      * landed. imageUrl is the persisted value and the one clients actually read.
      */
     private ModelImageResponse toResponse(MasterModel model, String folderKey, String imageKey,
-                                          MediaUploadValidator.ValidatedUpload upload) {
+                                          MediaUploadValidator.ValidatedUpload upload,
+                                          String previousUrl, boolean previousRemoved) {
         return new ModelImageResponse(
                 model.getId(),
                 model.getName(),
@@ -313,6 +351,8 @@ public class ModelMediaService {
                 model.getImageUrl(),
                 upload.originalName(),
                 upload.contentType(),
-                upload.size());
+                upload.size(),
+                previousUrl,
+                previousRemoved);
     }
 }

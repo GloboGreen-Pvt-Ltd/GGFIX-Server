@@ -1,6 +1,7 @@
 package com.repairshop.saas.masterdata.service;
 
 import com.repairshop.saas.common.media.MediaKeys;
+import com.repairshop.saas.common.media.MediaProperties;
 import com.repairshop.saas.common.media.MediaUploadValidator;
 import com.repairshop.saas.common.media.MediaValidationException;
 import com.repairshop.saas.common.media.S3StorageService;
@@ -20,6 +21,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.UUID;
+import java.util.function.LongSupplier;
 
 /**
  * Category and brand artwork on media.ggfix.in.
@@ -52,6 +54,8 @@ public class TaxonomyMediaService {
     private final ModelCompatibilityRepository compatibilityRepo;
     private final MediaUploadValidator validator;
     private final S3StorageService storage;
+    /** Only for {@link MediaProperties#keyForPublicUrl} — resolving a stored URL back to its key. */
+    private final MediaProperties props;
     private final TransactionTemplate tx;
 
     public TaxonomyMediaService(MasterDeviceCategoryRepository categoryRepo,
@@ -60,6 +64,7 @@ public class TaxonomyMediaService {
                                 ModelCompatibilityRepository compatibilityRepo,
                                 MediaUploadValidator validator,
                                 S3StorageService storage,
+                                MediaProperties props,
                                 TransactionTemplate tx) {
         this.categoryRepo = categoryRepo;
         this.brandRepo = brandRepo;
@@ -67,6 +72,7 @@ public class TaxonomyMediaService {
         this.compatibilityRepo = compatibilityRepo;
         this.validator = validator;
         this.storage = storage;
+        this.props = props;
         this.tx = tx;
     }
 
@@ -78,25 +84,33 @@ public class TaxonomyMediaService {
         MediaUploadValidator.ValidatedUpload upload = validator.validateImage(file);
         String key = MediaKeys.masterCategoryImageKey(category.getName(), upload.extension());
 
+        // Read before the update, because the row is about to stop pointing at it.
+        String previousUrl = category.getImageUrl();
+
         // Upload before the update: an unreferenced object is sweepable, whereas a row
         // pointing at a missing key is a broken tile on the customer Home screen.
         String url = storage.put(key, upload.bytes(), upload.contentType());
 
+        MasterDeviceCategory saved;
         try {
-            return tx.execute(status -> {
+            saved = tx.execute(status -> {
                 MasterDeviceCategory row = categoryRepo.findById(categoryId).orElseThrow();
                 row.setImageUrl(url);
                 row.setImageBase64(null);
-                MasterDeviceCategory saved = categoryRepo.save(row);
+                MasterDeviceCategory updated = categoryRepo.save(row);
                 log.info("Category {} image -> {}", categoryId, key);
-                return new TaxonomyImageResponse(saved.getId(), saved.getName(), key, saved.getImageUrl(),
-                        upload.originalName(), upload.contentType(), upload.size());
+                return updated;
             });
         } catch (RuntimeException e) {
             log.error("Category {} update failed after upload; removing orphaned object {}", categoryId, key, e);
             storage.deleteQuietly(key);
             throw e;
         }
+
+        boolean previousRemoved = removeSuperseded(previousUrl, key, MediaKeys.MASTER_CATEGORIES_ROOT,
+                () -> categoryRepo.countByImageUrl(previousUrl));
+        return new TaxonomyImageResponse(saved.getId(), saved.getName(), key, saved.getImageUrl(),
+                upload.originalName(), upload.contentType(), upload.size(), previousUrl, previousRemoved);
     }
 
     /** Upload or replace a brand logo. */
@@ -106,23 +120,29 @@ public class TaxonomyMediaService {
 
         MediaUploadValidator.ValidatedUpload upload = validator.validateImage(file);
         String key = MediaKeys.masterBrandImageKey(brand.getName(), upload.extension());
+        String previousUrl = brand.getImageUrl();
         String url = storage.put(key, upload.bytes(), upload.contentType());
 
+        MasterBrand saved;
         try {
-            return tx.execute(status -> {
+            saved = tx.execute(status -> {
                 MasterBrand row = brandRepo.findById(brandId).orElseThrow();
                 row.setImageUrl(url);
                 row.setImageBase64(null);
-                MasterBrand saved = brandRepo.save(row);
+                MasterBrand updated = brandRepo.save(row);
                 log.info("Brand {} image -> {}", brandId, key);
-                return new TaxonomyImageResponse(saved.getId(), saved.getName(), key, saved.getImageUrl(),
-                        upload.originalName(), upload.contentType(), upload.size());
+                return updated;
             });
         } catch (RuntimeException e) {
             log.error("Brand {} update failed after upload; removing orphaned object {}", brandId, key, e);
             storage.deleteQuietly(key);
             throw e;
         }
+
+        boolean previousRemoved = removeSuperseded(previousUrl, key, MediaKeys.MASTER_BRANDS_ROOT,
+                () -> brandRepo.countByImageUrl(previousUrl));
+        return new TaxonomyImageResponse(saved.getId(), saved.getName(), key, saved.getImageUrl(),
+                upload.originalName(), upload.contentType(), upload.size(), previousUrl, previousRemoved);
     }
 
     /**
@@ -142,23 +162,29 @@ public class TaxonomyMediaService {
 
         MediaUploadValidator.ValidatedUpload upload = validator.validateImage(file);
         String key = MediaKeys.bannerImageKey(banner.getTitle(), upload.extension());
+        String previousUrl = banner.getImageUrl();
         String url = storage.put(key, upload.bytes(), upload.contentType());
 
+        MasterBanner saved;
         try {
-            return tx.execute(status -> {
+            saved = tx.execute(status -> {
                 MasterBanner row = bannerRepo.findById(bannerId).orElseThrow();
                 row.setImageUrl(url);
                 row.setImageBase64(null);
-                MasterBanner saved = bannerRepo.save(row);
+                MasterBanner updated = bannerRepo.save(row);
                 log.info("Banner {} image -> {}", bannerId, key);
-                return new TaxonomyImageResponse(saved.getId(), saved.getTitle(), key, saved.getImageUrl(),
-                        upload.originalName(), upload.contentType(), upload.size());
+                return updated;
             });
         } catch (RuntimeException e) {
             log.error("Banner {} update failed after upload; removing orphaned object {}", bannerId, key, e);
             storage.deleteQuietly(key);
             throw e;
         }
+
+        boolean previousRemoved = removeSuperseded(previousUrl, key, MediaKeys.BANNER_ROOT,
+                () -> bannerRepo.countByImageUrl(previousUrl));
+        return new TaxonomyImageResponse(saved.getId(), saved.getTitle(), key, saved.getImageUrl(),
+                upload.originalName(), upload.contentType(), upload.size(), previousUrl, previousRemoved);
     }
 
     /**
@@ -181,17 +207,17 @@ public class TaxonomyMediaService {
 
         MediaUploadValidator.ValidatedUpload upload = validator.validateImage(file);
         String key = MediaKeys.modelCompatibilityImageKey(box.getBoxNo(), upload.extension());
+        String previousUrl = box.getReferenceImageUrl();
         String url = storage.put(key, upload.bytes(), upload.contentType());
 
+        ModelCompatibility saved;
         try {
-            return tx.execute(status -> {
+            saved = tx.execute(status -> {
                 ModelCompatibility row = compatibilityRepo.findById(compatibilityId).orElseThrow();
                 row.setReferenceImageUrl(url);
-                ModelCompatibility saved = compatibilityRepo.save(row);
+                ModelCompatibility updated = compatibilityRepo.save(row);
                 log.info("Compatibility box {} image -> {}", compatibilityId, key);
-                return new TaxonomyImageResponse(saved.getId(), saved.getBoxNo(), key,
-                        saved.getReferenceImageUrl(),
-                        upload.originalName(), upload.contentType(), upload.size());
+                return updated;
             });
         } catch (RuntimeException e) {
             log.error("Compatibility box {} update failed after upload; removing orphaned object {}",
@@ -199,13 +225,55 @@ public class TaxonomyMediaService {
             storage.deleteQuietly(key);
             throw e;
         }
+
+        boolean previousRemoved = removeSuperseded(previousUrl, key, MediaKeys.MASTER_COMPATIBILITY_ROOT,
+                () -> compatibilityRepo.countByReferenceImageUrl(previousUrl));
+        return new TaxonomyImageResponse(saved.getId(), saved.getBoxNo(), key, saved.getReferenceImageUrl(),
+                upload.originalName(), upload.contentType(), upload.size(), previousUrl, previousRemoved);
     }
 
-    /*
-     * The superseded object is deliberately NOT deleted. Without image_key stored we
-     * cannot prove which key the old URL referred to, and deriving it from the URL
-     * would delete the wrong object if the public base ever changes. A stale object
-     * costs a few KB; deleting a live one breaks a tile. A prefix sweep of
-     * master/categories and master/brands can reclaim them later.
+    // ---------------------------------------------------------------- internals --
+
+    /**
+     * Delete the object this upload superseded, strictly after the commit.
+     *
+     * These used to be left in the bucket, on the grounds that no image_key column
+     * exists so the old key could not be proven. It can be: the stored URL is composed
+     * from the key by {@link com.repairshop.saas.common.media.MediaProperties#publicUrl},
+     * and {@code keyForPublicUrl} inverts that exactly — a data URI or a leftover
+     * Cloudinary link resolves to nothing and is left alone. Two more conditions hold
+     * before anything goes, because deleting a live object breaks a tile:
+     *
+     * <ul>
+     *   <li>the key must sit under this record type's own root, so a URL pasted in by
+     *       hand cannot make a brand upload delete a category's artwork;</li>
+     *   <li>no other row of the same kind may still reference it — every upload mints
+     *       a unique key, but the URL column is hand-editable, so two rows can end up
+     *       sharing one image.</li>
+     * </ul>
+     *
+     * Failures are swallowed: the upload has already succeeded, and failing the whole
+     * request over a leaked object would be the worse trade. The outcome is returned
+     * so the admin can report which happened.
+     *
+     * @param stillReferenced counts rows of this kind still pointing at previousUrl.
+     *                        Evaluated only once the cheaper checks pass, so the common
+     *                        "nothing of ours to delete" case costs no query.
      */
+    private boolean removeSuperseded(String previousUrl, String newKey, String root,
+                                     LongSupplier stillReferenced) {
+        String previousKey = props.keyForPublicUrl(previousUrl);
+        if (previousKey == null || previousKey.equals(newKey)) {
+            return false;
+        }
+        if (!MediaKeys.isUnder(previousKey, root)) {
+            log.info("Keeping {} — outside {}, so it may belong to another record", previousKey, root);
+            return false;
+        }
+        if (stillReferenced.getAsLong() > 0) {
+            log.info("Keeping {} — still referenced by another row", previousKey);
+            return false;
+        }
+        return storage.deleteSupersededQuietly(previousUrl, newKey);
+    }
 }

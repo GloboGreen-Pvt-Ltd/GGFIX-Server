@@ -19,6 +19,13 @@ import java.util.UUID;
  * @param imageOriginalName filename as uploaded
  * @param imageContentType  MIME type proven by the file's bytes
  * @param imageSizeBytes    stored object size
+ * @param previousImageUrl  what the row held before this upload, null on create
+ * @param previousImageRemoved
+ *        whether that older object was deleted from the bucket. False also covers
+ *        "there was nothing of ours to delete" — a data URI, a Cloudinary link, or
+ *        an image another row still uses. The admin says which of the two happened
+ *        by looking at previousImageUrl, so a replacement that left bytes behind is
+ *        visible rather than silently assumed.
  */
 public record ModelImageResponse(
         UUID id,
@@ -29,5 +36,7 @@ public record ModelImageResponse(
         String imageUrl,
         String imageOriginalName,
         String imageContentType,
-        Long imageSizeBytes) {
+        Long imageSizeBytes,
+        String previousImageUrl,
+        boolean previousImageRemoved) {
 }

@@ -17,6 +17,12 @@ import java.util.UUID;
  * @param imageOriginalName filename as uploaded
  * @param imageContentType  MIME type proven by the file's bytes
  * @param imageSizeBytes    stored object size
+ * @param previousImageUrl  what the row held before this upload, null if it had none
+ * @param previousImageRemoved
+ *        whether that older object was deleted from the bucket. False also covers
+ *        "there was nothing of ours to delete" — a data URI, a Cloudinary link, or
+ *        an image another row still uses; the admin tells the two apart by whether
+ *        previousImageUrl is set.
  */
 public record TaxonomyImageResponse(
         UUID id,
@@ -25,5 +31,7 @@ public record TaxonomyImageResponse(
         String imageUrl,
         String imageOriginalName,
         String imageContentType,
-        Long imageSizeBytes) {
+        Long imageSizeBytes,
+        String previousImageUrl,
+        boolean previousImageRemoved) {
 }

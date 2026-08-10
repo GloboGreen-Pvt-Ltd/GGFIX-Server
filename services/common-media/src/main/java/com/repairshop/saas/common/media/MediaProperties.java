@@ -59,6 +59,52 @@ public class MediaProperties {
         return base + "/" + key.replaceAll("^/+", "");
     }
 
+    /**
+     * Inverse of {@link #publicUrl}: the object key a stored URL refers to, or null
+     * when the URL is not one of ours.
+     *
+     * This is what makes deleting a superseded image safe. A stored image_url can be
+     * a data URI, a leftover res.cloudinary.com link, or a hand-pasted address on any
+     * host — none of those name an object in our bucket, and all of them return null
+     * here rather than a key a delete would then act on. Only a URL that starts with
+     * the configured public origin can produce a key, so the mapping is exact rather
+     * than guessed from the tail of the string.
+     *
+     * The remainder is NOT percent-decoded. Every key this system writes is slugified
+     * ASCII ({@link MediaKeys}), so decoding could only ever change a key we did not
+     * write — and turning an unrecognised URL into some other bucket path is the one
+     * outcome worth engineering against. An encoded URL simply yields a key that
+     * matches no object, which makes the delete a harmless no-op.
+     */
+    public String keyForPublicUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return null;
+        }
+        String base = publicBaseUrl == null ? "" : publicBaseUrl.replaceAll("/+$", "");
+        if (base.isEmpty()) {
+            return null;
+        }
+        String trimmed = url.trim();
+        if (!trimmed.startsWith(base + "/")) {
+            return null;
+        }
+        String key = trimmed.substring(base.length() + 1);
+        int query = key.indexOf('?');
+        if (query >= 0) {
+            key = key.substring(0, query);
+        }
+        int fragment = key.indexOf('#');
+        if (fragment >= 0) {
+            key = key.substring(0, fragment);
+        }
+        // ".." cannot appear in a generated key; if it appears here the URL was
+        // built by something else and must not be resolved to an object.
+        if (key.isBlank() || key.contains("..")) {
+            return null;
+        }
+        return key;
+    }
+
     public String getBucket() {
         return bucket;
     }

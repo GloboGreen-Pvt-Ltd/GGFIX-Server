@@ -156,6 +156,37 @@ public final class MediaKeys {
         return (dir == null ? "" : dir + "/") + uniqueName(stem, extension);
     }
 
+    // -------------------------------------------------------------- recognisers --
+
+    /*
+     * Deleting the image a replacement supersedes means acting on a key derived from
+     * a stored URL, and a stored URL is only as trustworthy as whatever wrote it —
+     * the admin form has always let one be typed by hand. These two answer "is this
+     * key one this class would have produced, for this kind of record?", so a delete
+     * can be skipped rather than aimed at an object belonging to something else.
+     * Skipping leaves a few KB behind; the alternative loses a live image.
+     */
+
+    /** True when {@code key} sits under {@code root}, e.g. {@code master/brands}. */
+    public static boolean isUnder(String key, String root) {
+        return key != null && root != null && !root.isBlank() && key.startsWith(root + "/");
+    }
+
+    /**
+     * True for the catalogue layout {@code {category}/{brand}/{series}/{model}/main-{id}.{ext}}.
+     *
+     * Matched on shape rather than against the model's current folder on purpose: a
+     * model renamed since its last upload has an old key under the old folder, and
+     * that object is exactly the one worth removing. The {@code main-} leaf is what
+     * separates it from taxonomy artwork, which is never filed four levels deep.
+     */
+    public static boolean isModelImageKey(String key) {
+        return key != null && MODEL_IMAGE_KEY.matcher(key).matches();
+    }
+
+    private static final java.util.regex.Pattern MODEL_IMAGE_KEY =
+            java.util.regex.Pattern.compile("[^/]+/[^/]+/[^/]+/[^/]+/main-[0-9a-f]{" + UNIQUE_SUFFIX_LENGTH + "}\\.[a-z0-9]+");
+
     // ------------------------------------------------------------------ helpers --
 
     private static String uniqueName(String stem, String extension) {
