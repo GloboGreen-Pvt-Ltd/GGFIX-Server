@@ -56,6 +56,19 @@ public class TicketRequest {
     @Schema(description = "Estimated price")
     private BigDecimal estimatedPrice;
 
+    @Schema(description = "Payment mode: ADVANCE or FULL. Anything else (including null/blank) " +
+            "is stored as null = nothing collected.")
+    private String paymentType;
+
+    @Schema(description = "Amount collected. Ignored when paymentType is absent; rejected with 400 " +
+            "when it exceeds the applicable total (final price when set, else estimated price).")
+    private BigDecimal paymentAmount;
+
+    // paymentStatus, balanceAmount and paymentPaidAt are deliberately absent:
+    // all three are derived server-side from the pair above plus the ticket's
+    // price. A client that could set them could report money as PAID without
+    // an amount, or back-date when it was taken.
+
     @Schema(description = "Device display name override")
     private String deviceDisplayName;
 

@@ -60,6 +60,9 @@ public class TicketResponse {
     @Schema(description = "Color")
     private String color;
 
+    @Schema(description = "Device IMEI. Falls back to the linked repair_booking's imei when the ticket's own column is blank — the pickup person captures it on the booking row.")
+    private String imei;
+
     @Schema(description = "Status")
     private String status;
 
@@ -68,6 +71,21 @@ public class TicketResponse {
 
     @Schema(description = "Final price")
     private BigDecimal finalPrice;
+
+    @Schema(description = "Payment mode: ADVANCE, FULL, or null when nothing was collected")
+    private String paymentType;
+
+    @Schema(description = "Amount collected; null when nothing was collected")
+    private BigDecimal paymentAmount;
+
+    @Schema(description = "Still owed: applicable total minus amount collected, never negative")
+    private BigDecimal balanceAmount;
+
+    @Schema(description = "PAID once an amount is recorded, PENDING while nothing has been collected")
+    private String paymentStatus;
+
+    @Schema(description = "When the payment was recorded (server-stamped); null when nothing was collected")
+    private Instant paymentPaidAt;
 
     @Schema(description = "Issue description")
     private String issueDescription;

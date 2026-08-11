@@ -84,6 +84,43 @@ public class Ticket {
     @Column(name = "final_price", precision = 12, scale = 2)
     private BigDecimal finalPrice;
 
+    // ---- Payment collected at the counter (migration 85) ------------------
+    // Deliberately NOT finalPrice or customerApproval: those mean "what the
+    // repair cost" and "the customer said go ahead". A deposit is neither.
+
+    /**
+     * How the customer paid: ADVANCE (deposit, with the balance due on
+     * delivery) or FULL. NULL means nothing was collected up front — every
+     * ticket booked before migration 85, and any walk-in that pays on delivery.
+     */
+    @Column(name = "payment_type", length = 20)
+    private String paymentType;
+
+    /** Amount actually collected. */
+    @Column(name = "payment_amount", precision = 12, scale = 2)
+    private BigDecimal paymentAmount;
+
+    /**
+     * Still owed: applicable total minus paymentAmount, never negative. Stored
+     * rather than derived per-caller so the rule for which total applies
+     * (finalPrice when set, else estimatedPrice) lives in one place —
+     * TicketService#recomputeBalance, which every price- or payment-changing
+     * path runs before it returns.
+     */
+    @Column(name = "balance_amount", precision = 12, scale = 2)
+    private BigDecimal balanceAmount;
+
+    /** PAID once an amount is recorded, PENDING while nothing has been. */
+    @Column(name = "payment_status", length = 20)
+    private String paymentStatus;
+
+    /**
+     * When the payment was recorded. Server-stamped, never taken from the
+     * request — a device clock is not evidence of when cash was taken.
+     */
+    @Column(name = "payment_paid_at")
+    private Instant paymentPaidAt;
+
     @Column(name = "issue_description", columnDefinition = "TEXT")
     private String issueDescription;
 

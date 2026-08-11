@@ -39,6 +39,10 @@ public class PlatformRepairBooking {
     @Column(name = "ram_option_id") private UUID ramOptionId;
     @Column(name = "storage_option_id") private UUID storageOptionId;
     @Column(length = 100) private String color;
+    // Captured by the pickup person's estimate wizard, which writes it with
+    // native SQL (migration 51). Mapped here so resolveBookingFallback can hand
+    // it to the ticket for bookings minted before the ticket carried an IMEI.
+    @Column(length = 40) private String imei;
     @Column(name = "service_mode", nullable = false, length = 50) private String serviceMode;
     @Column(name = "issue_summary", columnDefinition = "TEXT") private String issueSummary;
     @Column(name = "estimate_amount", precision = 12, scale = 2) private BigDecimal estimateAmount;

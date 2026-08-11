@@ -36,6 +36,7 @@ public class CustomerOrderMirrorService {
     private final PlatformRepairBookingEventRepository bookingEventRepo;
     private final PlatformCustomerOrderRepository customerOrderRepo;
     private final PlatformCustomerNotificationRepository notificationRepo;
+    private final PlatformShopNotificationRepository shopNotificationRepo;
     private final ObjectMapper objectMapper;
 
     /** Ticket-side status → (booking.status, customer_order.status).
@@ -166,6 +167,134 @@ public class CustomerOrderMirrorService {
                     .isRead(false)
                     .build());
         });
+    }
+
+    /** Shop-owner notification templates keyed by the step-event status.
+     *
+     * Deliberately NOT the same map as CUSTOMER_NOTIFICATION_TEMPLATES: the two
+     * audiences care about opposite halves of the timeline. The customer wants
+     * to hear about things the shop does to their device; the shop wants to
+     * hear about things that happen to the job while it is out of their hands —
+     * i.e. technician progress and anything that needs an owner decision
+     * (spare parts to order, a re-estimate to send, a job that came back
+     * unrepaired).
+     *
+     * Statuses the OWNER themselves triggered are absent on purpose. Assigning
+     * a technician, generating an invoice or marking a device delivered are all
+     * shop actions posted from the owner app — notifying the owner about their
+     * own tap is pure noise. CUSTOMER_APPROVED / CANCELLED are likewise absent:
+     * order-service already raises those from the customer-facing endpoints
+     * (RepairBookingController#customerApproval / #cancel), and emitting here
+     * too would double-notify.
+     *
+     * The body has one "%s" slot for the booking number.
+     */
+    private static final java.util.Map<String, String[]> SHOP_NOTIFICATION_TEMPLATES =
+            java.util.Map.ofEntries(
+                    java.util.Map.entry("TECHNICIAN_ACCEPTED_SERVICE",
+                            new String[]{"Technician accepted the job",
+                                    "Your technician accepted booking %s."}),
+                    java.util.Map.entry("TECHNICIAN_WORK_STARTED",
+                            new String[]{"Technician work started",
+                                    "Work has started on booking %s."}),
+                    java.util.Map.entry("TECHNICIAN_UPLOADED_DEVICE_IMAGES",
+                            new String[]{"Technician uploaded device images",
+                                    "Device photos were added to booking %s."}),
+                    java.util.Map.entry("TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED",
+                            new String[]{"Technician issue verified & updated",
+                                    "The technician verified the issue on booking %s."}),
+                    java.util.Map.entry("ISSUE_IDENTIFIED",
+                            new String[]{"Issue identified",
+                                    "The technician identified the issue on booking %s."}),
+                    java.util.Map.entry("RE_ESTIMATED_CONFIRMED",
+                            new String[]{"Service re-estimated",
+                                    "A revised estimate is ready for booking %s."}),
+                    java.util.Map.entry("WAITING_FOR_CUSTOMER_APPROVAL",
+                            new String[]{"Waiting for customer approval",
+                                    "Booking %s is held until the customer approves."}),
+                    java.util.Map.entry("PARTS_REQUIRED",
+                            new String[]{"Spare parts pending",
+                                    "Booking %s is waiting on spare parts."}),
+                    java.util.Map.entry("PARTS_REPLACED",
+                            new String[]{"Spare parts replaced",
+                                    "Spare parts were replaced on booking %s."}),
+                    java.util.Map.entry("QUALITY_CHECK_COMPLETED",
+                            new String[]{"Quality check completed",
+                                    "Booking %s passed its quality check."}),
+                    java.util.Map.entry("REPAIR_COMPLETED",
+                            new String[]{"Repair completed",
+                                    "The repair for booking %s is complete."}),
+                    java.util.Map.entry("READY",
+                            new String[]{"Ready for delivery",
+                                    "Booking %s is ready to hand over."}),
+                    // Return path — the shop needs to know a job is coming back
+                    // unrepaired far more urgently than the customer does.
+                    java.util.Map.entry("REPAIR_NOT_COMPLETED",
+                            new String[]{"Repair not completed",
+                                    "Booking %s could not be repaired."}),
+                    java.util.Map.entry("CUSTOMER_REJECTED",
+                            new String[]{"Customer rejected the estimate",
+                                    "The customer rejected the estimate for booking %s."})
+            );
+
+    /**
+     * Shop-side counterpart of {@link #emitCustomerNotificationForStatus} —
+     * puts a Service History status change on the owner app's Notifications
+     * screen. Before this the shop feed had exactly three producers, all in
+     * order-service (booking created, customer approved, customer cancelled),
+     * so nothing a technician did ever reached the owner's bell.
+     *
+     * Silently skips when:
+     *   * the booking has no shopId (customer-initiated pickup, no shop yet)
+     *   * the status isn't in SHOP_NOTIFICATION_TEMPLATES — keeps owner-driven
+     *     and low-signal transitions off the screen
+     *   * the same (booking, status) pair was already notified — a technician
+     *     re-saving a compliance note refreshes the timeline row in place, and
+     *     that must not raise a second alert
+     *
+     * Runs in REQUIRES_NEW so a notification-save failure can't poison the
+     * outer event-save transaction.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void emitShopNotificationForStatus(UUID bookingId, String statusKey) {
+        if (bookingId == null || statusKey == null) return;
+        String key = statusKey.toUpperCase();
+        String[] template = SHOP_NOTIFICATION_TEMPLATES.get(key);
+        if (template == null) return;
+        bookingRepo.findById(bookingId).ifPresent(booking -> {
+            UUID shopId = booking.getShopId();
+            if (shopId == null) return; // no shop has taken the job on yet
+            if (shopNotificationRepo.existsByBookingIdAndStatusKey(bookingId, key)) return;
+            String bookingNumber = booking.getBookingNumber() != null
+                    ? booking.getBookingNumber()
+                    : "";
+            shopNotificationRepo.save(PlatformShopNotification.builder()
+                    .shopId(shopId)
+                    .bookingId(booking.getId())
+                    .bookingNumber(bookingNumber)
+                    .ticketId(booking.getTicketId())
+                    .statusKey(key)
+                    .title(template[0])
+                    .body(String.format(template[1], bookingNumber))
+                    .type("bookings")
+                    .isRead(false)
+                    .build());
+        });
+    }
+
+    /** Raise both feeds for one timeline status, so a new status can never be
+     *  wired to the customer's bell but forgotten on the shop's.
+     *
+     *  For CALLERS INSIDE THIS CLASS ONLY. Self-invocation bypasses the Spring
+     *  proxy, so the two REQUIRES_NEW annotations below do not take effect and
+     *  both saves join the caller's transaction — which is already how the
+     *  intra-class emit sites behaved before the shop feed existed. External
+     *  callers (TicketService) must invoke the two emitters separately through
+     *  the injected bean so each keeps its own REQUIRES_NEW and a failure on
+     *  one feed can't roll back the other or the outer event save. */
+    void emitNotificationsForStatus(UUID bookingId, String statusKey) {
+        emitCustomerNotificationForStatus(bookingId, statusKey);
+        emitShopNotificationForStatus(bookingId, statusKey);
     }
 
     /** Inline variant — runs in the CALLER'S transaction so it can see a ticket
@@ -338,7 +467,7 @@ public class CustomerOrderMirrorService {
             if (stepKey != null) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status(stepKey).actor("SHOP").build());
-                emitCustomerNotificationForStatus(bookingId, stepKey);
+                emitNotificationsForStatus(bookingId, stepKey);
             }
         }
 
@@ -357,7 +486,7 @@ public class CustomerOrderMirrorService {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status("ASSIGNED_TO_TECHNICIAN")
                         .note("Assigned to " + techName).actor("SHOP").build());
-                emitCustomerNotificationForStatus(bookingId, "ASSIGNED_TO_TECHNICIAN");
+                emitNotificationsForStatus(bookingId, "ASSIGNED_TO_TECHNICIAN");
             }
             // Each (re)assignment puts the booking back into a not-accepted
             // state; emit once so the customer sees the awaiting-acceptance
@@ -389,7 +518,7 @@ public class CustomerOrderMirrorService {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status("TECHNICIAN_ACCEPTED_SERVICE")
                         .note(techName + " accepted the service").actor("TECHNICIAN").build());
-                emitCustomerNotificationForStatus(bookingId, "TECHNICIAN_ACCEPTED_SERVICE");
+                emitNotificationsForStatus(bookingId, "TECHNICIAN_ACCEPTED_SERVICE");
             }
             // Accepting the service immediately implies the technician has
             // picked the job up and started work — emit alongside so the
