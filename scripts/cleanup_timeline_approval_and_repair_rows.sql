@@ -35,29 +35,44 @@
 -- =============================================================================
 -- 0. Single booking, both rows — the screenshot case
 -- =============================================================================
--- Edit the booking number, review, then run. Clears the derived approval and
--- the auto-marked repair row, and resets the approval flags so the customer is
+-- Edit the reference, review, then run. Clears the derived approval and the
+-- auto-marked repair row, and resets the approval flags so the customer is
 -- re-prompted. After this the technician's Service Progress checklist shows
 -- "Repair Work In Progress" as Mark (not DONE) until they tap it themselves.
+--
+-- The reference is matched against BOTH repair_bookings.booking_number and
+-- tickets.tracking_id: the "#CSPEN…" chip in the app header is not always the
+-- booking number, and on 2026-08-11 a lookup by booking_number alone returned
+-- nothing on the RDS the repo variables name.
 
-\set booking_number '''CSPEN7657020'''
+\set ref '''CSPEN7657020'''
 
-SELECT e.status, e.note, e.actor, e.created_at
+-- Sanity check FIRST. If total_bookings is a handful, you are on the wrong
+-- database — the running services may not be using the one DB_HOST/DB_NAME name.
+SELECT current_database(), count(*) AS total_bookings FROM repair_bookings;
+
+SELECT b.booking_number, t.tracking_id, e.status, e.actor, e.created_at, e.note
   FROM repair_booking_events e
   JOIN repair_bookings b ON b.id = e.booking_id
- WHERE b.booking_number = :booking_number
+  LEFT JOIN tickets t ON t.id = b.ticket_id
+ WHERE b.booking_number = :ref OR t.tracking_id = :ref
  ORDER BY e.created_at;
+
+-- Only after the rows above are the ones you mean:
 
 -- BEGIN;
 -- DELETE FROM repair_booking_events
 --  WHERE upper(status) IN ('CUSTOMER_APPROVED', 'IN_REPAIR')
---    AND booking_id = (SELECT id FROM repair_bookings
---                       WHERE booking_number = :booking_number);
+--    AND booking_id IN (SELECT b.id
+--                         FROM repair_bookings b
+--                         LEFT JOIN tickets t ON t.id = b.ticket_id
+--                        WHERE b.booking_number = :ref OR t.tracking_id = :ref);
 -- UPDATE tickets SET customer_approval = NULL
---  WHERE id = (SELECT ticket_id FROM repair_bookings
---               WHERE booking_number = :booking_number);
+--  WHERE tracking_id = :ref
+--     OR id IN (SELECT ticket_id FROM repair_bookings WHERE booking_number = :ref);
 -- UPDATE repair_bookings SET customer_approval = NULL
---  WHERE booking_number = :booking_number;
+--  WHERE booking_number = :ref
+--     OR ticket_id IN (SELECT id FROM tickets WHERE tracking_id = :ref);
 -- COMMIT;
 
 
