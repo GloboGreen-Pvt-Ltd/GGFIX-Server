@@ -1,13 +1,17 @@
 package com.repairshop.saas.ticket.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.repairshop.saas.ticket.dto.LedgerEntryDtos.LedgerEntryRequest;
 import com.repairshop.saas.ticket.dto.LedgerEntryDtos.LedgerEntryResponse;
 import com.repairshop.saas.ticket.dto.LedgerEntryDtos.LedgerPeriodResponse;
 import com.repairshop.saas.ticket.dto.LedgerEntryDtos.LedgerStatementResponse;
 import com.repairshop.saas.ticket.entity.ShopLedgerEntry;
 import com.repairshop.saas.ticket.entity.ShopLedgerParty;
+import com.repairshop.saas.ticket.entity.Ticket;
 import com.repairshop.saas.ticket.repository.ShopLedgerEntryRepository;
 import com.repairshop.saas.ticket.repository.ShopLedgerPartyRepository;
+import com.repairshop.saas.ticket.repository.TicketRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -49,8 +53,19 @@ public class ShopLedgerEntryService {
     private static final int MAX_WINDOW_DAYS = 366;
     private static final int MAX_NOTE = 500;
 
+    /**
+     * Bills are photographed at a counter, so the realistic count is one or two.
+     * The cap exists so a client bug can't write an unbounded array into a TEXT
+     * column that every read of this account then has to parse.
+     */
+    private static final int MAX_BILLS = 10;
+
+    /** Thread-safe once configured, and this one never is — see Jackson docs. */
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final ShopLedgerEntryRepository repository;
     private final ShopLedgerPartyRepository partyRepository;
+    private final TicketRepository ticketRepository;
 
     // ---- Reads -----------------------------------------------------------------
 
@@ -205,6 +220,82 @@ public class ShopLedgerEntryService {
             if (note.length() > MAX_NOTE) note = note.substring(0, MAX_NOTE);
             e.setNote(note.isBlank() ? null : note);
         }
+
+        if (req.getNoteAudioUrl() != null) {
+            String url = req.getNoteAudioUrl().trim();
+            e.setNoteAudioUrl(url.isBlank() ? null : url);
+        }
+
+        if (req.getBillUrls() != null) {
+            e.setBillImagesJson(writeBills(req.getBillUrls()));
+        }
+
+        if (req.getTicketId() != null) {
+            // Re-read the ticket rather than trusting the label the client sent:
+            // this row is what the shop will point at in an argument, so the
+            // device name on it has to have come from the repair record. The
+            // shop-scoped lookup is also the authorisation check — an entry can
+            // only ever be attached to this shop's own job.
+            Ticket ticket = ticketRepository.findByShopIdAndId(e.getShopId(), req.getTicketId())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found"));
+            e.setTicketId(ticket.getId());
+            e.setTicketTrackingId(ticket.getTrackingId());
+            e.setTicketLabel(ticketLabel(ticket));
+        }
+    }
+
+    /** What the entry row calls the job: the device, else the work, else the id. */
+    private static String ticketLabel(Ticket t) {
+        if (t.getDeviceDisplayName() != null && !t.getDeviceDisplayName().isBlank()) {
+            return t.getDeviceDisplayName().trim();
+        }
+        if (t.getRepairServicesSummary() != null && !t.getRepairServicesSummary().isBlank()) {
+            return t.getRepairServicesSummary().trim();
+        }
+        return t.getTrackingId();
+    }
+
+    /**
+     * The bill list as the JSON array the column stores, or null when nothing is
+     * worth keeping. Blank entries are dropped rather than persisted: a
+     * half-finished upload sends "", which would otherwise render as a broken
+     * thumbnail on every future read of this account.
+     */
+    private static String writeBills(List<String> urls) {
+        List<String> clean = new ArrayList<>(Math.min(urls.size(), MAX_BILLS));
+        for (String u : urls) {
+            if (u == null || u.isBlank()) continue;
+            if (clean.size() >= MAX_BILLS) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "At most " + MAX_BILLS + " bills can be attached to one entry.");
+            }
+            clean.add(u.trim());
+        }
+        if (clean.isEmpty()) return null;
+        try {
+            return MAPPER.writeValueAsString(clean);
+        } catch (JsonProcessingException ex) {
+            // A list of strings cannot fail to serialize, but swallowing this
+            // would silently drop the bills — fail loudly instead.
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Could not read the attached bills.");
+        }
+    }
+
+    /** Re-hydrates the stored {@code ["url", …]} into a list; never null. */
+    private static List<String> readBills(String raw) {
+        if (raw == null || raw.isBlank()) return List.of();
+        try {
+            List<?> parsed = MAPPER.readValue(raw, List.class);
+            List<String> urls = new ArrayList<>(parsed.size());
+            for (Object o : parsed) {
+                if (o != null) urls.add(o.toString());
+            }
+            return urls;
+        } catch (Exception ignored) {
+            // Unparseable is treated as "no bills": one malformed row must not
+            // take down the whole statement it appears in.
+            return List.of();
+        }
     }
 
     /**
@@ -236,6 +327,11 @@ public class ShopLedgerEntryService {
                 .amount(e.getAmount())
                 .entryDate(e.getEntryDate())
                 .note(e.getNote())
+                .noteAudioUrl(e.getNoteAudioUrl())
+                .billUrls(readBills(e.getBillImagesJson()))
+                .ticketId(e.getTicketId())
+                .ticketTrackingId(e.getTicketTrackingId())
+                .ticketLabel(e.getTicketLabel())
                 .runningBalance(running)
                 .createdAt(e.getCreatedAt())
                 .build();

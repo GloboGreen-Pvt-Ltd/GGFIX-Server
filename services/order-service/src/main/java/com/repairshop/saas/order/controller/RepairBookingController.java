@@ -507,6 +507,9 @@ public class RepairBookingController {
         assertCustomerOwnsBooking(b, userId);
         b.setCustomerApproval("DONE");
         bookingRepo.save(b);
+        List<RepairBookingEvent> events = eventRepo.findByBookingIdOrderByCreatedAtAsc(b.getId());
+        boolean afterReEstimate = events.stream()
+                .anyMatch(e -> "RE_ESTIMATED_CONFIRMED".equalsIgnoreCase(e.getStatus()));
         if (b.getTicketId() != null) {
             platformTicketRepo.findById(b.getTicketId()).ifPresent(t -> {
                 t.setCustomerApproval(Boolean.TRUE);
@@ -514,10 +517,23 @@ public class RepairBookingController {
             });
         }
         // Emit the dedicated step key so the timeline rail lights up
-        // "Customer Approved" instead of the generic macro status.
-        eventRepo.save(RepairBookingEvent.builder()
-                .bookingId(b.getId()).status("CUSTOMER_APPROVED")
-                .note("Customer Approved").actor("USER").build());
+        // "Customer Approved" instead of the generic macro status. This is the
+        // ONLY row an approval writes — "Repair Work In Progress" waits for the
+        // technician's own checklist tap (ticket-service emitProgressStepEvent),
+        // so it carries the minute work actually resumed rather than a time
+        // derived from some other step.
+        //
+        // Upsert rather than a blind insert. A customer approves more than once
+        // whenever the shop re-estimates: the re-edit clears the approval and
+        // re-prompts, so this endpoint is hit again. Inserting each time left
+        // several CUSTOMER_APPROVED rows for one booking, and the timelines keep
+        // the FIRST row per status key — so the rail showed the original
+        // approval, dated BEFORE the "Service Re-estimated" step it was supposed
+        // to follow. One row, carrying the latest approval, keeps the order true.
+        upsertEvent(events, b, "CUSTOMER_APPROVED",
+                afterReEstimate ? "Customer approved the re-estimated service"
+                                : "Customer approved the estimate",
+                "USER", java.time.Instant.now());
         notifyCustomer(b, "CUSTOMER_APPROVED", "Customer Approved",
                 "You approved the repair estimate for booking " + b.getBookingNumber() + ".");
         notifyShop(b, "CUSTOMER_APPROVED", "Customer approved the estimate",
@@ -550,6 +566,28 @@ public class RepairBookingController {
         return ResponseEntity.ok(toResponseWithChildren(b));
     }
 
+    /**
+     * Write one timeline row per status key, carrying the given instant.
+     *
+     * `existing` is the booking's already-loaded event list; the row is reused
+     * when the key is present so a second approval refreshes the timestamp
+     * instead of stacking duplicate rows the renderer would never show (the
+     * timelines keep the FIRST row per status key).
+     */
+    private void upsertEvent(List<RepairBookingEvent> existing, RepairBooking b,
+                             String statusKey, String note, String actor,
+                             java.time.Instant at) {
+        RepairBookingEvent e = existing.stream()
+                .filter(row -> statusKey.equalsIgnoreCase(row.getStatus()))
+                .findFirst()
+                .orElseGet(() -> RepairBookingEvent.builder()
+                        .bookingId(b.getId()).status(statusKey).build());
+        e.setNote(note);
+        e.setActor(actor);
+        e.setCreatedAt(at);
+        eventRepo.save(e);
+    }
+
     // Append an in-app notification to the customer's feed for a booking event.
     private void notifyCustomer(RepairBooking b, String statusKey, String title, String body) {
         notificationRepo.save(CustomerNotification.builder()
@@ -572,6 +610,9 @@ public class RepairBookingController {
                 .shopId(b.getShopId())
                 .bookingId(b.getId())
                 .bookingNumber(b.getBookingNumber())
+                // May be null before the booking is turned into a ticket; the
+                // owner app falls back to the Bookings tab in that case.
+                .ticketId(b.getTicketId())
                 .statusKey(statusKey)
                 .title(title)
                 .body(body)

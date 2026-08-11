@@ -67,6 +67,7 @@ public class ShopNotificationController {
     private NotificationResponse toResponse(ShopNotification n) {
         return NotificationResponse.builder()
                 .id(n.getId()).bookingId(n.getBookingId()).bookingNumber(n.getBookingNumber())
+                .ticketId(n.getTicketId())
                 .statusKey(n.getStatusKey()).title(n.getTitle()).body(n.getBody())
                 .type(n.getType()).read(n.isRead()).createdAt(n.getCreatedAt())
                 .build();

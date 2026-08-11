@@ -21,7 +21,13 @@ public class RepairBookingEvent {
     // voice-note + image URLs the technician submitted.
     @Column(name = "audio_url", columnDefinition = "TEXT") private String audioUrl;
     @Column(name = "images_json", columnDefinition = "TEXT") private String imagesJson;
-    @Column(name = "created_at", nullable = false, updatable = false) private Instant createdAt;
+    // updatable=true (matching PlatformRepairBookingEvent in ticket-service,
+    // which maps this same table) so a step that is legitimately re-entered can
+    // refresh its timestamp instead of keeping the first one. CUSTOMER_APPROVED
+    // is the case that needs it: the customer approves again after every
+    // re-estimate, and the timelines pick the first row per status key, so a
+    // frozen created_at dated the approval BEFORE the re-estimate it followed.
+    @Column(name = "created_at", nullable = false) private Instant createdAt;
 
     @PrePersist void prePersist() { if (createdAt == null) createdAt = Instant.now(); }
 }

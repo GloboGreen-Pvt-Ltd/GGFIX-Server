@@ -198,6 +198,44 @@ public class CustomerOrderController {
         };
     }
 
+    /**
+     * The booking's most recent timeline event, resolved deterministically.
+     *
+     * Ordering by created_at alone is ambiguous now that some steps are emitted
+     * as a pair sharing one server timestamp — "Customer Approved" and the
+     * "Repair Work In Progress" row that the approval opens (see
+     * TicketService#onCustomerApproved). A plain
+     * findFirst…OrderByCreatedAtDesc lets Postgres return either row for the tie,
+     * so the My Orders card could show a different status on each refresh and
+     * disagree with the NOW badge on the History timeline. Break the tie on the
+     * PHASE_LABELS order — the canonical lifecycle sequence — so the later step
+     * wins, always, on every device.
+     */
+    private RepairBookingEvent latestEvent(UUID bookingId) {
+        List<RepairBookingEvent> events = eventRepo.findByBookingIdOrderByCreatedAtAsc(bookingId);
+        RepairBookingEvent latest = null;
+        for (RepairBookingEvent e : events) {
+            if (e.getCreatedAt() == null) continue;
+            if (latest == null) { latest = e; continue; }
+            int byTime = e.getCreatedAt().compareTo(latest.getCreatedAt());
+            if (byTime > 0 || (byTime == 0 && phaseRank(e) >= phaseRank(latest))) latest = e;
+        }
+        return latest;
+    }
+
+    // Position of an event's status in the canonical PHASE_LABELS sequence.
+    // Unknown / unlabelled codes sort before every known step so they never win
+    // a tie against a real lifecycle row.
+    private static int phaseRank(RepairBookingEvent e) {
+        String status = e.getStatus() == null ? "" : e.getStatus().toUpperCase();
+        int i = 0;
+        for (String key : PHASE_LABELS.keySet()) {
+            if (key.equals(status)) return i;
+            i++;
+        }
+        return -1;
+    }
+
     private CustomerOrderResponse toResponse(CustomerOrder o) {
         Map<String, Object> payload = null;
         if (o.getPayloadJson() != null && !o.getPayloadJson().isBlank()) {
@@ -209,9 +247,7 @@ public class CustomerOrderController {
         if (o.getReferenceId() != null
                 && o.getOrderType() != null
                 && TIMELINE_ORDER_TYPES.contains(o.getOrderType().toUpperCase())) {
-            RepairBookingEvent latest = eventRepo
-                    .findFirstByBookingIdOrderByCreatedAtDesc(o.getReferenceId())
-                    .orElse(null);
+            RepairBookingEvent latest = latestEvent(o.getReferenceId());
             if (latest != null && latest.getStatus() != null) {
                 phaseStatus = latest.getStatus().toUpperCase();
                 String mapped = PHASE_LABELS.get(phaseStatus);

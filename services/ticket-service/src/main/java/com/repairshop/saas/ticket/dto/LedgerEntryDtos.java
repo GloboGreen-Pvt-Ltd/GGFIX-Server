@@ -35,6 +35,37 @@ public class LedgerEntryDtos {
 
         @Schema(description = "What it was for", example = "samsung s8+")
         private String note;
+
+        /**
+         * A spoken note, already uploaded to media storage. Independent of
+         * {@code note} — a counter is a place where talking beats typing, so an
+         * entry may carry a voice note and no text at all.
+         */
+        @Schema(description = "URL of a recorded voice note",
+                example = "https://media.ggfix.in/cashbook/voice-3f9c11ab.m4a")
+        private String noteAudioUrl;
+
+        /**
+         * Photographed bills, already uploaded. On update null means "leave the
+         * existing bills alone" and an empty list means "remove them" — the same
+         * rule the rest of this request follows.
+         */
+        @Schema(description = "URLs of the photographed bills backing this entry")
+        private List<String> billUrls;
+
+        /**
+         * The repair this money was paid against, when it was one — the "advance
+         * on a job in progress" case. The server re-reads the ticket to snapshot
+         * its label, so the two below are never trusted from the client.
+         */
+        @Schema(description = "Ticket this entry is an advance / payment against")
+        private UUID ticketId;
+
+        @Schema(description = "Ignored on write — the server snapshots it from the ticket", accessMode = Schema.AccessMode.READ_ONLY)
+        private String ticketTrackingId;
+
+        @Schema(description = "Ignored on write — the server snapshots it from the ticket", accessMode = Schema.AccessMode.READ_ONLY)
+        private String ticketLabel;
     }
 
     @Data
@@ -57,6 +88,19 @@ public class LedgerEntryDtos {
         private BigDecimal amount;
         private LocalDate entryDate;
         private String note;
+        private String noteAudioUrl;
+
+        /**
+         * Always present, empty when the entry has no bills — the statement
+         * renders a thumbnail strip off this and shouldn't have to null-check.
+         * (@JsonInclude(NON_NULL) on this class would otherwise drop the key.)
+         */
+        private List<String> billUrls;
+
+        /** The repair this was paid against, with its label snapshotted (84). */
+        private UUID ticketId;
+        private String ticketTrackingId;
+        private String ticketLabel;
 
         /**
          * The account's balance AFTER this entry, oldest-to-newest. This is the

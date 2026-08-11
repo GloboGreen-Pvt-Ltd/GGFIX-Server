@@ -57,6 +57,36 @@ public class ShopLedgerEntry {
     @Column(name = "note", length = 500)
     private String note;
 
+    /**
+     * A spoken note, recorded at the counter instead of typed — see migration 83.
+     * Independent of {@link #note}: an entry can carry both, either or neither.
+     */
+    @Column(name = "note_audio_url", columnDefinition = "TEXT")
+    private String noteAudioUrl;
+
+    /**
+     * Photographed bills, as a JSON array of URLs — {@code ["https://…", …]}.
+     * Same storage as repair_notes.images_json so both surfaces parse the same
+     * shape; null when there are none, never an empty array.
+     */
+    @Column(name = "bill_images_json", columnDefinition = "TEXT")
+    private String billImagesJson;
+
+    /**
+     * The repair this money was paid against, when it was one — see migration 84.
+     * Plain UUID, not a @ManyToOne: the statement lists many entries and a lazy
+     * proxy per row would be an N+1 into tickets on every render.
+     */
+    @Column(name = "ticket_id")
+    private UUID ticketId;
+
+    /** Snapshot of the ticket's label, so the statement reads without a join. */
+    @Column(name = "ticket_tracking_id", length = 50)
+    private String ticketTrackingId;
+
+    @Column(name = "ticket_label", columnDefinition = "TEXT")
+    private String ticketLabel;
+
     @Column(name = "created_by")
     private UUID createdBy;
 

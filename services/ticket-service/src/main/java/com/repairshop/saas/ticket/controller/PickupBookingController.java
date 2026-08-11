@@ -1228,7 +1228,7 @@ public class PickupBookingController {
                             "       rb.brand_id, rb.model_id, rb.ram_option_id, rb.storage_option_id, " +
                             "       rb.estimate_amount, rb.issue_summary, " +
                             "       rb.front_image_url, rb.back_image_url, rb.video_url, " +
-                            "       rb.device_pin, rb.missing_damage_parts, " +
+                            "       rb.device_pin, rb.missing_damage_parts, rb.imei, " +
                             "       rb.customer_approval, rb.pickup_address_id, " +
                             "       rb.estimated_ready_at, rb.estimated_delivery_at, " +
                             "       mm.name AS model_name, mm.image_url AS model_image_url, " +
@@ -1305,7 +1305,7 @@ public class PickupBookingController {
             jdbc.update(
                     "INSERT INTO tickets (id, shop_id, customer_id, customer_name, customer_phone, customer_address, " +
                             "    tracking_id, brand_id, model_id, ram_option_id, storage_option_id, " +
-                            "    color, status, estimated_price, issue_description, " +
+                            "    color, imei, status, estimated_price, issue_description, " +
                             "    device_display_name, device_image_url, repair_services_summary, " +
                             "    price_items_json, device_photos_json, missing_parts_json, " +
                             "    device_security_value, customer_approval, " +
@@ -1313,7 +1313,7 @@ public class PickupBookingController {
                             "    created_at, updated_at) " +
                             "VALUES (CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), ?, ?, ?, " +
                             "    ?, CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), " +
-                            "    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())",
+                            "    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())",
                     ticketId.toString(), shopId.toString(), customerId, customerName, customerPhone, customerAddress,
                     trackingId,
                     stringFrom(bk, "brand_id"),
@@ -1321,6 +1321,7 @@ public class PickupBookingController {
                     stringFrom(bk, "ram_option_id"),
                     stringFrom(bk, "storage_option_id"),
                     stringFrom(bk, "color"),
+                    stringFrom(bk, "imei"),
                     "IN_DIAGNOSIS",
                     estimateAmount,
                     issueDescription,

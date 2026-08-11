@@ -14,6 +14,9 @@ public class ShopNotification {
     @Column(name = "shop_id", nullable = false) private UUID shopId;
     @Column(name = "booking_id") private UUID bookingId;
     @Column(name = "booking_number", length = 60) private String bookingNumber;
+    // Lets the owner app deep-link a notification straight into the booking's
+    // Service History timeline, which is keyed by ticket id (migration 86).
+    @Column(name = "ticket_id") private UUID ticketId;
     @Column(name = "status_key", length = 100) private String statusKey;
     @Column(nullable = false, length = 200) private String title;
     @Column(columnDefinition = "TEXT") private String body;
