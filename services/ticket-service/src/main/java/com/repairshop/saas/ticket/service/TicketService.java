@@ -1042,13 +1042,35 @@ public class TicketService {
         });
     }
 
-    // Emit the In-Service-Process step events implied by a ticket status:
+    /**
+     * A status the Service History rail draws a row for under its own name.
+     *
+     * These are the codes SHOP_BOOKING_STATUS_OPTIONS renders directly, so
+     * writing one to ticket.status without emitting the matching event leaves
+     * the badge and the rail telling different stories — the card reads
+     * "Invoice Generated" while the newest lit step is still "Ready for
+     * Delivery". CREATED / IN_DIAGNOSIS / APPROVED are absent on purpose: they
+     * have no row of their own, and the switch below already derives the steps
+     * they do imply.
+     */
+    private static final java.util.Set<String> SELF_NAMED_TIMELINE_STATUSES = java.util.Set.of(
+            "READY", "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING",
+            "DELIVERED", "CANCELLED");
+
+    // Emit the step events implied by a ticket status:
     //   IN_REPAIR    → TECH_WORK_STARTED   ("Technician Work Started")
     //   QUOTED       → WAITING_APPROVAL    ("Waiting for Customer Approval")
     //   APPROVED     → also TECH_WORK_STARTED — when the customer approves the
     //                 quote, work resumes; this ensures the timeline reflects it
     //                 even if updateStatus was skipped server-side.
     // Step keys match serviceHistoryPhases.js (repair-shop-mobile).
+    //
+    // Anything in SELF_NAMED_TIMELINE_STATUSES additionally emits itself. The
+    // handover tail used to fall through to `default: break`, so a status set
+    // through PUT /tickets/{id}/status — the Update Service Status sheet's path
+    // — moved the badge and left the rail behind. emitBookingEvent is idempotent
+    // per (booking, statusKey), so a status that also arrives through
+    // /progress-events writes one row, not two, whichever lands first.
     private void emitStepEventsForTicketStatus(UUID ticketId, String status) {
         if (status == null) return;
         String s = status.trim().toUpperCase();
@@ -1063,9 +1085,14 @@ public class TicketService {
                         "Waiting for Customer Approval", "TECHNICIAN");
                 break;
             default:
-                // No step event for CREATED / IN_DIAGNOSIS / READY / DELIVERED /
-                // CANCELLED — those map to phase-level transitions instead.
                 break;
+        }
+        if (SELF_NAMED_TIMELINE_STATUSES.contains(s)) {
+            // SHOP, not TECHNICIAN: this path is only reached from the owner's
+            // status sheet. defaultProgressLabel is the same wording
+            // /progress-events would have written, so the row reads identically
+            // whichever door the status came through.
+            emitBookingEvent(ticketId, s, defaultProgressLabel(s), "SHOP");
         }
     }
 
