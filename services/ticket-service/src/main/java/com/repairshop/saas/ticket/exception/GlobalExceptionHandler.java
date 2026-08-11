@@ -64,6 +64,25 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(ex.getStatus()).body(body);
     }
 
+    /**
+     * IMEI already held by another open booking. 409 with a flat body carrying
+     * {@code code = IMEI_ALREADY_USED} so the shop app can tell this apart from
+     * any other save failure and show its dedicated alert.
+     */
+    @ExceptionHandler(ImeiConflictException.class)
+    public ResponseEntity<Map<String, Object>> handleImeiConflict(
+            ImeiConflictException ex, HttpServletRequest req) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("timestamp", Instant.now().toString());
+        body.put("status", HttpStatus.CONFLICT.value());
+        body.put("error", "IMEI_ALREADY_USED");
+        body.put("code", "IMEI_ALREADY_USED");
+        body.put("message", ex.getMessage());
+        body.put("conflictTrackingId", ex.getConflictTrackingId());
+        body.put("path", req.getRequestURI());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest req) {
         List<ApiError.FieldError> errors = ex.getBindingResult().getFieldErrors().stream()

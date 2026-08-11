@@ -3,6 +3,7 @@ package com.repairshop.saas.ticket.dto;
 import lombok.Data;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
 
 /**
  * Payload from the Invoice Generator screen. Client computes the totals
@@ -36,4 +37,20 @@ public class InvoiceRequest {
     // Snapshot line arrays as JSON strings (client serializes).
     private String spareLinesJson;
     private String serviceLinesJson;
+
+    /*
+     * Payment & credit (migration 89).
+     *
+     * Unlike the totals above, net and credit are NOT taken on trust: the server
+     * re-derives both from finalPayableAmount / advancePaid / amountPaid before
+     * it writes. These two carry a debt onto a customer's Cash Book account, and
+     * a figure that only the client computed could put a number there that the
+     * invoice above it never justified.
+     */
+    private BigDecimal advancePaid;
+    private BigDecimal netPayableAmount;
+    private BigDecimal amountPaid;
+    private BigDecimal creditAmount;
+    private String paymentNote;
+    private LocalDate paymentDate;
 }

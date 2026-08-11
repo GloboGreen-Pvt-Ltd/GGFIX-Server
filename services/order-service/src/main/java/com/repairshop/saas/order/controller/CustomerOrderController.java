@@ -64,8 +64,6 @@ public class CustomerOrderController {
         m.put("CUSTOMER_REJECTED",                             "Customer Rejected");
         m.put("IN_REPAIR",                                     "Repair Work In Progress");
         m.put("PARTS_REQUIRED",                                "Spare Parts Waiting");
-        m.put("PARTS_REPLACED",                                "Spare Parts Replaced");
-        m.put("QUALITY_CHECK_STARTED",                         "Quality Check Started");
         m.put("QUALITY_CHECK_COMPLETED",                       "Quality Check Completed");
         m.put("REPAIR_COMPLETED",                              "Repair Completed");
         m.put("READY",                                         "Ready for Delivery");

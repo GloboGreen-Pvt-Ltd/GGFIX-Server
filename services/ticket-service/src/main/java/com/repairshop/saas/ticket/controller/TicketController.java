@@ -2,6 +2,7 @@ package com.repairshop.saas.ticket.controller;
 
 import com.repairshop.saas.ticket.dto.CreateRepairNoteRequest;
 import com.repairshop.saas.ticket.dto.CreateSolutionPackRequest;
+import com.repairshop.saas.ticket.dto.ImeiAvailabilityResponse;
 import com.repairshop.saas.ticket.dto.RepairNoteResponse;
 import com.repairshop.saas.ticket.dto.SolutionPackResponse;
 import com.repairshop.saas.ticket.dto.TicketEventResponse;
@@ -158,6 +159,21 @@ public class TicketController {
         return ticketService.acceptByTechnician(shopId, userId, id);
     }
 
+    // Pre-flight for the shop app's invoice gate: is this IMEI well-formed, and
+    // is it free? Omit the query param to check whatever the booking already
+    // carries. Advisory only — PATCH /tickets/{id} enforces the same rule on
+    // write, so a race between two staff members still ends in one 409.
+    @GetMapping("/{id}/imei-availability")
+    @Operation(summary = "Check whether an IMEI is valid and not held by another open booking")
+    public ImeiAvailabilityResponse checkImeiAvailability(
+            @PathVariable UUID id,
+            @RequestParam(required = false) String imei,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.checkImeiAvailability(shopId, id, imei);
+    }
+
     // ---------- Repair notes ----------------------------------------------
 
     @PostMapping("/{id}/notes")
@@ -170,6 +186,21 @@ public class TicketController {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         return ticketService.addRepairNote(shopId, id, userIdFrom(request), body);
+    }
+
+    // Submitted Notes → Edit on the technician Ticket Detail screen. Same body
+    // as the create call: the note text plus the full attachment set it should
+    // end up with, so dropping a photo is just sending the shorter list.
+    @PutMapping("/{id}/notes/{noteId}")
+    @Operation(summary = "Edit a repair note already submitted on this ticket")
+    public RepairNoteResponse updateNote(
+            @PathVariable UUID id,
+            @PathVariable UUID noteId,
+            @Valid @RequestBody CreateRepairNoteRequest body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.updateRepairNote(shopId, id, noteId, body);
     }
 
     @GetMapping("/{id}/notes")
@@ -210,7 +241,7 @@ public class TicketController {
     // (or refreshes) the matching repair_booking_events row.
     @PostMapping("/{id}/progress-events")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    @Operation(summary = "Emit a service-progress step event (Parts Required, Quality Check, ...)")
+    @Operation(summary = "Emit a service-progress step event (Spare Parts Waiting, Quality Check, ...)")
     public void emitProgressEvent(
             @PathVariable UUID id,
             @RequestBody ProgressEventRequest body,

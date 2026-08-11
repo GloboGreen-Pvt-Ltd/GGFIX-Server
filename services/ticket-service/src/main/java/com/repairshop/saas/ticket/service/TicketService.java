@@ -12,6 +12,8 @@ import com.repairshop.saas.ticket.entity.RepairNote;
 import com.repairshop.saas.ticket.entity.Technician;
 import com.repairshop.saas.ticket.entity.Ticket;
 import com.repairshop.saas.ticket.entity.TicketSolutionPack;
+import com.repairshop.saas.ticket.dto.ImeiAvailabilityResponse;
+import com.repairshop.saas.ticket.exception.ImeiConflictException;
 import com.repairshop.saas.ticket.exception.ResourceNotFoundException;
 import com.repairshop.saas.ticket.repository.MasterTechnicianWorkStatusViewRepository;
 import com.repairshop.saas.ticket.repository.PlatformCustomerAddressRepository;
@@ -224,12 +226,20 @@ public class TicketService {
 
     /**
      * Returns booking/ticket counts for the shop (for owner dashboard).
-     * Keys: CREATED, IN_DIAGNOSIS, QUOTED, APPROVED, IN_REPAIR, READY, DELIVERED_PROCESSING, DELIVERED, CANCELLED, total, assignedCount.
+     * Keys: CREATED, IN_DIAGNOSIS, QUOTED, APPROVED, IN_REPAIR, READY,
+     * INVOICE_GENERATED, INVOICE_READY, DELIVERED_PROCESSING, DELIVERED,
+     * CANCELLED, total, assignedCount.
+     *
+     * The two invoice substates are here because the owner Home "Ready for
+     * Delivery" tile sums the whole post-repair band (READY + the billing /
+     * handover substates) to agree with the bookings-list chip it opens.
+     * Without them the tile read 0 the moment a booking's invoice was raised.
      */
     @Transactional(readOnly = true)
     public Map<String, Long> getCountsByShop(UUID shopId) {
         Map<String, Long> counts = new HashMap<>();
-        String[] statuses = { "CREATED", "IN_DIAGNOSIS", "QUOTED", "APPROVED", "IN_REPAIR", "READY", "DELIVERED_PROCESSING", "DELIVERED", "CANCELLED" };
+        String[] statuses = { "CREATED", "IN_DIAGNOSIS", "QUOTED", "APPROVED", "IN_REPAIR", "READY",
+                "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING", "DELIVERED", "CANCELLED" };
         for (String s : statuses) {
             counts.put(s, ticketRepository.countByShopIdAndStatus(shopId, s));
         }
@@ -397,7 +407,12 @@ public class TicketService {
         // Honor only the ones backed by a column; quietly ignore unknown keys.
         if (body.containsKey("imei")) {
             Object raw = body.get("imei");
-            ticket.setImei(raw == null ? null : String.valueOf(raw));
+            // Blank clears the field and skips both checks — the gate only ever
+            // sends a value, but an edit screen must still be able to wipe a
+            // wrong number without tripping format validation on "".
+            String imei = raw == null ? null : normalizeImei(String.valueOf(raw));
+            if (imei != null) assertImeiAvailable(shopId, id, imei);
+            ticket.setImei(imei);
         }
         if (body.containsKey("issueDescription")) {
             Object raw = body.get("issueDescription");
@@ -789,29 +804,52 @@ public class TicketService {
     }
 
     /** Manual emit endpoint for service-progress checklist rows on the
-     *  technician's Ticket Detail screen — Repair Work In Progress, Parts
-     *  Required, Parts Replaced, Quality Check Started/Completed, Repair
-     *  Completed. Idempotent: re-submitting refreshes the existing row's
-     *  note + timestamp instead of inserting a duplicate. */
+     *  technician's Ticket Detail screen — Repair Work In Progress, Spare
+     *  Parts Waiting, Quality Check Completed, Repair Completed.
+     *  Idempotent: re-submitting refreshes the existing row's note +
+     *  timestamp instead of inserting a duplicate.
+     *
+     *  Two step pairs were each collapsed to a single status, and their
+     *  retired halves must stay OUT of this set — an old installed build
+     *  still posting one has to be rejected, not silently written back into
+     *  a table the migration just cleaned:
+     *    * PARTS_REQUIRED ("Spare Parts Waiting") replaced PARTS_REQUIRED +
+     *      PARTS_REPLACED (migration 87).
+     *    * QUALITY_CHECK_COMPLETED replaced QUALITY_CHECK_STARTED +
+     *      QUALITY_CHECK_COMPLETED (migration 88). There is no "pending"
+     *      half any more: the completion event IS the record, and its
+     *      createdAt — stamped server-side in emitOrUpdateBookingEvent — is
+     *      the moment the technician marked the check done. */
     private static final java.util.Set<String> ALLOWED_PROGRESS_STEP_KEYS = java.util.Set.of(
-            "IN_REPAIR", "PARTS_REQUIRED", "PARTS_REPLACED",
-            "QUALITY_CHECK_STARTED", "QUALITY_CHECK_COMPLETED", "REPAIR_COMPLETED",
+            "IN_REPAIR", "PARTS_REQUIRED",
+            "QUALITY_CHECK_COMPLETED", "REPAIR_COMPLETED",
             // READY -> billing/handover sub-flow -> DELIVERED. Each substep is
             // its own emit so the customer history rail surfaces the invoice and
             // handover states distinctly instead of skipping straight to
             // "Delivered to Customer".
             "READY", "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING",
             "DELIVERED", "CANCELLED",
-            // RETURN_DELIVERY is the "device not repaired, returning as-is"
-            // counterpart to READY. Added so the technician can mark a job
-            // returned without going through the full Repair Completed path.
-            "RETURN_DELIVERY",
+            // Return-Device flow. RETURN_DELIVERY is the "device not repaired,
+            // returning as-is" counterpart to READY. CUSTOMER_REJECTED is the
+            // other way onto that branch — the customer turned the estimate
+            // down — and is emitted by the shop's Update Service Status sheet;
+            // order-service raises the same key from the customer's own reject
+            // tap, so both routes land on one row.
+            "RETURN_DELIVERY", "CUSTOMER_REJECTED",
             // REPAIR_NOT_COMPLETED is the technician's "tried but couldn't fix"
             // signal — surfaced on the customer / shop history rail with the
             // canonical "Your repair is not completed" note. Does NOT advance
             // ticket.status; the row is for visibility only.
             "REPAIR_NOT_COMPLETED");
 
+    // Who may be recorded as having performed a step. The endpoint is shop-scoped
+    // rather than role-gated, so an owner token and an employee token can both
+    // post here — QUALITY_CHECK_COMPLETED is deliberately raisable from either
+    // side (the technician's checklist or the owner's Service History screen),
+    // and the actor is what tells the two apps apart afterwards:
+    //   TECHNICIAN — the employee app's checklist (the default when unset)
+    //   OWNER      — a person tapping in the shop app
+    //   SHOP       — auto/derived emits, which the employee checklist ignores
     private static final java.util.Set<String> ALLOWED_PROGRESS_ACTORS = java.util.Set.of(
             "TECHNICIAN", "OWNER", "SHOP");
 
@@ -828,7 +866,7 @@ public class TicketService {
         if (!ALLOWED_PROGRESS_ACTORS.contains(a)) a = "TECHNICIAN";
         emitOrUpdateBookingEvent(t.getId(), key, text, a);
         // The BookingsHistory list reads ticket.status directly, so a work-status
-        // event alone (Parts Required, Repair Completed, Delivered to Customer,
+        // event alone (Spare Parts Waiting, Repair Completed, Delivered to Customer,
         // ...) used to leave the badge stuck on the previous lifecycle status.
         // Resolve the admin-managed master row for this code and advance
         // ticket.status to its `ticket_status` mapping so the list badge moves
@@ -914,21 +952,26 @@ public class TicketService {
         customerOrderMirrorService.mirrorOnUpsert(t);
     }
 
+    // Note text written when the caller sends none. These deliberately MATCH the
+    // rail's row labels: the timeline hides a note identical to its label, so a
+    // matching string renders as a clean row instead of repeating itself
+    // underneath. Only REPAIR_NOT_COMPLETED differs on purpose — it carries the
+    // sentence the customer should read.
     private static String defaultProgressLabel(String key) {
         switch (key) {
             case "IN_REPAIR":              return "Repair Work In Progress";
             case "PARTS_REQUIRED":         return "Spare Parts Waiting";
-            case "PARTS_REPLACED":         return "Parts Replaced";
-            case "QUALITY_CHECK_STARTED":  return "Quality Check Started";
             case "QUALITY_CHECK_COMPLETED":return "Quality Check Completed";
             case "REPAIR_COMPLETED":       return "Repair Completed";
             case "REPAIR_NOT_COMPLETED":   return "Your repair is not completed";
+            case "CUSTOMER_REJECTED":      return "Customer Rejected";
+            case "RETURN_DELIVERY":        return "Return Delivery";
             case "INVOICE_GENERATED":      return "Invoice Generated";
             case "INVOICE_READY":          return "Invoice Ready";
-            case "DELIVERED_PROCESSING":   return "Delivered to Customer Processing";
+            case "DELIVERED_PROCESSING":   return "Out for Delivery";
             case "READY":                  return "Ready for Delivery";
             case "DELIVERED":              return "Delivered to Customer";
-            case "CANCELLED":              return "Work Cancelled";
+            case "CANCELLED":              return "Repair Cancelled";
             default:                       return key;
         }
     }
@@ -991,8 +1034,10 @@ public class TicketService {
                 // shop's Notifications screens. Update branch above
                 // intentionally skips this so re-emits (e.g., the technician
                 // editing a verified note) don't spam the same alert twice.
+                // The actor goes to the shop feed so a step the OWNER just
+                // performed in their own app doesn't notify them about it.
                 customerOrderMirrorService.emitCustomerNotificationForStatus(booking.getId(), statusKey);
-                customerOrderMirrorService.emitShopNotificationForStatus(booking.getId(), statusKey);
+                customerOrderMirrorService.emitShopNotificationForStatus(booking.getId(), statusKey, actor);
             }
         });
     }
@@ -1276,6 +1321,91 @@ public class TicketService {
     // whether the ticket was minted before or after mintTicketFromBooking
     // learned to copy these snapshot fields at mint time.
 
+    // ---------- IMEI uniqueness -------------------------------------------
+
+    // A booking past these no longer holds the device, so the same handset can
+    // legitimately come back for another repair and reuse its IMEI. Anything
+    // else counts as still open and blocks a second booking from claiming it.
+    private static final java.util.Set<String> IMEI_RELEASED_STATUSES =
+            java.util.Set.of("DELIVERED", "CANCELLED", "RETURNED");
+
+    /**
+     * Digits only, 14–17 long (15 is the IMEI proper; 14 is the TAC+serial
+     * without the check digit, 16/17 cover IMEISV). Mirrors normaliseImei in
+     * the shop app so the two ends agree on what a valid number looks like.
+     * Returns null for blank input; throws for a non-blank value that isn't a
+     * plausible IMEI.
+     */
+    private static String normalizeImei(String raw) {
+        if (raw == null) return null;
+        String digits = raw.replaceAll("[^0-9]", "");
+        if (digits.isEmpty()) return null;
+        if (digits.length() < 14 || digits.length() > 17) {
+            throw new IllegalArgumentException(
+                    "IMEI must be 14 to 17 digits — got " + digits.length());
+        }
+        return digits;
+    }
+
+    /**
+     * Refuse an IMEI that another still-open booking in this shop already
+     * holds. The frontend asks first so it can show a proper alert, but this is
+     * the check that counts: two staff members can be on the same device at
+     * once, and only the write path is ordered.
+     */
+    private void assertImeiAvailable(UUID shopId, UUID ticketId, String imei) {
+        findImeiConflict(shopId, ticketId, imei).ifPresent(other -> {
+            throw new ImeiConflictException(
+                    "IMEI " + imei + " is already on booking "
+                            + (other.getTrackingId() != null ? other.getTrackingId() : other.getId())
+                            + ", which is still open.",
+                    other.getTrackingId());
+        });
+    }
+
+    private java.util.Optional<Ticket> findImeiConflict(UUID shopId, UUID ticketId, String imei) {
+        return ticketRepository.findByShopIdAndImei(shopId, imei).stream()
+                .filter(t -> ticketId == null || !ticketId.equals(t.getId()))
+                .filter(t -> !IMEI_RELEASED_STATUSES.contains(
+                        t.getStatus() == null ? "" : t.getStatus().trim().toUpperCase()))
+                .findFirst();
+    }
+
+    /**
+     * Read-only counterpart of {@link #assertImeiAvailable}, for the shop app's
+     * pre-flight check. Used in BOTH branches of the invoice gate: on a booking
+     * that already carries an IMEI there is nothing to save, so this is the only
+     * thing standing between a duplicate number and an invoice.
+     */
+    @Transactional(readOnly = true)
+    public ImeiAvailabilityResponse checkImeiAvailability(UUID shopId, UUID ticketId, String rawImei) {
+        Ticket t = ticketRepository.findByShopIdAndId(shopId, ticketId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
+        // Fall back to what the ticket already carries so the caller can ask
+        // "is my own IMEI still clean?" without repeating it in the query.
+        String candidate = rawImei != null && !rawImei.isBlank() ? rawImei : t.getImei();
+        String imei;
+        try {
+            imei = normalizeImei(candidate);
+        } catch (IllegalArgumentException e) {
+            return ImeiAvailabilityResponse.builder()
+                    .imei(candidate).available(false).valid(false).message(e.getMessage()).build();
+        }
+        if (imei == null) {
+            return ImeiAvailabilityResponse.builder()
+                    .imei(null).available(false).valid(false)
+                    .message("No IMEI on this booking yet.").build();
+        }
+        return findImeiConflict(shopId, t.getId(), imei)
+                .map(other -> ImeiAvailabilityResponse.builder()
+                        .imei(imei).available(false).valid(true)
+                        .conflictTrackingId(other.getTrackingId())
+                        .message("This IMEI number is already associated with another service booking.")
+                        .build())
+                .orElseGet(() -> ImeiAvailabilityResponse.builder()
+                        .imei(imei).available(true).valid(true).build());
+    }
+
     // ---------- Repair notes ----------------------------------------------
 
     @Transactional
@@ -1332,6 +1462,87 @@ public class TicketService {
         return toNoteResponse(saved);
     }
 
+    /**
+     * Edit a note the technician already submitted (Submitted Notes → Edit).
+     *
+     * Two rules make this behave like a correction rather than a new action:
+     *
+     *  1. repair_notes.created_at is NOT touched — the note still belongs to the
+     *     moment the work was recorded. Only updated_at moves, and the app shows
+     *     it as an "Edited" marker.
+     *  2. When the edited note is the one currently on the customer / owner
+     *     Service History rail, that row is refreshed in place with the new text
+     *     and media but pinned to the row's EXISTING timestamp. Letting
+     *     emitOrUpdateBookingEvent stamp now() would drag "Technician Issue
+     *     Verified & Updated" to the top of the rail — and hand it the NEW badge —
+     *     because someone fixed a typo.
+     *
+     * Editing an OLDER note leaves the rail alone: the row mirrors the latest
+     * customer-visible note, and an old note's text must not overwrite it.
+     * No notification is raised either way — emitOrUpdateBookingEvent only pings
+     * the feeds on a first-time emit.
+     */
+    @Transactional
+    public RepairNoteResponse updateRepairNote(UUID shopId, UUID ticketId, UUID noteId,
+                                               CreateRepairNoteRequest body) {
+        Ticket t = ticketRepository.findByShopIdAndId(shopId, ticketId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
+        RepairNote note = repairNoteRepository.findByIdAndTicketId(noteId, t.getId())
+                .orElseThrow(() -> new ResourceNotFoundException("Note not found: " + noteId));
+
+        String imagesJson = null;
+        if (body.getImageUrls() != null && !body.getImageUrls().isEmpty()) {
+            try {
+                imagesJson = new com.fasterxml.jackson.databind.ObjectMapper()
+                        .writeValueAsString(body.getImageUrls());
+            } catch (Exception ignored) { /* leave null on malformed input */ }
+        }
+        String audioUrl = body.getAudioUrl();
+        if (audioUrl != null && audioUrl.isBlank()) audioUrl = null;
+
+        // Clearing an attachment is a real edit: an absent/empty imageUrls list
+        // means "the technician removed the photos", so null is written rather
+        // than the previous value being preserved.
+        note.setNote(body.getNote());
+        note.setAudioUrl(audioUrl);
+        note.setImagesJson(imagesJson);
+        if (body.getIsInternal() != null) note.setIsInternal(body.getIsInternal());
+        note.setUpdatedAt(java.time.Instant.now());
+        RepairNote saved = repairNoteRepository.save(note);
+
+        if (!Boolean.TRUE.equals(saved.getIsInternal()) && isLatestVisibleNote(t.getId(), saved)) {
+            String noteText = saved.getNote() != null && !saved.getNote().isBlank()
+                    ? saved.getNote()
+                    : "Technician Issue Verified & Updated";
+            emitOrUpdateBookingEvent(t.getId(), KEY_ISSUE_VERIFIED, noteText, "TECHNICIAN",
+                    saved.getAudioUrl(), saved.getImagesJson(),
+                    existingEventInstant(t.getId(), KEY_ISSUE_VERIFIED, saved.getCreatedAt()));
+        }
+        return toNoteResponse(saved);
+    }
+
+    /** True when no other customer-visible note on this ticket is newer. */
+    private boolean isLatestVisibleNote(UUID ticketId, RepairNote note) {
+        return repairNoteRepository.findByTicketIdOrderByCreatedAtDesc(ticketId).stream()
+                .filter(n -> !Boolean.TRUE.equals(n.getIsInternal()))
+                .findFirst()
+                .map(latest -> latest.getId().equals(note.getId()))
+                .orElse(true);
+    }
+
+    /** Current timestamp of a timeline row, so a refresh can pin it in place. */
+    private java.time.Instant existingEventInstant(UUID ticketId, String statusKey,
+                                                   java.time.Instant fallback) {
+        return platformRepairBookingRepository.findByTicketId(ticketId)
+                .flatMap(b -> platformRepairBookingEventRepository
+                        .findByBookingIdOrderByCreatedAtAsc(b.getId())
+                        .stream()
+                        .filter(e -> statusKey.equalsIgnoreCase(e.getStatus()))
+                        .findFirst()
+                        .map(PlatformRepairBookingEvent::getCreatedAt))
+                .orElse(fallback != null ? fallback : java.time.Instant.now());
+    }
+
     @Transactional(readOnly = true)
     public List<RepairNoteResponse> listRepairNotes(UUID shopId, UUID ticketId) {
         Ticket t = ticketRepository.findByShopIdAndId(shopId, ticketId)
@@ -1351,6 +1562,7 @@ public class TicketService {
                 .audioUrl(n.getAudioUrl())
                 .imageUrls(parseImagesJson(n.getImagesJson()))
                 .createdAt(n.getCreatedAt())
+                .updatedAt(n.getUpdatedAt())
                 .build();
     }
 

@@ -20,9 +20,13 @@ VALUES
   ('CUSTOMER_APPROVED',                         'Customer Approved',                         'IN_REPAIR',     80, true),
   ('CUSTOMER_REJECTED',                         'Customer Rejected',                         'IN_REPAIR',     90, true),
   ('REPAIR_WORK_IN_PROGRESS',                   'Repair Work In Progress',                   'IN_REPAIR',    100, true),
-  ('PARTS_REQUIRED',                            'Parts Required',                            'IN_REPAIR',    110, true),
-  ('PARTS_REPLACED',                            'Parts Replaced',                            'IN_REPAIR',    120, true),
-  ('QUALITY_CHECK_STARTED',                     'Quality Check Started',                     'IN_REPAIR',    130, true),
+  -- Single spare-parts status. The old PARTS_REPLACED row was retired by
+  -- migration 87 — one row covers the whole wait, and the outcome goes in the
+  -- event's note rather than a second status.
+  ('PARTS_REQUIRED',                            'Spare Parts Waiting',                       'IN_REPAIR',    110, true),
+  -- Single quality-check status. The old QUALITY_CHECK_STARTED row was retired
+  -- by migration 88 — completing the check is the only thing recorded, and its
+  -- event timestamp is when the technician marked it done.
   ('QUALITY_CHECK_COMPLETED',                   'Quality Check Completed',                   'READY',        140, true),
   ('REPAIR_COMPLETED',                          'Repair Completed',                          'READY',        150, true),
   ('READY_FOR_DELIVERY',                        'Ready for Delivery',                        'READY',        160, true),

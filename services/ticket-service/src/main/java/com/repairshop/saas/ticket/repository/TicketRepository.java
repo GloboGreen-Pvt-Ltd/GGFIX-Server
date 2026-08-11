@@ -46,6 +46,19 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
 
     boolean existsByShopIdAndTrackingId(UUID shopId, String trackingId);
 
+    /**
+     * Every ticket in this shop carrying an IMEI, for the uniqueness gate in
+     * front of invoice generation.
+     *
+     * Scoped to the shop on purpose — the same handset legitimately passes
+     * through different shops, and a cross-tenant match would both block a
+     * valid booking and leak that another shop holds the device. Narrowing to
+     * "still open" and excluding the ticket being edited happens in the
+     * service: the row counts here are tiny, and the lifecycle vocabulary that
+     * decides what "open" means already lives there.
+     */
+    List<Ticket> findByShopIdAndImei(UUID shopId, String imei);
+
     long countByShopId(UUID shopId);
 
     long countByShopIdAndCustomerId(UUID shopId, UUID customerId);

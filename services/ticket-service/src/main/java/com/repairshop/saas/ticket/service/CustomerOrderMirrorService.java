@@ -212,12 +212,12 @@ public class CustomerOrderMirrorService {
                     java.util.Map.entry("WAITING_FOR_CUSTOMER_APPROVAL",
                             new String[]{"Waiting for customer approval",
                                     "Booking %s is held until the customer approves."}),
+                    // Single spare-parts status. PARTS_REPLACED was retired with
+                    // migration 87 — the wait is one row now, so the shop gets
+                    // one alert instead of a pending/replaced pair.
                     java.util.Map.entry("PARTS_REQUIRED",
-                            new String[]{"Spare parts pending",
+                            new String[]{"Spare parts waiting",
                                     "Booking %s is waiting on spare parts."}),
-                    java.util.Map.entry("PARTS_REPLACED",
-                            new String[]{"Spare parts replaced",
-                                    "Spare parts were replaced on booking %s."}),
                     java.util.Map.entry("QUALITY_CHECK_COMPLETED",
                             new String[]{"Quality check completed",
                                     "Booking %s passed its quality check."}),
@@ -257,7 +257,26 @@ public class CustomerOrderMirrorService {
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void emitShopNotificationForStatus(UUID bookingId, String statusKey) {
+        emitShopNotificationForStatus(bookingId, statusKey, null);
+    }
+
+    /**
+     * Actor-aware overload. {@code actor} is who performed the step, when the
+     * caller knows it.
+     *
+     * OWNER means someone in the shop app tapped this themselves — Quality Check
+     * Completed is markable from the owner's Service History screen as well as
+     * the technician's checklist — so the shop feed stays silent rather than
+     * telling the owner what they just did. That is the same rule the template
+     * map above already follows by omitting owner-driven statuses; it just has
+     * to be enforced at call time for a status that BOTH sides can raise.
+     *
+     * A null/unknown actor notifies as before.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void emitShopNotificationForStatus(UUID bookingId, String statusKey, String actor) {
         if (bookingId == null || statusKey == null) return;
+        if (actor != null && "OWNER".equalsIgnoreCase(actor.trim())) return;
         String key = statusKey.toUpperCase();
         String[] template = SHOP_NOTIFICATION_TEMPLATES.get(key);
         if (template == null) return;

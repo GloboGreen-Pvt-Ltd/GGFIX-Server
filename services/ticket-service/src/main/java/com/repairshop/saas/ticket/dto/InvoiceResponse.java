@@ -5,6 +5,7 @@ import lombok.Data;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.UUID;
 
 @Data
@@ -34,6 +35,25 @@ public class InvoiceResponse {
     private String spareLinesJson;
     private String serviceLinesJson;
 
+    // ── Payment & credit (migration 89) ──
+    private BigDecimal advancePaid;
+    private BigDecimal netPayableAmount;
+    private BigDecimal amountPaid;
+    private BigDecimal creditAmount;
+    private String paymentNote;
+    private LocalDate paymentDate;
+
+    /**
+     * Where the credit landed in the Cash Book. Both stay null when there is no
+     * credit — and, importantly, when there IS a credit but the ticket carries
+     * no usable phone number, since an account cannot be opened without one. The
+     * app reads that combination (creditAmount &gt; 0, entry id null) as "this
+     * debt was recorded on the bill but is NOT being tracked in the Cash Book"
+     * and says so, rather than letting it pass for filed.
+     */
+    private UUID creditPartyId;
+    private UUID creditLedgerEntryId;
+
     private Instant generatedAt;
 
     public static InvoiceResponse from(Invoice inv) {
@@ -58,6 +78,14 @@ public class InvoiceResponse {
         r.amountInWords = inv.getAmountInWords();
         r.spareLinesJson = inv.getSpareLinesJson();
         r.serviceLinesJson = inv.getServiceLinesJson();
+        r.advancePaid = inv.getAdvancePaid();
+        r.netPayableAmount = inv.getNetPayableAmount();
+        r.amountPaid = inv.getAmountPaid();
+        r.creditAmount = inv.getCreditAmount();
+        r.paymentNote = inv.getPaymentNote();
+        r.paymentDate = inv.getPaymentDate();
+        r.creditPartyId = inv.getCreditPartyId();
+        r.creditLedgerEntryId = inv.getCreditLedgerEntryId();
         r.generatedAt = inv.getGeneratedAt();
         return r;
     }

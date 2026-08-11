@@ -5,6 +5,7 @@ import lombok.*;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.UUID;
 
 /**
@@ -89,6 +90,52 @@ public class Invoice {
 
     @Column(name = "amount_in_words", columnDefinition = "TEXT")
     private String amountInWords;
+
+    // ── Payment & credit (migration 89) ──
+    // final − advance = net; net − paid = credit. Stored rather than derived
+    // because an invoice is a document: it has to reprint the same figures next
+    // year even if the ticket's advance or the tax rules have moved since.
+
+    /** Collected before this bill — normally the booking deposit on the ticket. */
+    @Column(name = "advance_paid", nullable = false, precision = 14, scale = 2)
+    @Builder.Default
+    private BigDecimal advancePaid = BigDecimal.ZERO;
+
+    @Column(name = "net_payable_amount", nullable = false, precision = 14, scale = 2)
+    @Builder.Default
+    private BigDecimal netPayableAmount = BigDecimal.ZERO;
+
+    /** Handed over at the counter now. Equals the net on a full payment. */
+    @Column(name = "amount_paid", nullable = false, precision = 14, scale = 2)
+    @Builder.Default
+    private BigDecimal amountPaid = BigDecimal.ZERO;
+
+    /** What the customer still owes — mirrored into the Cash Book, see below. */
+    @Column(name = "credit_amount", nullable = false, precision = 14, scale = 2)
+    @Builder.Default
+    private BigDecimal creditAmount = BigDecimal.ZERO;
+
+    @Column(name = "payment_note", length = 500)
+    private String paymentNote;
+
+    /** Counter day, not an instant — same rule as ShopLedgerEntry.entryDate. */
+    @Column(name = "payment_date")
+    private LocalDate paymentDate;
+
+    /** The Cash Book customer account the credit was posted to (migration 81). */
+    @Column(name = "credit_party_id")
+    private UUID creditPartyId;
+
+    /**
+     * The shop_ledger_entries row mirroring {@link #creditAmount}.
+     *
+     * Held so re-generating this invoice UPDATES that row. Without it every
+     * re-generation would post a second GIVEN entry and silently double the
+     * customer's debt — and a credit later cleared to zero could never find the
+     * row it needs to delete.
+     */
+    @Column(name = "credit_ledger_entry_id")
+    private UUID creditLedgerEntryId;
 
     // ── Line item snapshots ──
     @Column(name = "spare_lines_json", columnDefinition = "TEXT")
