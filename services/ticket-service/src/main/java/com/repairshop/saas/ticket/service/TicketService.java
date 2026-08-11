@@ -136,24 +136,19 @@ public class TicketService {
             emitBookingEvent(t.getId(), "WAITING_FOR_CUSTOMER_APPROVAL",
                     "Waiting for Customer Approval", "TECHNICIAN");
         }
-        // CUSTOMER_APPROVED was the one step with no self-heal: it only ever got
-        // written by an explicit false -> true flip (update / patch here, or the
-        // customer app via RepairBookingController#customerApproval). A ticket
-        // that arrived at approval any other way — approved before its mirror
-        // booking existed, status advanced straight past the gate, or a
-        // re-approval that the dedupe in emitBookingEvent swallowed — left
-        // "Customer Approved" grey and undated on the rail while the rows either
-        // side of it were lit. Derive it from ticket state like every other step
-        // in this method.
+        // CUSTOMER_APPROVED is deliberately NOT derived here. It used to be
+        // back-filled from tickets.customer_approval (and from a status that had
+        // advanced past the gate), which lit "Customer Approved" on the rail for
+        // an approval nobody gave: a shop that ticked the approval box while
+        // creating the booking got a green Customer Approved stamped at the first
+        // page load — minutes before the technician was even assigned, and with
+        // "Service Re-estimated" still grey above it.
         //
-        // Insert-only on purpose: emitBookingEvent never refreshes createdAt,
-        // and this runs on EVERY ticket read, so an upsert here would drag the
-        // approval timestamp forward on each page load.
-        if (Boolean.TRUE.equals(t.getCustomerApproval())
-                || Set.of("APPROVED", "IN_REPAIR", "READY", "DELIVERED").contains(status)) {
-            emitBookingEvent(t.getId(), "CUSTOMER_APPROVED",
-                    "Customer Approved", "USER");
-        }
+        // Approval is an event, not a state to be inferred. The only writers are
+        // the three real approval actions, each stamping its own instant:
+        //   * update() / patch()  — shop ticks "Customer Repair Approval"
+        //   * RepairBookingController#customerApproval — customer taps Approve
+        // All three route through onCustomerApproved().
         if (hasAtLeastOneUrl(t.getTechnicianPhotosJson())) {
             emitBookingEvent(t.getId(), "TECHNICIAN_UPLOADED_DEVICE_IMAGES",
                     "Technician Uploaded Device Images", "TECHNICIAN");
@@ -166,12 +161,13 @@ public class TicketService {
             emitBookingEvent(t.getId(), KEY_ISSUE_VERIFIED,
                     "Technician Issue Verified & Updated", "TECHNICIAN");
         }
-        // "Repair Work In Progress" is derived from "Technician Issue Verified &
-        // Updated" and must carry its exact timestamp — see
-        // syncWorkInProgressWithIssueVerified. Runs on every read so bookings
-        // that pre-date the pairing (and any row whose timestamp drifted) heal
-        // themselves; it converges, so a re-read never moves the value again.
-        syncWorkInProgressWithIssueVerified(t.getId());
+        // "Repair Work In Progress" is not derived at all any more. It used to be
+        // paired to "Technician Issue Verified & Updated", carrying that row's
+        // exact timestamp — but verifying the issue is diagnosis, not repair, so
+        // the rail showed repair work starting at the minute the technician
+        // described the fault, before the re-estimate had even been sent. The
+        // only writer now is the technician's own checklist tap
+        // (emitProgressStepEvent), stamped when they actually start.
         boolean hasNewSolutionPack = !ticketSolutionPackRepository
                 .findByTicketIdAndPackTypeOrderByCreatedAtDesc(t.getId(), "NEW").isEmpty();
         if (hasNewSolutionPack) {
@@ -353,7 +349,7 @@ public class TicketService {
         if (priceItemsChanged || estimateChanged) {
             emitOrUpdateBookingEvent(ticket.getId(),
                     "RE_ESTIMATED_CONFIRMED",
-                    "Service Re-estimated",
+                    NOTE_RE_ESTIMATED,
                     "SHOP");
             // The event alone only feeds the Service History rail. The owner's
             // Re-Estimated list and the card badge both read ticket.status, so
@@ -362,21 +358,14 @@ public class TicketService {
             markReEstimated(ticket);
         }
         // Shop-side approval flip (owner ticked "Customer Repair Approval" in
-        // the edit flow): light up CUSTOMER_APPROVED. Customer-side approval is
-        // emitted from RepairBookingController#customerApproval.
+        // the edit flow). Customer-side approval comes in through
+        // RepairBookingController#customerApproval; both land on the same
+        // handler so the pair of rows it writes is identical either way.
         //
-        // emitOrUpdate, not emit: after a re-estimate the shop clears the prior
-        // approval and re-prompts, so the customer approves a SECOND time. The
-        // insert-only helper dedupes by status key and would keep the first
-        // approval's createdAt — leaving the rail showing "Service Re-estimated"
-        // at a later time than the "Customer Approved" that supposedly followed
-        // it. The !wasApproved guard means this only runs on a real false -> true
-        // transition, so the timestamp can't drift on an ordinary re-save.
+        // The !wasApproved guard means this only runs on a real false -> true
+        // transition, so an ordinary re-save can't drag the timestamp forward.
         if (!wasApproved && Boolean.TRUE.equals(ticket.getCustomerApproval())) {
-            emitOrUpdateBookingEvent(ticket.getId(),
-                    "CUSTOMER_APPROVED",
-                    "Customer Approved",
-                    "SHOP");
+            onCustomerApproved(ticket, "SHOP");
         }
         return toResponse(ticket);
     }
@@ -532,14 +521,13 @@ public class TicketService {
                         "Re-assigned to " + techName, "SHOP");
             }
         }
-        // Owner ticked "Customer Repair Approval" in the Edit Booking screen.
-        // Light up CUSTOMER_APPROVED on the timeline. emitOrUpdate (see the same
-        // call in update()) so a re-approval after a re-estimate carries the new
-        // time rather than the original one; the !wasApprovedBeforePatch guard
-        // keeps a no-op re-save with the flag already true from touching it.
+        // Owner ticked "Customer Repair Approval" in the Edit Booking screen —
+        // same handler as update() and as the customer's own Approve tap, so the
+        // approval and the repair-work row it opens are written identically
+        // whichever screen triggered them. The !wasApprovedBeforePatch guard
+        // keeps a no-op re-save with the flag already true from touching them.
         if (!wasApprovedBeforePatch && Boolean.TRUE.equals(ticket.getCustomerApproval())) {
-            emitOrUpdateBookingEvent(ticket.getId(), "CUSTOMER_APPROVED",
-                    "Customer Approved", "SHOP");
+            onCustomerApproved(ticket, "SHOP");
         }
         return toResponse(ticket);
     }
@@ -727,72 +715,48 @@ public class TicketService {
         return !trimmed.isEmpty() && !trimmed.equals("[]") && trimmed.contains("http");
     }
 
-    // The technician's compliance-note submit lights "Technician Issue Verified
-    // & Updated"; "Repair Work In Progress" is paired to it and always shows the
-    // same server-stamped time. Both keys are the DB-stored event codes, not the
-    // labels — see serviceHistoryPhases.js SHOP_BOOKING_STATUS_OPTIONS.
+    // DB-stored event codes, not the labels — see serviceHistoryPhases.js
+    // SHOP_BOOKING_STATUS_OPTIONS.
     private static final String KEY_ISSUE_VERIFIED = "TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED";
-    private static final String KEY_WORK_IN_PROGRESS = "IN_REPAIR";
+    private static final String KEY_RE_ESTIMATED = "RE_ESTIMATED_CONFIRMED";
+
+    // Notes read on the Service History rail under each step's label. The
+    // renderer hides a note identical to the label, so these deliberately say
+    // what happened rather than repeating the row title.
+    static final String NOTE_RE_ESTIMATED = "Re-estimated service submitted";
+    static final String NOTE_APPROVED_RE_ESTIMATE = "Customer approved the re-estimated service";
+    static final String NOTE_APPROVED = "Customer approved the estimate";
 
     /**
-     * Pin "Repair Work In Progress" to the timestamp of "Technician Issue
-     * Verified & Updated" — verifying the issue is what puts the device into
-     * repair, so the two rows are one action and must never show two different
-     * times on the timeline.
+     * The customer's verdict landed — from the customer app's Approve tap or
+     * from the shop ticking "Customer Repair Approval" on their behalf.
      *
-     * Issue Verified is the single source of truth: its createdAt is stamped
-     * server-side by emitOrUpdateBookingEvent (Instant.now(), refreshed on every
-     * re-submit) and copied here verbatim. Nothing is generated in this method,
-     * so re-running it is a no-op once the pair is aligned — that's what lets it
-     * sit on the read path in syncStepEventsFromTicketState and heal old rows
-     * without dragging timestamps forward on each page load.
+     * Writes CUSTOMER_APPROVED and nothing else. "Repair Work In Progress" is
+     * NOT opened here: an approval means the customer agreed to the price, not
+     * that a technician has picked the device back up. That row belongs to the
+     * technician's own checklist tap (emitProgressStepEvent), which stamps the
+     * minute work actually resumed. Nothing on this rail is auto-derived any
+     * more — every step waits for the action it describes.
      *
-     * Deliberately does NOT call advanceTicketStatusForWorkCode(IN_REPAIR) the
-     * way the manual checklist emit does: moving tickets.status to IN_REPAIR
-     * would make syncStepEventsFromTicketState back-fill CUSTOMER_APPROVED and
-     * WAITING_FOR_CUSTOMER_APPROVAL, lighting an approval the customer never
-     * gave. This is a timeline pairing only; the lifecycle status still advances
-     * through its own gates.
+     * emitOrUpdate, not the insert-only emit: a re-estimate clears the prior
+     * approval and re-prompts, so the customer approves a SECOND time. Dedupe by
+     * status key would keep the first approval's createdAt and leave the rail
+     * showing "Service Re-estimated" later than the approval that followed it.
      */
-    private void syncWorkInProgressWithIssueVerified(UUID ticketId) {
-        platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
-            List<PlatformRepairBookingEvent> events = platformRepairBookingEventRepository
-                    .findByBookingIdOrderByCreatedAtAsc(booking.getId());
-            java.time.Instant verifiedAt = events.stream()
-                    .filter(e -> KEY_ISSUE_VERIFIED.equalsIgnoreCase(e.getStatus()))
-                    .map(PlatformRepairBookingEvent::getCreatedAt)
-                    .filter(at -> at != null)
-                    .findFirst()
-                    .orElse(null);
-            // No verification yet → nothing to mirror. Repair Work In Progress
-            // stays whatever the technician's own checklist tap made it.
-            if (verifiedAt == null) return;
-            var existing = events.stream()
-                    .filter(e -> KEY_WORK_IN_PROGRESS.equalsIgnoreCase(e.getStatus()))
-                    .findFirst();
-            if (existing.isPresent()) {
-                PlatformRepairBookingEvent e = existing.get();
-                if (verifiedAt.equals(e.getCreatedAt())) return; // already paired — no write
-                // Only the timestamp is mirrored. Note / actor / media stay as
-                // the row's own emit left them so a re-verify doesn't overwrite
-                // what the technician recorded against this step.
-                e.setCreatedAt(verifiedAt);
-                platformRepairBookingEventRepository.save(e);
-            } else {
-                platformRepairBookingEventRepository.save(PlatformRepairBookingEvent.builder()
-                        .bookingId(booking.getId())
-                        .status(KEY_WORK_IN_PROGRESS)
-                        .note(defaultProgressLabel(KEY_WORK_IN_PROGRESS))
-                        .actor("TECHNICIAN")
-                        // Explicit, so @PrePersist doesn't stamp now() instead.
-                        .createdAt(verifiedAt)
-                        .build());
-                customerOrderMirrorService.emitCustomerNotificationForStatus(
-                        booking.getId(), KEY_WORK_IN_PROGRESS);
-                customerOrderMirrorService.emitShopNotificationForStatus(
-                        booking.getId(), KEY_WORK_IN_PROGRESS);
-            }
-        });
+    private void onCustomerApproved(Ticket ticket, String actor) {
+        boolean afterReEstimate = hasBookingEvent(ticket.getId(), KEY_RE_ESTIMATED);
+        emitOrUpdateBookingEvent(ticket.getId(), "CUSTOMER_APPROVED",
+                afterReEstimate ? NOTE_APPROVED_RE_ESTIMATE : NOTE_APPROVED,
+                actor, null, null, java.time.Instant.now());
+    }
+
+    private boolean hasBookingEvent(UUID ticketId, String statusKey) {
+        return platformRepairBookingRepository.findByTicketId(ticketId)
+                .map(booking -> platformRepairBookingEventRepository
+                        .findByBookingIdOrderByCreatedAtAsc(booking.getId())
+                        .stream()
+                        .anyMatch(e -> statusKey.equalsIgnoreCase(e.getStatus())))
+                .orElse(false);
     }
 
     // Idempotent event emit for the customer/owner Service History rail. Looks
@@ -863,13 +827,6 @@ public class TicketService {
         String a = actor == null ? "" : actor.trim().toUpperCase();
         if (!ALLOWED_PROGRESS_ACTORS.contains(a)) a = "TECHNICIAN";
         emitOrUpdateBookingEvent(t.getId(), key, text, a);
-        // Repair Work In Progress is paired to Issue Verified once the technician
-        // has verified the issue, so re-pin it right away rather than letting the
-        // read-path sync snap the timestamp back on the next refresh. No-op when
-        // the issue hasn't been verified yet — then this tap stands on its own.
-        if (KEY_WORK_IN_PROGRESS.equals(key)) {
-            syncWorkInProgressWithIssueVerified(t.getId());
-        }
         // The BookingsHistory list reads ticket.status directly, so a work-status
         // event alone (Parts Required, Repair Completed, Delivered to Customer,
         // ...) used to leave the badge stuck on the previous lifecycle status.
@@ -1366,11 +1323,11 @@ public class TicketService {
                     KEY_ISSUE_VERIFIED,
                     noteText, "TECHNICIAN",
                     audioUrl, imagesJson, verifiedAt);
-            // Verifying the issue is what starts the repair, so "Repair Work In
-            // Progress" is emitted here too, carrying the exact timestamp the
-            // line above stamped. Re-submitting a note refreshes that timestamp
-            // and this call re-pins the paired row to the new value.
-            syncWorkInProgressWithIssueVerified(t.getId());
+            // Nothing else is emitted here. "Repair Work In Progress" used to be
+            // written alongside this row, carrying the identical timestamp — but
+            // verifying the issue is diagnosis, and the customer has not yet seen
+            // (let alone approved) the re-estimate that follows it. That row is
+            // the technician's to raise, from their checklist, when work starts.
         }
         return toNoteResponse(saved);
     }
