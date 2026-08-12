@@ -30,6 +30,20 @@ public class LedgerPartyDtos {
 
         @Schema(description = "10-digit Indian mobile number", example = "9787727207")
         private String phone;
+
+        /**
+         * When this account is expected to settle.
+         *
+         * Tri-state on update, which is why it is boxed alongside `clearDueDate`
+         * rather than read as a bare null: absent means "leave it alone" (a
+         * rename must not wipe the promise), a date sets it, and clearDueDate
+         * removes it. JSON cannot tell "not sent" from "sent as null".
+         */
+        @Schema(description = "Expected settlement date", example = "2026-08-20")
+        private LocalDate dueDate;
+
+        @Schema(description = "Send true to remove an existing due date")
+        private Boolean clearDueDate;
     }
 
     @Data
@@ -72,5 +86,9 @@ public class LedgerPartyDtos {
          */
         @Schema(description = "Date of the most recent RECEIVED entry", example = "2026-08-10")
         private LocalDate lastPaymentDate;
+
+        /** When the account is expected to settle; null when nothing is promised. */
+        @Schema(description = "Expected settlement date", example = "2026-08-20")
+        private LocalDate dueDate;
     }
 }

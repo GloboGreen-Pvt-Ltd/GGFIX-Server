@@ -144,6 +144,12 @@ public class ShopLedgerPartyService {
 
         if (req.getName() != null) p.setName(normalizeName(req.getName(), p.getPhone()));
 
+        // Tri-state, in this order: an explicit clear wins over a date, and
+        // sending neither leaves the promise untouched. Renaming an account
+        // must never silently drop the day it was promised to pay.
+        if (Boolean.TRUE.equals(req.getClearDueDate())) p.setDueDate(null);
+        else if (req.getDueDate() != null) p.setDueDate(req.getDueDate());
+
         return toResponse(repository.save(p));
     }
 
@@ -210,6 +216,7 @@ public class ShopLedgerPartyService {
             ShopLedgerParty p, BigDecimal balance, ShopLedgerEntry last, LocalDate lastPaymentDate) {
         return LedgerPartyResponse.builder()
                 .lastPaymentDate(lastPaymentDate)
+                .dueDate(p.getDueDate())
                 .id(p.getId())
                 .partyType(p.getPartyType())
                 .name(p.getName())

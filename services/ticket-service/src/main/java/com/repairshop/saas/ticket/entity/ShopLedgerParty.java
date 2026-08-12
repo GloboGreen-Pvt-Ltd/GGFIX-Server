@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.UUID;
 
 /**
@@ -42,6 +43,14 @@ public class ShopLedgerParty {
 
     @Column(name = "phone", length = 20, nullable = false)
     private String phone;
+
+    /**
+     * The day this account is expected to settle, or null when no promise has
+     * been made — which is most accounts. Set on the party detail screen and
+     * cleared by sending null, so "he'll pay Friday" can be taken back.
+     */
+    @Column(name = "due_date")
+    private LocalDate dueDate;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
