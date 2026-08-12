@@ -60,5 +60,17 @@ public class LedgerPartyDtos {
         private String lastEntryDirection;
         private BigDecimal lastEntryAmount;
         private LocalDate lastEntryDate;
+
+        /**
+         * The last RECEIVED entry's date — when this account last actually paid.
+         *
+         * Distinct from lastEntryDate, which is the last movement in either
+         * direction: an account that paid on Monday and was given fresh credit
+         * on Tuesday has a lastEntryDate of Tuesday and a lastPaymentDate of
+         * Monday. The app's "Last Payment" sort needs the second one, and
+         * cannot derive it from the first. Null until the account has paid once.
+         */
+        @Schema(description = "Date of the most recent RECEIVED entry", example = "2026-08-10")
+        private LocalDate lastPaymentDate;
     }
 }

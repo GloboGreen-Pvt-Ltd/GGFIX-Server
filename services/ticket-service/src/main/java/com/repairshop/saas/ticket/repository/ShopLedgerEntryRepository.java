@@ -67,6 +67,23 @@ public interface ShopLedgerEntryRepository extends JpaRepository<ShopLedgerEntry
     List<ShopLedgerEntry> latestPerParty(@Param("shopId") UUID shopId);
 
     /**
+     * The last time each account actually PAID, for the app's "Last Payment"
+     * sort. Same correlated-MAX shape as latestPerParty (and H2-safe for the
+     * same reason), narrowed to RECEIVED — an account that pays and is then
+     * given fresh credit still sorts by the payment, not by the credit.
+     */
+    @Query("""
+           SELECT e FROM ShopLedgerEntry e
+           WHERE e.shopId = :shopId
+             AND e.direction = 'RECEIVED'
+             AND e.createdAt = (
+                 SELECT MAX(x.createdAt) FROM ShopLedgerEntry x
+                 WHERE x.shopId = :shopId AND x.partyId = e.partyId AND x.direction = 'RECEIVED'
+             )
+           """)
+    List<ShopLedgerEntry> latestPaymentPerParty(@Param("shopId") UUID shopId);
+
+    /**
      * Shop-scoped lookup. Update/delete resolve through this rather than
      * findById so one shop can never touch another shop's row by guessing an id.
      */

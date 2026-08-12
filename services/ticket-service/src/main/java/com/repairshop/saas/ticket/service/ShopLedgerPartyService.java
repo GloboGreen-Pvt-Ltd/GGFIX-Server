@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,7 +62,16 @@ public class ShopLedgerPartyService {
             latest.put(e.getPartyId(), e);
         }
 
-        return rows.stream().map(p -> decorate(p, balances.get(p.getId()), latest.get(p.getId()))).toList();
+        // Second pass for the same reason as the first: one query for the whole
+        // book beats a per-party lookup that grows with the address book.
+        Map<UUID, LocalDate> lastPaid = new HashMap<>();
+        for (ShopLedgerEntry e : entryRepository.latestPaymentPerParty(shopId)) {
+            lastPaid.put(e.getPartyId(), e.getEntryDate());
+        }
+
+        return rows.stream()
+                .map(p -> decorate(p, balances.get(p.getId()), latest.get(p.getId()), lastPaid.get(p.getId())))
+                .toList();
     }
 
     /** One account with its balance — the statement header. */
@@ -188,7 +198,18 @@ public class ShopLedgerPartyService {
      * renders as, and a new account is not missing a balance — it is settled.
      */
     static LedgerPartyResponse decorate(ShopLedgerParty p, BigDecimal balance, ShopLedgerEntry last) {
+        return decorate(p, balance, last, null);
+    }
+
+    /**
+     * As above, plus when the account last paid. Only the list needs that — the
+     * single-account reads have the full entry history to hand — so the
+     * three-argument form stays the one most callers use.
+     */
+    static LedgerPartyResponse decorate(
+            ShopLedgerParty p, BigDecimal balance, ShopLedgerEntry last, LocalDate lastPaymentDate) {
         return LedgerPartyResponse.builder()
+                .lastPaymentDate(lastPaymentDate)
                 .id(p.getId())
                 .partyType(p.getPartyType())
                 .name(p.getName())
