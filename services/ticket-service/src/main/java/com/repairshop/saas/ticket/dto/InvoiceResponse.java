@@ -53,7 +53,6 @@ public class InvoiceResponse {
      */
     private UUID creditPartyId;
     private UUID creditLedgerEntryId;
-    private UUID advanceLedgerEntryId;
 
     private Instant generatedAt;
 
@@ -87,7 +86,6 @@ public class InvoiceResponse {
         r.paymentDate = inv.getPaymentDate();
         r.creditPartyId = inv.getCreditPartyId();
         r.creditLedgerEntryId = inv.getCreditLedgerEntryId();
-        r.advanceLedgerEntryId = inv.getAdvanceLedgerEntryId();
         r.generatedAt = inv.getGeneratedAt();
         return r;
     }

@@ -45,7 +45,6 @@ public class InvoiceService {
 
     /** The party owes the shop — see migration 82's sign convention. */
     private static final String GIVEN = "GIVEN";
-    private static final String RECEIVED = "RECEIVED";
 
     private static final int PHONE_DIGITS = 10;
     private static final int MAX_NOTE = 500;
@@ -103,7 +102,6 @@ public class InvoiceService {
 
         // Before the save, so the entry id it resolves is persisted with the row.
         syncCreditToCashBook(inv, ticket);
-        syncAdvanceToCashBook(inv, ticket);
 
         Invoice saved = invoiceRepository.save(inv);
 
@@ -225,7 +223,18 @@ public class InvoiceService {
             return;
         }
 
-        ShopLedgerParty party = customerAccount(shopId, phone, ticket);
+        ShopLedgerParty party = ledgerPartyRepository
+                .findByShopIdAndPartyTypeAndPhone(shopId, CUSTOMER, phone)
+                .orElseGet(() -> {
+                    ShopLedgerParty p = new ShopLedgerParty();
+                    p.setShopId(shopId);
+                    p.setPartyType(CUSTOMER);
+                    p.setPhone(phone);
+                    // Falls back to the number, exactly as ShopLedgerPartyService
+                    // does, so a nameless walk-in still renders in the account list.
+                    p.setName(trim(defaultIfBlank(ticket.getCustomerName(), phone), MAX_NAME));
+                    return ledgerPartyRepository.save(p);
+                });
 
         ShopLedgerEntry e = existingEntryId != null
                 ? ledgerEntryRepository.findByIdAndShopId(existingEntryId, shopId).orElseGet(ShopLedgerEntry::new)
@@ -244,99 +253,6 @@ public class InvoiceService {
         ShopLedgerEntry saved = ledgerEntryRepository.save(e);
         inv.setCreditPartyId(party.getId());
         inv.setCreditLedgerEntryId(saved.getId());
-    }
-
-    /**
-     * The customer's Cash Book account, opened on first use. Upserted on the
-     * shop/type/phone key the rest of the ledger uses so the credit and the
-     * advance land on the same account rather than opening two.
-     */
-    private ShopLedgerParty customerAccount(UUID shopId, String phone, Ticket ticket) {
-        return ledgerPartyRepository
-                .findByShopIdAndPartyTypeAndPhone(shopId, CUSTOMER, phone)
-                .orElseGet(() -> {
-                    ShopLedgerParty p = new ShopLedgerParty();
-                    p.setShopId(shopId);
-                    p.setPartyType(CUSTOMER);
-                    p.setPhone(phone);
-                    // Falls back to the number, exactly as ShopLedgerPartyService
-                    // does, so a nameless walk-in still renders in the account list.
-                    p.setName(trim(defaultIfBlank(ticket.getCustomerName(), phone), MAX_NAME));
-                    return ledgerPartyRepository.save(p);
-                });
-    }
-
-    /**
-     * Mirrors {@link Invoice#getAdvancePaid()} onto the customer's Cash Book
-     * account as a RECEIVED entry — the advance's half of
-     * {@link #syncCreditToCashBook}.
-     *
-     * <p>Money handed over at booking is money the shop has taken, but it used to
-     * be recorded on the invoice alone. Anything reading the Cash Book therefore
-     * could not see it: a ₹10,000 job taken with a ₹5,000 advance showed only the
-     * ₹5,000 balance as revenue on the day it was cleared, and the first ₹5,000
-     * appeared nowhere at all.
-     *
-     * <p>Dated to the BOOKING, not to the invoice. The advance changed hands when
-     * the device was handed in, which is the day the owner expects to find it
-     * under — invoicing days later must not move takings onto the later date.
-     *
-     * <p>Same three cases as the credit, and the entry id exists for the same
-     * reason: re-generating an invoice updates the row rather than posting a
-     * second receipt, and an advance corrected to zero deletes it.
-     */
-    private void syncAdvanceToCashBook(Invoice inv, Ticket ticket) {
-        UUID shopId = ticket.getShopId();
-        UUID existingEntryId = inv.getAdvanceLedgerEntryId();
-        BigDecimal advance = inv.getAdvancePaid() != null ? inv.getAdvancePaid() : BigDecimal.ZERO;
-        boolean hasAdvance = advance.signum() > 0;
-
-        if (shopId == null || !hasAdvance) {
-            if (existingEntryId != null) {
-                ledgerEntryRepository.findByIdAndShopId(existingEntryId, shopId).ifPresent(ledgerEntryRepository::delete);
-            }
-            inv.setAdvanceLedgerEntryId(null);
-            inv.setAdvancePartyId(null);
-            return;
-        }
-
-        String phone = normalizePhone(ticket.getCustomerPhone());
-        if (phone == null) {
-            inv.setAdvanceLedgerEntryId(null);
-            inv.setAdvancePartyId(null);
-            return;
-        }
-
-        ShopLedgerParty party = customerAccount(shopId, phone, ticket);
-
-        ShopLedgerEntry e = existingEntryId != null
-                ? ledgerEntryRepository.findByIdAndShopId(existingEntryId, shopId).orElseGet(ShopLedgerEntry::new)
-                : new ShopLedgerEntry();
-
-        e.setShopId(shopId);
-        e.setPartyId(party.getId());
-        e.setDirection(RECEIVED);
-        e.setAmount(advance);
-        e.setEntryDate(bookingDate(ticket, inv));
-        e.setNote(advanceNote(inv));
-        e.setTicketId(ticket.getId());
-        e.setTicketTrackingId(ticket.getTrackingId());
-        e.setTicketLabel(ticket.getDeviceDisplayName());
-
-        ShopLedgerEntry saved = ledgerEntryRepository.save(e);
-        inv.setAdvancePartyId(party.getId());
-        inv.setAdvanceLedgerEntryId(saved.getId());
-    }
-
-    /** The day the device was booked in, in shop-local time. */
-    private static LocalDate bookingDate(Ticket ticket, Invoice inv) {
-        if (ticket.getCreatedAt() != null) return ticket.getCreatedAt().atZone(IST).toLocalDate();
-        if (inv.getPaymentDate() != null) return inv.getPaymentDate();
-        return LocalDate.now(IST);
-    }
-
-    private static String advanceNote(Invoice inv) {
-        return "Advance · Invoice #" + inv.getInvoiceNo();
     }
 
     /**
