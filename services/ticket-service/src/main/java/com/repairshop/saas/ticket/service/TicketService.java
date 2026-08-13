@@ -7,6 +7,7 @@ import com.repairshop.saas.ticket.dto.SolutionPackResponse;
 import com.repairshop.saas.ticket.dto.TicketEventResponse;
 import com.repairshop.saas.ticket.dto.TicketRequest;
 import com.repairshop.saas.ticket.dto.TicketResponse;
+import com.repairshop.saas.ticket.entity.Invoice;
 import com.repairshop.saas.ticket.entity.PlatformRepairBookingEvent;
 import com.repairshop.saas.ticket.entity.RepairNote;
 import com.repairshop.saas.ticket.entity.Technician;
@@ -15,6 +16,7 @@ import com.repairshop.saas.ticket.entity.TicketSolutionPack;
 import com.repairshop.saas.ticket.dto.ImeiAvailabilityResponse;
 import com.repairshop.saas.ticket.exception.ImeiConflictException;
 import com.repairshop.saas.ticket.exception.ResourceNotFoundException;
+import com.repairshop.saas.ticket.repository.InvoiceRepository;
 import com.repairshop.saas.ticket.repository.MasterTechnicianWorkStatusViewRepository;
 import com.repairshop.saas.ticket.repository.PlatformCustomerAddressRepository;
 import com.repairshop.saas.ticket.repository.PlatformCustomerUserRepository;
@@ -58,6 +60,7 @@ public class TicketService {
     private final RepairNoteRepository repairNoteRepository;
     private final TicketSolutionPackRepository ticketSolutionPackRepository;
     private final MasterTechnicianWorkStatusViewRepository masterWorkStatusRepository;
+    private final InvoiceRepository invoiceRepository;
     private final CustomerOrderMirrorService customerOrderMirrorService;
 
     private static final String TRACKING_PREFIX = "CSPEN";
@@ -176,6 +179,20 @@ public class TicketService {
             emitBookingEvent(t.getId(), "ISSUE_IDENTIFIED",
                     "Issue identified by technician", "TECHNICIAN");
         }
+        // An invoice row IS the record that the step happened, so a booking that
+        // has one must carry the step. InvoiceService writes the event itself now;
+        // this heals the invoices raised before it did — the client used to post
+        // that event separately and a dropped call left a generated invoice with a
+        // grey "Invoice Generated" on the rail for good. Stamped with the
+        // invoice's own generatedAt, not now(), so the healed row reads as the
+        // moment the bill was actually raised. Written only when missing: this
+        // runs on every ticket read, and re-writing it each time would churn.
+        if (!hasBookingEvent(t.getId(), "INVOICE_GENERATED")) {
+            invoiceRepository.findByTicketId(t.getId()).ifPresent(inv ->
+                    emitOrUpdateBookingEvent(t.getId(), "INVOICE_GENERATED",
+                            InvoiceService.invoiceGeneratedNote(inv), "OWNER",
+                            null, null, inv.getGeneratedAt()));
+        }
     }
 
     /**
@@ -208,19 +225,19 @@ public class TicketService {
                 : normalizedStatus != null
                         ? ticketRepository.findByShopIdAndStatus(shopId, normalizedStatus, pageable)
                         : ticketRepository.findByShopId(shopId, pageable);
-        return page.map(this::toResponse);
+        return toResponsePage(page);
     }
 
     @Transactional(readOnly = true)
     public Page<TicketResponse> listByAssignedTechnician(UUID technicianId, Pageable pageable) {
-        return ticketRepository.findByAssignedTechnicianId(technicianId, pageable).map(this::toResponse);
+        return toResponsePage(ticketRepository.findByAssignedTechnicianId(technicianId, pageable));
     }
 
     /** For technician "my tickets": resolve user id to technician id then list assigned tickets. */
     @Transactional(readOnly = true)
     public Page<TicketResponse> listByAssignedUser(UUID userId, Pageable pageable) {
         return technicianRepository.findFirstByUserId(userId)
-                .map(tech -> ticketRepository.findByAssignedTechnicianId(tech.getId(), pageable).map(this::toResponse))
+                .map(tech -> toResponsePage(ticketRepository.findByAssignedTechnicianId(tech.getId(), pageable)))
                 .orElse(new PageImpl<>(Collections.emptyList(), pageable, 0));
     }
 
@@ -518,10 +535,20 @@ public class TicketService {
             emitStepEventsForTicketStatus(ticket.getId(), ticket.getStatus());
         }
         // Technician assignment changed — light up the customer/owner timeline
-        // row that says "Assigned to <Tech>". emitBookingEvent is idempotent
-        // on (booking, statusKey) so a re-save of the same technician id is
-        // a no-op, but a re-assignment to a different technician fires
-        // TECHNICIAN_REASSIGNED so the rail can show both steps.
+        // rows for it.
+        //
+        // The status keys here MUST be the ones the timelines render
+        // (SHOP_BOOKING_STATUS_OPTIONS in serviceHistoryPhases.js:
+        // ASSIGNED_TO_TECHNICIAN / REASSIGNED_TO_TECHNICIAN). They used to be
+        // TECHNICIAN_ASSIGNED / TECHNICIAN_REASSIGNED, which no rail has a row
+        // for: the events were written and then rendered nowhere, so a booking
+        // with a technician on it showed a grey "Assigned to Technician" —
+        // and a re-assignment showed nothing at all, since the mirror only
+        // emits the first assign.
+        //
+        // Assign is emit-if-absent (the first one is the record); re-assign is
+        // emit-or-update, so the row names whoever holds the booking NOW rather
+        // than freezing on the first replacement.
         UUID technicianAfterPatch = ticket.getAssignedTechnicianId();
         boolean technicianChanged = !java.util.Objects.equals(technicianBeforePatch, technicianAfterPatch);
         if (technicianChanged && technicianAfterPatch != null) {
@@ -529,12 +556,18 @@ public class TicketService {
                     ? assignedTechAfterPatch.getName()
                     : "Technician";
             if (technicianBeforePatch == null) {
-                emitBookingEvent(ticket.getId(), "TECHNICIAN_ASSIGNED",
+                emitBookingEvent(ticket.getId(), "ASSIGNED_TO_TECHNICIAN",
                         "Assigned to " + techName, "SHOP");
             } else {
-                emitBookingEvent(ticket.getId(), "TECHNICIAN_REASSIGNED",
+                emitOrUpdateBookingEvent(ticket.getId(), "REASSIGNED_TO_TECHNICIAN",
                         "Re-assigned to " + techName, "SHOP");
             }
+            // The patch above cleared technician_accepted_at, so the booking is
+            // waiting on the new technician's tap — re-stamped rather than
+            // emitted once, or a re-assignment would carry the first
+            // assignment's "awaiting" timestamp.
+            emitOrUpdateBookingEvent(ticket.getId(), "AWAITING_TECHNICIAN_ACCEPTANCE",
+                    "Awaiting Technician Acceptance", "SHOP");
         }
         // Owner ticked "Customer Repair Approval" in the Edit Booking screen —
         // same handler as update() and as the customer's own Approve tap, so the
@@ -861,6 +894,23 @@ public class TicketService {
         if (!ALLOWED_PROGRESS_STEP_KEYS.contains(key)) {
             throw new IllegalArgumentException("Status key not allowed: " + key);
         }
+        // A delivered or cancelled booking is closed: the device is with the
+        // customer (or the job was called off) and there is no further status to
+        // record. The owner app already hides the picker at that point, but the
+        // refusal belongs here — an employee-app checklist tap, a stale screen or
+        // a retried request must not reopen a closed booking's flow.
+        //
+        // Re-posting a step the booking ALREADY carries stays allowed: that is a
+        // refresh of an existing row (a corrected invoice re-emitting
+        // INVOICE_GENERATED, a double Submit), not a new status.
+        String lifecycle = t.getStatus() == null ? "" : t.getStatus().trim().toUpperCase();
+        if (("DELIVERED".equals(lifecycle) || "CANCELLED".equals(lifecycle))
+                && !hasBookingEvent(t.getId(), key)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "DELIVERED".equals(lifecycle)
+                            ? "This booking is closed — the device is with the customer."
+                            : "This booking is closed — the repair was cancelled.");
+        }
         String text = note != null && !note.isBlank() ? note.trim() : defaultProgressLabel(key);
         String a = actor == null ? "" : actor.trim().toUpperCase();
         if (!ALLOWED_PROGRESS_ACTORS.contains(a)) a = "TECHNICIAN";
@@ -1116,6 +1166,31 @@ public class TicketService {
     }
 
     private TicketResponse toResponse(Ticket t) {
+        return toResponse(t, invoiceRepository.findByTicketId(t.getId()).orElse(null));
+    }
+
+    /**
+     * Map a whole page, looking the invoices up in ONE query instead of one per
+     * row. The bookings list asks for 500 tickets at a time — a per-row lookup
+     * there is 500 round trips for a field that decides whether a card shows its
+     * Invoice action.
+     */
+    private Page<TicketResponse> toResponsePage(Page<Ticket> page) {
+        Map<UUID, Invoice> byTicket = invoicesByTicketId(page.getContent());
+        return page.map(t -> toResponse(t, byTicket.get(t.getId())));
+    }
+
+    private Map<UUID, Invoice> invoicesByTicketId(List<Ticket> tickets) {
+        List<UUID> ids = tickets.stream().map(Ticket::getId).filter(java.util.Objects::nonNull).toList();
+        if (ids.isEmpty()) return Collections.emptyMap();
+        Map<UUID, Invoice> out = new HashMap<>();
+        for (Invoice inv : invoiceRepository.findByTicketIdIn(ids)) {
+            out.put(inv.getTicketId(), inv);
+        }
+        return out;
+    }
+
+    private TicketResponse toResponse(Ticket t, Invoice invoice) {
         // Resolve the few "booking-side" fields once — these all share the
         // same fallback shape (use the ticket column if present, otherwise
         // pull from the linked repair_booking). Doing the lookup once means
@@ -1183,6 +1258,9 @@ public class TicketService {
                 .customerApproval(fallback.customerApproval)
                 .estimatedReadyAt(fallback.estimatedReadyAt)
                 .estimatedDeliveryAt(fallback.estimatedDeliveryAt)
+                .invoiceId(invoice != null ? invoice.getId() : null)
+                .invoiceNo(invoice != null ? invoice.getInvoiceNo() : null)
+                .invoiceGeneratedAt(invoice != null ? invoice.getGeneratedAt() : null)
                 .complianceNote(complianceNote != null ? complianceNote.getNote() : null)
                 .complianceAudioUrl(complianceNote != null ? complianceNote.getAudioUrl() : null)
                 .complianceImageUrls(complianceImages)

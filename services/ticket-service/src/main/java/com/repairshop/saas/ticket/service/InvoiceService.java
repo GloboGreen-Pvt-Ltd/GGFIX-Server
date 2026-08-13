@@ -11,6 +11,7 @@ import com.repairshop.saas.ticket.repository.ShopLedgerEntryRepository;
 import com.repairshop.saas.ticket.repository.ShopLedgerPartyRepository;
 import com.repairshop.saas.ticket.repository.TicketRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -30,6 +31,7 @@ import java.util.UUID;
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class InvoiceService {
 
     /**
@@ -52,6 +54,7 @@ public class InvoiceService {
     private final TicketRepository ticketRepository;
     private final ShopLedgerPartyRepository ledgerPartyRepository;
     private final ShopLedgerEntryRepository ledgerEntryRepository;
+    private final TicketService ticketService;
 
     @Transactional
     public InvoiceResponse upsert(UUID ticketId, InvoiceRequest req, UUID generatedBy) {
@@ -100,7 +103,30 @@ public class InvoiceService {
         // Before the save, so the entry id it resolves is persisted with the row.
         syncCreditToCashBook(inv, ticket);
 
-        return InvoiceResponse.from(invoiceRepository.save(inv));
+        Invoice saved = invoiceRepository.save(inv);
+
+        // "Invoice Generated" is written HERE, next to the row it describes,
+        // rather than being left to the client's follow-up call. An invoice that
+        // exists with no timeline step behind it is exactly the state the
+        // Service History screen cannot represent — the rail would show the
+        // booking delivered with the invoice row still grey. The emit is
+        // idempotent (keyed by status), so the app's own post is a no-op refresh.
+        //
+        // Swallowed on failure: the bill is saved and correct, and losing it over
+        // a timeline row would be the worse trade.
+        try {
+            ticketService.emitProgressStepEvent(ticket.getShopId(), ticket.getId(),
+                    "INVOICE_GENERATED", invoiceGeneratedNote(saved), "OWNER");
+        } catch (Exception e) {
+            log.error("INVOICE_GENERATED emit failed for ticket {}", ticket.getId(), e);
+        }
+
+        return InvoiceResponse.from(saved);
+    }
+
+    /** Shared with TicketService's self-heal so both write the same sentence. */
+    static String invoiceGeneratedNote(Invoice inv) {
+        return "Invoice #" + inv.getInvoiceNo() + " generated";
     }
 
     @Transactional(readOnly = true)

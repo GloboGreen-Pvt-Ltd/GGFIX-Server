@@ -147,6 +147,21 @@ public class TicketResponse {
     // screens render these on the "Technician Issue Verified & Updated"
     // card so the verification is visible without a second API call.
 
+    // ---- Invoice (invoices table, one row per ticket) ----
+    // Carried on the ticket so a list row can answer "has this booking been
+    // invoiced?" without a per-row GET /tickets/{id}/invoice. The bookings
+    // list uses it for the card's Invoice action and the Invoice counter;
+    // both therefore count real invoice rows, not a proxy status.
+
+    @Schema(description = "Id of the invoice raised against this ticket; null when none has been generated")
+    private UUID invoiceId;
+
+    @Schema(description = "Invoice number of the invoice raised against this ticket; null when none has been generated")
+    private String invoiceNo;
+
+    @Schema(description = "When the invoice was generated; null when none has been generated")
+    private Instant invoiceGeneratedAt;
+
     @Schema(description = "Latest customer-visible compliance note text from repair_notes; null when none has been submitted")
     private String complianceNote;
 
