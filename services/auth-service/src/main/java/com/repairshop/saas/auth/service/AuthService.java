@@ -857,6 +857,7 @@ public class AuthService {
                 .pickupFromTime(s.getPickupFromTime())
                 .pickupToTime(s.getPickupToTime())
                 .pickupDistanceKm(s.getPickupDistanceKm())
+                .pickupEnabled(Boolean.TRUE.equals(s.getPickupEnabled()))
                 .distanceKm(Math.round(distanceKm * 10) / 10.0)
                 .build();
     }
@@ -1143,6 +1144,15 @@ public class AuthService {
                 .workingDays(loc.getWorkingDays())
                 .openingTime(loc.getOpeningTime())
                 .closingTime(loc.getClosingTime())
+                // Pickup settings are carried on the same DTO as createShopOwner
+                // uses; without these a location added after owner creation
+                // silently lost its pickup window and came up pickup-disabled.
+                // Absent pickupEnabled means off — a new shop must not appear in
+                // the customer pickup feed before its owner opts in.
+                .pickupFromTime(loc.getPickupFromTime())
+                .pickupToTime(loc.getPickupToTime())
+                .pickupDistanceKm(loc.getPickupDistanceKm())
+                .pickupEnabled(Boolean.TRUE.equals(loc.getPickupEnabled()))
                 .ownerUserId(owner.getId())
                 .mobileOtpCode("123456")
                 .isActive(true)

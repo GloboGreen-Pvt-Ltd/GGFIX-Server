@@ -32,5 +32,12 @@ public class PickupShopView {
     private String pickupFromTime;
     private String pickupToTime;
     private Integer pickupDistanceKm;
+    /**
+     * The shop's master pickup switch. The pickup-nearby feed already filters on
+     * it, so it is always true there; it is exposed for /shops/{id}/public,
+     * which serves any shop id and is where a client holding a stale card (deep
+     * link, back-stack, cached list) can notice the shop stopped taking pickups.
+     */
+    private Boolean pickupEnabled;
     private Double distanceKm;      // computed from caller lat/lng
 }
