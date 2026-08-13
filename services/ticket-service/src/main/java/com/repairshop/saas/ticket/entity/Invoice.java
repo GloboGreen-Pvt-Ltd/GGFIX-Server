@@ -137,6 +137,21 @@ public class Invoice {
     @Column(name = "credit_ledger_entry_id")
     private UUID creditLedgerEntryId;
 
+    /** The Cash Book customer account the advance was posted to (migration 94). */
+    @Column(name = "advance_party_id")
+    private UUID advancePartyId;
+
+    /**
+     * The shop_ledger_entries row mirroring {@link #advancePaid}.
+     *
+     * The advance's half of the mechanism above. Money handed over at booking is
+     * money received, so it belongs on the customer's account rather than only on
+     * the bill — without it the Cash Book, and the Revenue report that reads it,
+     * see a part-paid job as though only the balance was ever taken.
+     */
+    @Column(name = "advance_ledger_entry_id")
+    private UUID advanceLedgerEntryId;
+
     // ── Line item snapshots ──
     @Column(name = "spare_lines_json", columnDefinition = "TEXT")
     private String spareLinesJson;
