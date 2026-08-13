@@ -117,7 +117,7 @@ public class CustomerAuthService {
         }
 
         if (!Boolean.TRUE.equals(user.getIsActive()))
-            throw new UnauthorizedException("Account is disabled");
+            throw new UnauthorizedException(AuthService.INACTIVE_ACCOUNT_MESSAGE);
 
         if (usingOtp) {
             if (user.getOtpCode() == null || !user.getOtpCode().equals(request.getOtp().trim()))

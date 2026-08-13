@@ -16,6 +16,7 @@ import com.repairshop.saas.auth.dto.UpdateShopOwnerRequest;
 import com.repairshop.saas.auth.dto.TechnicianResponse;
 import com.repairshop.saas.auth.dto.UserResponse;
 import com.repairshop.saas.auth.entity.KycDocument;
+import com.repairshop.saas.auth.entity.Roles;
 import com.repairshop.saas.auth.entity.Shop;
 import com.repairshop.saas.auth.entity.Subscription;
 import com.repairshop.saas.auth.entity.User;
@@ -35,13 +36,27 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class AuthService {
+
+    /**
+     * Shown verbatim to a user whose account an admin has deactivated. Kept as
+     * one constant so every login path (email/mobile, shop-mobile, customer)
+     * returns the same wording — clients surface this string directly.
+     */
+    public static final String INACTIVE_ACCOUNT_MESSAGE =
+            "Your account is inactive. Please contact the administrator.";
 
     private final UserRepository userRepository;
     private final ShopRepository shopRepository;
@@ -86,8 +101,8 @@ public class AuthService {
 
         if (userOpt.isPresent()) {
             User user = userOpt.get();
-            if (!user.getIsActive())
-                throw new UnauthorizedException("Account is disabled");
+            if (!Boolean.TRUE.equals(user.getIsActive()))
+                throw new UnauthorizedException(INACTIVE_ACCOUNT_MESSAGE);
 
             if (usingOtp) {
                 // Accept either the account's static OTP (e.g. 123456 default) or a
@@ -156,7 +171,7 @@ public class AuthService {
         User owner = userRepository.findById(shop.getOwnerUserId())
                 .orElseThrow(() -> new UnauthorizedException("Shop owner not found"));
         if (!Boolean.TRUE.equals(owner.getIsActive()))
-            throw new UnauthorizedException("Owner account is disabled");
+            throw new UnauthorizedException(INACTIVE_ACCOUNT_MESSAGE);
 
         return buildShopScopedLoginResponse(owner, shop);
     }
@@ -276,15 +291,20 @@ public class AuthService {
 
     /**
      * Map a stored users.role to the wire-level loginType the clients route on.
-     * SHOP_OWNER and SUPER_ADMIN are 1:1; every other employee role (TECHNICIAN,
-     * STAFF, PICKUP_PERSON) collapses to EMPLOYEE so the mobile app can route
-     * them through the technician/employee UI uniformly.
+     * SHOP_OWNER, SUPER_ADMIN and MARKET_PERSON are 1:1; every other employee
+     * role (TECHNICIAN, STAFF, PICKUP_PERSON) collapses to EMPLOYEE so the
+     * mobile app can route them through the technician/employee UI uniformly.
+     *
+     * MARKET_PERSON gets its own loginType rather than folding into SUPER_ADMIN:
+     * both sign in to the admin web, but only SUPER_ADMIN may change account
+     * status, so the client has to be able to tell them apart.
      */
     private static String loginTypeForRole(String role) {
         if (role == null) return "EMPLOYEE";
         String r = role.trim().toUpperCase();
-        if ("SUPER_ADMIN".equals(r)) return "SUPER_ADMIN";
-        if ("SHOP_OWNER".equals(r))  return "SHOP_OWNER";
+        if (Roles.isAdmin(r))         return "SUPER_ADMIN";
+        if (Roles.isMarketPerson(r))  return "MARKET_PERSON";
+        if (Roles.isShopOwner(r))     return "SHOP_OWNER";
         return "EMPLOYEE";
     }
 
@@ -532,8 +552,16 @@ public class AuthService {
                 .build();
     }
 
+    /**
+     * Create a SHOP_OWNER plus its shops.
+     *
+     * @param createdByUserId the authenticated staff account (SUPER_ADMIN or
+     *        MARKET_PERSON) performing the creation, stamped onto
+     *        users.created_by. May be null only for callers that legitimately
+     *        have no session; such rows show "—" as their creator.
+     */
     @Transactional
-    public ShopOwnerResponse createShopOwner(CreateShopOwnerRequest req) {
+    public ShopOwnerResponse createShopOwner(CreateShopOwnerRequest req, UUID createdByUserId) {
         String email = req.getEmail().trim();
         // Shop owners are platform-level users; their owned shops are linked via
         // shops.owner_user_id, not via users.shop_id. No parent shop needed.
@@ -558,8 +586,9 @@ public class AuthService {
                 .addrArea(req.getAddrArea())
                 .addrStreet(req.getAddrStreet())
                 .addrPincode(req.getAddrPincode())
-                .role("SHOP_OWNER")
+                .role(Roles.SHOP_OWNER)
                 .isActive(true)
+                .createdBy(createdByUserId)
                 .emailVerified(false)
                 .build();
         owner = userRepository.save(owner);
@@ -806,8 +835,10 @@ public class AuthService {
 
     @Transactional
     public List<ShopOwnerView> listShopOwners() {
-        return userRepository.findByRoleOrderByCreatedAtDesc("SHOP_OWNER").stream()
-                .map(u -> toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId())))
+        List<User> owners = userRepository.findByRoleOrderByCreatedAtDesc(Roles.SHOP_OWNER);
+        Map<UUID, String> creators = creatorNames(owners);
+        return owners.stream()
+                .map(u -> toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()), creators))
                 .toList();
     }
 
@@ -1137,16 +1168,64 @@ public class AuthService {
         shopRepository.delete(shop);
     }
 
+    /**
+     * Activate / deactivate a shop owner. ADMIN-only — the caller's role is
+     * verified in {@link com.repairshop.saas.auth.controller.AuthController}
+     * before this runs.
+     *
+     * isActive is the ONLY field written. createdBy, createdAt and role are
+     * deliberately untouched: the endpoint takes no values for them, so they
+     * cannot be edited through the account-status API even if a client sends
+     * them in the body.
+     */
     @Transactional
     public ShopOwnerView setShopOwnerActive(UUID id, boolean active) {
         User u = userRepository.findById(id)
                 .orElseThrow(() -> new BadRequestException("Owner not found: " + id));
+        if (!Roles.isShopOwner(u.getRole()))
+            throw new BadRequestException("User is not a SHOP_OWNER");
         u.setIsActive(active);
         u = userRepository.save(u);
         return toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()));
     }
 
+    /**
+     * Look up the caller behind a JWT so controllers can enforce role rules.
+     * Throws 401 when the id doesn't resolve — a token for a deleted user is
+     * not a valid session.
+     */
+    @Transactional(readOnly = true)
+    public User requireUser(UUID userId) {
+        return userRepository.findById(userId)
+                .orElseThrow(() -> new UnauthorizedException("User not found"));
+    }
+
     private ShopOwnerView toOwnerView(User u, List<Shop> shops) {
+        return toOwnerView(u, shops, creatorNames(List.of(u)));
+    }
+
+    /**
+     * Resolve users.created_by ids to display names in ONE query for the whole
+     * batch. The owner list already issues a shops lookup per row; adding a
+     * creator lookup per row too would make it visibly slower as owners grow.
+     * Ids that no longer resolve (deleted staff) are simply absent from the map
+     * and render as "—".
+     */
+    private Map<UUID, String> creatorNames(Collection<User> owners) {
+        Set<UUID> ids = owners.stream()
+                .map(User::getCreatedBy)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        if (ids.isEmpty()) return Map.of();
+        Map<UUID, String> names = new HashMap<>();
+        for (User creator : userRepository.findAllById(ids)) {
+            names.put(creator.getId(),
+                    notBlank(creator.getName()) ? creator.getName().trim() : creator.getEmail());
+        }
+        return names;
+    }
+
+    private ShopOwnerView toOwnerView(User u, List<Shop> shops, Map<UUID, String> creatorNames) {
         // Profile completeness: 5 sections — Basic info (name+email+phone), Avatar,
         // ID Proof, Personal Address, At-least-one-shop.
         int sections = 0;
@@ -1228,6 +1307,8 @@ public class AuthService {
                 .addrPincode(u.getAddrPincode())
                 .role(u.getRole())
                 .isActive(u.getIsActive())
+                .createdBy(u.getCreatedBy())
+                .createdByName(u.getCreatedBy() == null ? null : creatorNames.get(u.getCreatedBy()))
                 .emailVerified(emailVerified)
                 .profileCompletePercent(percent)
                 .sectionsComplete(sections)

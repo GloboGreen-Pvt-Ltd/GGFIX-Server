@@ -83,10 +83,19 @@ public class User {
     private String personalAddress;
 
     @Column(nullable = false, length = 50)
-    private String role; // SHOP_OWNER, TECHNICIAN, SUPER_ADMIN
+    private String role; // SHOP_OWNER, TECHNICIAN, SUPER_ADMIN, MARKET_PERSON
 
     @Column(name = "is_active", nullable = false)
     private Boolean isActive = true;
+
+    /**
+     * users.id of the staff account (SUPER_ADMIN / MARKET_PERSON) that created
+     * this row. NULL for self-registered users and for every account created
+     * before migration 91. Audit-only: never exposed as writable through the
+     * account-status API.
+     */
+    @Column(name = "created_by", updatable = false)
+    private UUID createdBy;
 
     @Column(name = "email_verified", nullable = false)
     private Boolean emailVerified = false;

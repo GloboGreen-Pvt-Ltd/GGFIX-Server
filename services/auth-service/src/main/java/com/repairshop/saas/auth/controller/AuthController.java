@@ -19,6 +19,9 @@ import com.repairshop.saas.auth.dto.UpdateShopOwnerRequest;
 import com.repairshop.saas.auth.dto.TechnicianResponse;
 import com.repairshop.saas.auth.dto.UserResponse;
 import com.repairshop.saas.auth.entity.KycDocument;
+import com.repairshop.saas.auth.entity.Roles;
+import com.repairshop.saas.auth.entity.User;
+import com.repairshop.saas.auth.exception.ForbiddenException;
 import com.repairshop.saas.auth.exception.UnauthorizedException;
 import com.repairshop.saas.auth.security.JwtService;
 import com.repairshop.saas.auth.service.AuthService;
@@ -184,9 +187,14 @@ public class AuthController {
     @PostMapping("/shop-owner")
     @ResponseStatus(HttpStatus.CREATED)
     @Operation(summary = "Create shop owner with locations",
-            description = "Creates a SHOP_OWNER user plus one or more shops linked via owner_user_id, atomically.")
-    public ShopOwnerResponse createShopOwner(@Valid @RequestBody CreateShopOwnerRequest request) {
-        return authService.createShopOwner(request);
+            description = "ADMIN or MARKET_PERSON only. Creates a SHOP_OWNER user plus one or more shops "
+                    + "linked via owner_user_id, atomically. Stamps createdBy with the calling staff account "
+                    + "and createdAt with the current time; isActive defaults to true.")
+    public ShopOwnerResponse createShopOwner(HttpServletRequest httpRequest,
+                                             @Valid @RequestBody CreateShopOwnerRequest request) {
+        User creator = requireRole(httpRequest, Roles::isStaff,
+                "Only an administrator or market person can create shop owners");
+        return authService.createShopOwner(request, creator.getId());
     }
 
     @GetMapping("/shop-owners")
@@ -219,8 +227,14 @@ public class AuthController {
 
     @PatchMapping("/shop-owners/{id}/status")
     @ResponseStatus(HttpStatus.OK)
-    @Operation(summary = "Activate/suspend shop owner")
-    public ShopOwnerView setShopOwnerActive(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+    @Operation(summary = "Activate/deactivate shop owner",
+            description = "ADMIN only. Body: { active: true|false } or { status: ACTIVE|INACTIVE }. "
+                    + "MARKET_PERSON and SHOP_OWNER callers get 403. Only isActive is written — "
+                    + "createdBy, createdAt and role are not editable through this endpoint.")
+    public ShopOwnerView setShopOwnerActive(HttpServletRequest httpRequest,
+                                            @PathVariable UUID id,
+                                            @RequestBody Map<String, Object> body) {
+        requireRole(httpRequest, Roles::isAdmin, "Only an administrator can change account status");
         boolean active = Boolean.TRUE.equals(body.get("active"))
                 || "ACTIVE".equalsIgnoreCase(String.valueOf(body.get("status")));
         return authService.setShopOwnerActive(id, active);
@@ -391,6 +405,25 @@ public class AuthController {
     public CustomerAuthResponse customerMe(HttpServletRequest httpRequest) {
         UUID customerUserId = extractCustomerUserId(httpRequest);
         return customerAuthService.me(customerUserId);
+    }
+
+    /**
+     * Resolve the caller and assert they hold one of {@code allowed}.
+     *
+     * This is the real enforcement point for account management: Spring Security
+     * leaves /auth/** permitAll (SecurityConfig), so without this check any
+     * caller with any token — or none — could flip another account's status.
+     * Frontend button visibility is a convenience, never the control.
+     *
+     * 401 when we can't identify the caller, 403 when we can but they're the
+     * wrong role.
+     */
+    private User requireRole(HttpServletRequest httpRequest, java.util.function.Predicate<String> allowed,
+                             String requirement) {
+        User caller = authService.requireUser(requireUserId(httpRequest));
+        if (!allowed.test(caller.getRole()))
+            throw new ForbiddenException(requirement);
+        return caller;
     }
 
     /** Resolve the authenticated user id from the Bearer token (owner-scoped endpoints). */
