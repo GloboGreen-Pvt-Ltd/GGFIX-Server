@@ -1,16 +1,25 @@
 package com.repairshop.saas.subscription.dto;
 
+import com.repairshop.saas.common.subscription.SubscriptionFeature;
+import com.repairshop.saas.common.subscription.SubscriptionPlan;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.List;
 
 /**
- * Static catalog of the two plans returned by GET /subscriptions/plans.
- * Limits are informational (STORED but not enforced in this phase).
+ * Wire shape for GET /subscriptions/plans.
+ *
+ * <p>This used to hold the plan numbers itself. It is now a projection of
+ * {@link SubscriptionPlan}: the limits it advertises are read from the same
+ * enum the create/activate APIs enforce against, so the Subscription screen
+ * cannot promise an allowance the Employees screen refuses to honour.
+ *
+ * <p>{@code employeeLimit} is per shop — see {@link SubscriptionFeature}.
  */
 public final class PlanCatalog {
 
@@ -27,52 +36,30 @@ public final class PlanCatalog {
         private BigDecimal price;
         private BigDecimal multiShopPrice;   // nullable: per-shop price at 2+ shops
         private Integer shopLimit;           // nullable = unlimited
-        private Integer employeeLimit;       // nullable = unlimited
+        private Integer employeeLimit;       // nullable = unlimited; PER SHOP
         private Integer sellLimit;           // nullable = unlimited
         private boolean pickupServiceEnabled;
         private List<String> features;
     }
 
     public static List<Plan> all() {
-        Plan freeTrial = Plan.builder()
-                .code("FREE_TRIAL")
-                .name("Free Trial")
-                .durationDays(15)
-                .price(BigDecimal.ZERO)
-                .multiShopPrice(null)
-                .shopLimit(2)
-                .employeeLimit(3)
-                .sellLimit(5)
-                .pickupServiceEnabled(false)
-                .features(List.of(
-                        "New Service Booking",
-                        "Up to 2 Shops",
-                        "Buy Products — Unlimited",
-                        "Sell Products — up to 5 orders",
-                        "Up to 3 Employees per Shop"
-                ))
-                .build();
+        return Arrays.stream(SubscriptionPlan.values())
+                .map(PlanCatalog::toDto)
+                .toList();
+    }
 
-        Plan basic = Plan.builder()
-                .code("BASIC")
-                .name("Basic")
-                .durationDays(365)
-                .price(new BigDecimal("3000"))
-                .multiShopPrice(new BigDecimal("2500"))
-                .shopLimit(null)
-                .employeeLimit(null)
-                .sellLimit(null)
-                .pickupServiceEnabled(true)
-                .features(List.of(
-                        "New Service Booking",
-                        "Pickup Service",
-                        "Buy Products — Unlimited",
-                        "Sell Products — Unlimited",
-                        "Unlimited Employees",
-                        "Multiple Shops"
-                ))
+    private static Plan toDto(SubscriptionPlan plan) {
+        return Plan.builder()
+                .code(plan.getCode())
+                .name(plan.getDisplayName())
+                .durationDays(plan.getDurationDays())
+                .price(plan.getPrice())
+                .multiShopPrice(plan.getMultiShopPrice())
+                .shopLimit(plan.limitFor(SubscriptionFeature.SHOPS))
+                .employeeLimit(plan.limitFor(SubscriptionFeature.EMPLOYEES))
+                .sellLimit(plan.limitFor(SubscriptionFeature.SELL_ORDERS))
+                .pickupServiceEnabled(plan.isPickupServiceEnabled())
+                .features(plan.getFeatures())
                 .build();
-
-        return List.of(freeTrial, basic);
     }
 }

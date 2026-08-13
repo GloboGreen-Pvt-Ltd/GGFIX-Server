@@ -1,5 +1,6 @@
 package com.repairshop.saas.order.exception;
 
+import com.repairshop.saas.common.subscription.SubscriptionLimitExceededException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -8,6 +9,8 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @RestControllerAdvice
@@ -27,6 +30,24 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, String>> bad(IllegalArgumentException e) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", "bad_request", "message", e.getMessage()));
+    }
+
+    /**
+     * Plan allowance exhausted, or the subscription behind it has lapsed. 409
+     * with the whole limit calculation inline, matching the handlers in
+     * ticket-service and auth-service so a client can treat a subscription
+     * refusal identically wherever it comes from.
+     */
+    @ExceptionHandler(SubscriptionLimitExceededException.class)
+    public ResponseEntity<Map<String, Object>> subscriptionLimit(
+            SubscriptionLimitExceededException e, HttpServletRequest req) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("timestamp", Instant.now().toString());
+        body.put("status", HttpStatus.CONFLICT.value());
+        body.putAll(e.toBody());
+        body.put("path", req.getRequestURI());
+        log.info("Subscription limit blocked {} {} — {}", req.getMethod(), req.getRequestURI(), e.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
     /**

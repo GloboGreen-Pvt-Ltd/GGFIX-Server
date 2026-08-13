@@ -194,7 +194,57 @@ public class AuthController {
                                              @Valid @RequestBody CreateShopOwnerRequest request) {
         User creator = requireRole(httpRequest, Roles::isStaff,
                 "Only an administrator or market person can create shop owners");
-        return authService.createShopOwner(request, creator.getId());
+        return authService.createShopOwner(request, creator);
+    }
+
+    @PostMapping("/market-persons")
+    @ResponseStatus(HttpStatus.CREATED)
+    @Operation(summary = "Create market person",
+            description = "ADMIN only. Body: { name, email, phone, password }. Creator provenance is taken "
+                    + "from the caller's token, never the body.")
+    public ShopOwnerView createMarketPerson(HttpServletRequest httpRequest,
+                                            @RequestBody Map<String, String> body) {
+        User creator = requireRole(httpRequest, Roles::isAdmin,
+                "Only an administrator can create market persons");
+        return authService.createMarketPerson(
+                body == null ? null : body.get("name"),
+                body == null ? null : body.get("email"),
+                body == null ? null : body.get("phone"),
+                body == null ? null : body.get("password"),
+                creator);
+    }
+
+    @GetMapping("/market-persons")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "List market persons", description = "ADMIN only. Feeds the assignment picker.")
+    public List<ShopOwnerView> listMarketPersons(HttpServletRequest httpRequest) {
+        requireRole(httpRequest, Roles::isAdmin, "Only an administrator can list market persons");
+        return authService.listMarketPersons();
+    }
+
+    @GetMapping("/managed-users")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "List managed users",
+            description = "ADMIN or MARKET_PERSON. Shop owners and market persons with creator and "
+                    + "active-person provenance, newest first. Administrator accounts are excluded.")
+    public List<ShopOwnerView> listManagedUsers(HttpServletRequest httpRequest) {
+        requireRole(httpRequest, Roles::isStaff, "Only staff can view user management");
+        return authService.listManagedUsers();
+    }
+
+    @PatchMapping("/shop-owners/{id}/active-person")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Assign the market person responsible for a shop owner",
+            description = "ADMIN only. Body: { marketPersonId } — null clears the assignment. The name and "
+                    + "role are read from the market person's own row, not the request. Creator fields "
+                    + "(createdBy, createdPersonId, createdPersonName, createdAt) are never modified.")
+    public ShopOwnerView assignActivePerson(HttpServletRequest httpRequest,
+                                            @PathVariable UUID id,
+                                            @RequestBody Map<String, String> body) {
+        requireRole(httpRequest, Roles::isAdmin, "Only an administrator can assign a market person");
+        String raw = body == null ? null : body.get("marketPersonId");
+        UUID marketPersonId = (raw == null || raw.isBlank()) ? null : UUID.fromString(raw.trim());
+        return authService.assignActivePerson(id, marketPersonId);
     }
 
     @GetMapping("/shop-owners")

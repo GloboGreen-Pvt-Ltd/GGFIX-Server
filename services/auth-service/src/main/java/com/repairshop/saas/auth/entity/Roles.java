@@ -43,4 +43,17 @@ public final class Roles {
     public static boolean isStaff(String role) {
         return isAdmin(role) || isMarketPerson(role);
     }
+
+    /**
+     * The role name to RECORD for a creator or active person.
+     *
+     * Collapses the stored SUPER_ADMIN onto the spec's "ADMIN" so provenance
+     * reads the way the account-management screen describes it, while the
+     * users.role column keeps its historical value untouched.
+     */
+    public static String canonical(String role) {
+        if (isAdmin(role)) return ADMIN;
+        String r = norm(role);
+        return r.isEmpty() ? null : r;
+    }
 }

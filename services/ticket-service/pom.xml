@@ -65,6 +65,16 @@
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
+
+        <!-- Plan limits. This service owns the technicians table, so it is where
+             the "up to N employees per shop" allowance is actually enforced;
+             the allowance itself comes from the shared catalogue so it matches
+             what subscription-service advertises. -->
+        <dependency>
+            <groupId>com.repairshop.saas</groupId>
+            <artifactId>common-subscription</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
 
     <build>

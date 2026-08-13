@@ -1,5 +1,6 @@
 package com.repairshop.saas.ticket.controller;
 
+import com.repairshop.saas.common.subscription.LimitCheck;
 import com.repairshop.saas.ticket.dto.*;
 import com.repairshop.saas.ticket.service.TechnicianService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -198,6 +199,23 @@ public class TechnicianController {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         return technicianService.listByShop(shopId);
+    }
+
+    /**
+     * The current shop's employee allowance: {allowed, currentUsage, limit,
+     * remaining, plan, …}. The Employees screen renders its counter and its
+     * Add-button state straight from this, so what the user is shown is the
+     * same calculation POST /technicians will apply.
+     *
+     * <p>Static path, declared before {@code /{id}} so Spring cannot read
+     * "limit" as a technician id.
+     */
+    @GetMapping("/limit")
+    @Operation(summary = "Employee subscription allowance + current usage for this shop")
+    public LimitCheck employeeLimit(HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return technicianService.employeeLimit(shopId);
     }
 
     @PostMapping

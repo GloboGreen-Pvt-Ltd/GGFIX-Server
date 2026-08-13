@@ -71,6 +71,14 @@
             <artifactId>common-media</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- Plan limits. Adding staff starts here (the login is provisioned
+             before the technician row), so the seat check has to run here too or
+             a refusal downstream would leave an orphaned login behind. -->
+        <dependency>
+            <groupId>com.repairshop.saas</groupId>
+            <artifactId>common-subscription</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
 
     <build>

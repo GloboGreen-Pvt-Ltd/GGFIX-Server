@@ -1,6 +1,8 @@
 package com.repairshop.saas.order.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.repairshop.saas.common.subscription.SubscriptionFeature;
+import com.repairshop.saas.common.subscription.SubscriptionLimitService;
 import com.repairshop.saas.order.dto.SellOrderDtos.*;
 import com.repairshop.saas.order.entity.*;
 import com.repairshop.saas.order.exception.ForbiddenException;
@@ -34,6 +36,7 @@ public class SellOrderController {
     private final SellOrderQuotationRepository quoteRepo;
     private final CustomerOrderRepository customerOrderRepo;
     private final ObjectMapper objectMapper;
+    private final SubscriptionLimitService subscriptionLimits;
 
     @PostMapping
     @Transactional
@@ -120,10 +123,26 @@ public class SellOrderController {
         return ResponseEntity.ok(toDetails(s));
     }
 
+    /**
+     * A shop quotes on a customer's sell order.
+     *
+     * <p>This is where the "up to N sell orders" allowance is enforced, because
+     * it is the only step in the sell flow the SHOP performs — the order itself
+     * is created by a customer, and the winning quotation is picked by a
+     * customer. Blocking either of those would take the plan limit of one shop
+     * out on someone else.
+     *
+     * <p>Usage counts orders the shop has already WON
+     * ({@code sell_orders.shop_id}), not quotations submitted: a quote the
+     * customer declined earned the shop nothing and should not burn allowance.
+     * So a shop at its limit may not bid for more work, while everything it has
+     * already taken on runs to completion.
+     */
     @PostMapping("/{id}/quotations")
     @Transactional
     public ResponseEntity<SellQuotationResponse> addQuote(@PathVariable UUID id, @RequestBody SellOrderQuotationRequest body) {
         if (!sellRepo.existsById(id)) throw new ResourceNotFoundException("Sell order not found");
+        subscriptionLimits.requireUsageCapacity(null, body.getShopId(), SubscriptionFeature.SELL_ORDERS);
         SellOrderQuotation q = quoteRepo.save(SellOrderQuotation.builder()
                 .sellOrderId(id).shopId(body.getShopId())
                 .shopName(body.getShopName()).shopPhone(body.getShopPhone()).shopCity(body.getShopCity())

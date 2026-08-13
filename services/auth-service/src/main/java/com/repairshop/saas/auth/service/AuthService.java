@@ -15,6 +15,7 @@ import com.repairshop.saas.auth.dto.ShopResponse;
 import com.repairshop.saas.auth.dto.UpdateShopOwnerRequest;
 import com.repairshop.saas.auth.dto.TechnicianResponse;
 import com.repairshop.saas.auth.dto.UserResponse;
+import com.repairshop.saas.common.subscription.SubscriptionFeature;
 import com.repairshop.saas.auth.entity.KycDocument;
 import com.repairshop.saas.auth.entity.Roles;
 import com.repairshop.saas.auth.entity.Shop;
@@ -61,6 +62,7 @@ public class AuthService {
     private final UserRepository userRepository;
     private final ShopRepository shopRepository;
     private final SubscriptionRepository subscriptionRepository;
+    private final com.repairshop.saas.common.subscription.SubscriptionLimitService subscriptionLimits;
     private final JwtService jwtService;
     private final PasswordEncoder passwordEncoder;
     private final OtpStore otpStore;
@@ -372,7 +374,7 @@ public class AuthService {
                     .shopLimit(2)
                     .employeeLimit(3)
                     .sellLimit(5)
-                    .pickupServiceEnabled(false)
+                    .pickupServiceEnabled(true)
                     .buyProductUnlimited(true)
                     .sellProductUnlimited(false)
                     .shopCount(1)
@@ -431,6 +433,13 @@ public class AuthService {
 
     @Transactional
     public RegisterResponse registerTechnician(UUID shopId, RegisterTechnicianRequest request) {
+        // Adding staff is a two-call flow: the shop app provisions the login
+        // here, then creates the technician row in ticket-service. Both ends
+        // check the seat allowance — if only the second one did, hitting the
+        // limit would leave a login behind with no employee attached to it.
+        subscriptionLimits.requireCapacity(shopId, SubscriptionFeature.EMPLOYEES,
+                subscriptionLimits.countActiveEmployees(shopId));
+
         Shop shop = shopRepository.findById(shopId).orElseGet(() -> {
             // Shop may exist in ticket-service but not in auth (e.g. after auth DB reset). Create stub so technician can be registered.
             String slug = "shop-" + shopId.toString().replace("-", "");
@@ -555,13 +564,19 @@ public class AuthService {
     /**
      * Create a SHOP_OWNER plus its shops.
      *
-     * @param createdByUserId the authenticated staff account (SUPER_ADMIN or
-     *        MARKET_PERSON) performing the creation, stamped onto
-     *        users.created_by. May be null only for callers that legitimately
-     *        have no session; such rows show "—" as their creator.
+     * The account is created INACTIVE regardless of who makes it — only an
+     * admin can activate it (see {@link #setShopOwnerActive}). Creator identity
+     * is taken from the authenticated caller, never from the request body, so
+     * a client cannot forge provenance.
+     *
+     * When a MARKET_PERSON creates the owner they also become its initial
+     * active person; an admin can reassign that later without disturbing the
+     * creator fields. An admin-created owner starts with no active person.
+     *
+     * @param creator the authenticated staff account performing the creation.
      */
     @Transactional
-    public ShopOwnerResponse createShopOwner(CreateShopOwnerRequest req, UUID createdByUserId) {
+    public ShopOwnerResponse createShopOwner(CreateShopOwnerRequest req, User creator) {
         String email = req.getEmail().trim();
         // Shop owners are platform-level users; their owned shops are linked via
         // shops.owner_user_id, not via users.shop_id. No parent shop needed.
@@ -587,10 +602,23 @@ public class AuthService {
                 .addrStreet(req.getAddrStreet())
                 .addrPincode(req.getAddrPincode())
                 .role(Roles.SHOP_OWNER)
-                .isActive(true)
-                .createdBy(createdByUserId)
+                // Created inactive by design: activation is an ADMIN-only act,
+                // so neither an admin nor a market person can create an account
+                // that is usable before an admin signs off on it.
+                .isActive(false)
+                .createdBy(creator == null ? null : Roles.canonical(creator.getRole()))
+                .createdPersonId(creator == null ? null : creator.getId())
+                .createdPersonName(creator == null ? null : displayName(creator))
                 .emailVerified(false)
                 .build();
+        // A market person who creates an owner is that owner's active person
+        // from the start. An admin-created owner waits for an explicit
+        // assignment, so activeRole stays null rather than reading "ADMIN".
+        if (creator != null && Roles.isMarketPerson(creator.getRole())) {
+            owner.setActiveRole(Roles.MARKET_PERSON);
+            owner.setActivePersonId(creator.getId());
+            owner.setActivePersonName(displayName(creator));
+        }
         owner = userRepository.save(owner);
 
         List<ShopOwnerResponse.ShopSummary> summaries = new java.util.ArrayList<>();
@@ -835,10 +863,8 @@ public class AuthService {
 
     @Transactional
     public List<ShopOwnerView> listShopOwners() {
-        List<User> owners = userRepository.findByRoleOrderByCreatedAtDesc(Roles.SHOP_OWNER);
-        Map<UUID, String> creators = creatorNames(owners);
-        return owners.stream()
-                .map(u -> toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()), creators))
+        return userRepository.findByRoleOrderByCreatedAtDesc(Roles.SHOP_OWNER).stream()
+                .map(u -> toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId())))
                 .toList();
     }
 
@@ -1082,6 +1108,13 @@ public class AuthService {
         if (loc.getName() == null || loc.getName().isBlank())
             throw new BadRequestException("Shop name is required");
 
+        // Shop allowance is counted per OWNER, not per shop — a trial covers
+        // two shops for the account, not two per shop. requireOwnerCapacity
+        // takes the owner id directly rather than resolving one from a shopId,
+        // which is what the employee checks do.
+        subscriptionLimits.requireOwnerCapacity(ownerId, SubscriptionFeature.SHOPS,
+                subscriptionLimits.countActiveShops(ownerId));
+
         String slug = loc.getSlug();
         if (slug == null || slug.isBlank())
             slug = slugify(loc.getName()) + "-" + UUID.randomUUID().toString().substring(0, 6);
@@ -1182,8 +1215,13 @@ public class AuthService {
     public ShopOwnerView setShopOwnerActive(UUID id, boolean active) {
         User u = userRepository.findById(id)
                 .orElseThrow(() -> new BadRequestException("Owner not found: " + id));
-        if (!Roles.isShopOwner(u.getRole()))
-            throw new BadRequestException("User is not a SHOP_OWNER");
+        // Shop owners and market persons are the accounts this screen governs.
+        // Admins are deliberately out of reach: allowing one admin to deactivate
+        // another (or themselves) is how a platform ends up with no way back in.
+        if (Roles.isAdmin(u.getRole()))
+            throw new BadRequestException("Administrator accounts cannot be deactivated here");
+        if (!Roles.isShopOwner(u.getRole()) && !Roles.isMarketPerson(u.getRole()))
+            throw new BadRequestException("User is not a shop owner or market person");
         u.setIsActive(active);
         u = userRepository.save(u);
         return toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()));
@@ -1200,32 +1238,110 @@ public class AuthService {
                 .orElseThrow(() -> new UnauthorizedException("User not found"));
     }
 
-    private ShopOwnerView toOwnerView(User u, List<Shop> shops) {
-        return toOwnerView(u, shops, creatorNames(List.of(u)));
+    /** Name to record for a person, falling back to email when unnamed. */
+    private static String displayName(User u) {
+        if (u == null) return null;
+        return notBlank(u.getName()) ? u.getName().trim() : u.getEmail();
     }
 
     /**
-     * Resolve users.created_by ids to display names in ONE query for the whole
-     * batch. The owner list already issues a shops lookup per row; adding a
-     * creator lookup per row too would make it visibly slower as owners grow.
-     * Ids that no longer resolve (deleted staff) are simply absent from the map
-     * and render as "—".
+     * Create a MARKET_PERSON login. ADMIN-only — market persons cannot create
+     * more of themselves. Created active: the inactive-by-default rule exists
+     * so an admin vets shop owners, and an admin making this account IS that
+     * sign-off.
      */
-    private Map<UUID, String> creatorNames(Collection<User> owners) {
-        Set<UUID> ids = owners.stream()
-                .map(User::getCreatedBy)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
-        if (ids.isEmpty()) return Map.of();
-        Map<UUID, String> names = new HashMap<>();
-        for (User creator : userRepository.findAllById(ids)) {
-            names.put(creator.getId(),
-                    notBlank(creator.getName()) ? creator.getName().trim() : creator.getEmail());
-        }
-        return names;
+    @Transactional
+    public ShopOwnerView createMarketPerson(String name, String email, String phone,
+                                            String password, User creator) {
+        if (!notBlank(email)) throw new BadRequestException("Email is required");
+        if (!notBlank(name))  throw new BadRequestException("Name is required");
+        String cleanEmail = email.trim();
+        if (userRepository.findByEmail(cleanEmail).isPresent())
+            throw new BadRequestException("A user with this email already exists");
+
+        User mp = User.builder()
+                .id(UUID.randomUUID())
+                .name(name.trim())
+                .email(cleanEmail)
+                .phone(notBlank(phone) ? phone.trim() : null)
+                .passwordHash(notBlank(password) ? passwordEncoder.encode(password) : null)
+                .otpCode("123456")
+                .role(Roles.MARKET_PERSON)
+                .isActive(true)
+                .createdBy(creator == null ? null : Roles.canonical(creator.getRole()))
+                .createdPersonId(creator == null ? null : creator.getId())
+                .createdPersonName(creator == null ? null : displayName(creator))
+                .emailVerified(false)
+                .build();
+        mp = userRepository.save(mp);
+        return toOwnerView(mp, List.of());
     }
 
-    private ShopOwnerView toOwnerView(User u, List<Shop> shops, Map<UUID, String> creatorNames) {
+    /**
+     * Assign (or clear) the market person currently responsible for a shop
+     * owner. ADMIN-only.
+     *
+     * The name and role are read off the target user row rather than taken from
+     * the request, so a client cannot label an arbitrary id with a name of its
+     * choosing. Passing a null id clears the assignment. Creator fields are
+     * never touched — reassignment does not rewrite history.
+     */
+    @Transactional
+    public ShopOwnerView assignActivePerson(UUID ownerId, UUID marketPersonId) {
+        User owner = userRepository.findById(ownerId)
+                .orElseThrow(() -> new BadRequestException("Owner not found: " + ownerId));
+        if (!Roles.isShopOwner(owner.getRole()))
+            throw new BadRequestException("User is not a SHOP_OWNER");
+
+        if (marketPersonId == null) {
+            owner.setActiveRole(null);
+            owner.setActivePersonId(null);
+            owner.setActivePersonName(null);
+        } else {
+            User mp = userRepository.findById(marketPersonId)
+                    .orElseThrow(() -> new BadRequestException("Market person not found: " + marketPersonId));
+            if (!Roles.isMarketPerson(mp.getRole()))
+                throw new BadRequestException("Assigned user is not a MARKET_PERSON");
+            owner.setActiveRole(Roles.MARKET_PERSON);
+            owner.setActivePersonId(mp.getId());
+            owner.setActivePersonName(displayName(mp));
+        }
+        owner = userRepository.save(owner);
+        return toOwnerView(owner, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(owner.getId()));
+    }
+
+    /** Every market person, for the admin's assignment picker. */
+    @Transactional(readOnly = true)
+    public List<ShopOwnerView> listMarketPersons() {
+        return userRepository.findByRoleOrderByCreatedAtDesc(Roles.MARKET_PERSON).stream()
+                .map(u -> toOwnerView(u, List.of()))
+                .toList();
+    }
+
+    /**
+     * Every account the User Management screen manages — shop owners and market
+     * persons, newest first. Admins are excluded: they are not administered
+     * through this screen and showing a deactivate control against them invites
+     * an admin locking themselves out.
+     */
+    @Transactional(readOnly = true)
+    public List<ShopOwnerView> listManagedUsers() {
+        return userRepository.findAll().stream()
+                .filter(u -> Roles.isShopOwner(u.getRole()) || Roles.isMarketPerson(u.getRole()))
+                .sorted((a, b) -> {
+                    Instant x = a.getCreatedAt(), y = b.getCreatedAt();
+                    if (x == null && y == null) return 0;
+                    if (x == null) return 1;
+                    if (y == null) return -1;
+                    return y.compareTo(x);
+                })
+                .map(u -> toOwnerView(u, Roles.isShopOwner(u.getRole())
+                        ? shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId())
+                        : List.of()))
+                .toList();
+    }
+
+    private ShopOwnerView toOwnerView(User u, List<Shop> shops) {
         // Profile completeness: 5 sections — Basic info (name+email+phone), Avatar,
         // ID Proof, Personal Address, At-least-one-shop.
         int sections = 0;
@@ -1308,7 +1424,11 @@ public class AuthService {
                 .role(u.getRole())
                 .isActive(u.getIsActive())
                 .createdBy(u.getCreatedBy())
-                .createdByName(u.getCreatedBy() == null ? null : creatorNames.get(u.getCreatedBy()))
+                .createdPersonId(u.getCreatedPersonId())
+                .createdPersonName(u.getCreatedPersonName())
+                .activeRole(u.getActiveRole())
+                .activePersonId(u.getActivePersonId())
+                .activePersonName(u.getActivePersonName())
                 .emailVerified(emailVerified)
                 .profileCompletePercent(percent)
                 .sectionsComplete(sections)

@@ -1,5 +1,6 @@
 package com.repairshop.saas.ticket.exception;
 
+import com.repairshop.saas.common.subscription.SubscriptionLimitExceededException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -65,6 +66,29 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * Plan allowance exhausted, or the subscription behind it has lapsed.
+     * Returns 409 with the whole limit calculation inline (currentUsage / limit
+     * / remaining / plan) so the app can render its counter and upgrade prompt
+     * from the rejection without a follow-up request.
+     *
+     * <p>Not 403: the caller is authenticated and authorised, and the request
+     * will succeed once the plan is upgraded. The apps only log a user out on a
+     * 401 from auth-service, but keeping billing refusals off 403 avoids
+     * teaching any future client that 403 means "sign in again".
+     */
+    @ExceptionHandler(SubscriptionLimitExceededException.class)
+    public ResponseEntity<Map<String, Object>> handleSubscriptionLimit(
+            SubscriptionLimitExceededException ex, HttpServletRequest req) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("timestamp", Instant.now().toString());
+        body.put("status", HttpStatus.CONFLICT.value());
+        body.putAll(ex.toBody());
+        body.put("path", req.getRequestURI());
+        log.info("Subscription limit blocked {} {} — {}", req.getMethod(), req.getRequestURI(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    }
+
+    /**
      * IMEI already held by another open booking. 409 with a flat body carrying
      * {@code code = IMEI_ALREADY_USED} so the shop app can tell this apart from
      * any other save failure and show its dedicated alert.
@@ -121,6 +145,25 @@ public class GlobalExceptionHandler {
             return response(HttpStatus.UNAUTHORIZED, "Missing or invalid Authorization token (shop context required)", req.getRequestURI());
         }
         return response(HttpStatus.BAD_REQUEST, ex.getMessage(), req.getRequestURI());
+    }
+
+    /**
+     * Honour the status a service deliberately chose.
+     *
+     * Without this the catch-all below wins — @ExceptionHandler(Exception.class)
+     * matches ResponseStatusException too — and every considered 404 / 409 in
+     * the service layer reached the client as an opaque 500. The reason phrase
+     * goes in `error` and the service's own sentence in `message`, matching
+     * every other response this handler builds, because that is the field the
+     * mobile clients surface.
+     */
+    @ExceptionHandler(org.springframework.web.server.ResponseStatusException.class)
+    public ResponseEntity<ApiError> handleResponseStatus(
+            org.springframework.web.server.ResponseStatusException ex, HttpServletRequest req) {
+        HttpStatus status = HttpStatus.resolve(ex.getStatusCode().value());
+        if (status == null) status = HttpStatus.INTERNAL_SERVER_ERROR;
+        String message = ex.getReason() != null ? ex.getReason() : status.getReasonPhrase();
+        return response(status, message, req.getRequestURI());
     }
 
     @ExceptionHandler(Exception.class)

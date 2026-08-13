@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.repairshop.saas</groupId>
+        <artifactId>repair-shop-services</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+    <artifactId>common-subscription</artifactId>
+    <name>Common Subscription</name>
+
+    <!--
+        The single source of truth for subscription plans and their limits.
+
+        Extracted rather than copied because the limit has to be identical in
+        three places that live in three different services: the Subscription
+        screen that ADVERTISES "Up to 3 Employees per Shop" (subscription-service),
+        the Employees screen that DISPLAYS "3/3" (ticket-service), and the create
+        /activate APIs that ENFORCE it (ticket-service). A second copy of the
+        number is a copy that can disagree with the plan the customer paid for.
+
+        Deliberately JDBC, not JPA: consumers read the `subscriptions` and `shops`
+        tables that other services own, and mapping someone else's table as an
+        @Entity would drag it into their Hibernate validate-on-boot check — one
+        column added by another team's migration would then refuse to start an
+        unrelated service.
+
+        A jar, not an application: no @SpringBootApplication. Consumers add
+        com.repairshop.saas.common.subscription to their scanned packages.
+    -->
+    <packaging>jar</packaging>
+
+    <dependencies>
+        <!-- JdbcTemplate. The DataSource itself comes from the consuming service. -->
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>
+
+        <!-- @ResponseStatus / HttpStatus on the limit-exceeded exception. -->
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Same reason as common-media: the parent enables the repackage goal
+                for services, and repackaging a library produces a nested-jar
+                layout that consumers cannot compile against.
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

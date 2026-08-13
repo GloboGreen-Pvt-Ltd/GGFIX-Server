@@ -1,5 +1,8 @@
 package com.repairshop.saas.ticket.service;
 
+import com.repairshop.saas.common.subscription.LimitCheck;
+import com.repairshop.saas.common.subscription.SubscriptionFeature;
+import com.repairshop.saas.common.subscription.SubscriptionLimitService;
 import com.repairshop.saas.ticket.dto.*;
 import com.repairshop.saas.ticket.entity.Technician;
 import com.repairshop.saas.ticket.entity.TechnicianAttendance;
@@ -49,6 +52,7 @@ public class TechnicianService {
     private final TechnicianSalaryAdvanceRepository advanceRepository;
     private final TechnicianExperienceRepository experienceRepository;
     private final JdbcTemplate jdbc;
+    private final SubscriptionLimitService subscriptionLimits;
 
     // 100m shop geofence for attendance punches — same radius the product spec
     // asked for (the pickup-person "Reached Shop" gate uses 50m separately).
@@ -174,8 +178,30 @@ public class TechnicianService {
         return toResponse(t);
     }
 
+    /**
+     * The shop's employee allowance and how much of it is used — the single
+     * calculation behind the "3/3" counter, the disabled Add button, and the
+     * rejection thrown by {@link #create}.
+     *
+     * <p>Exposed so the app can render the state it is about to be held to
+     * instead of guessing at it; the guess is what produced "4/4 Active" on a
+     * plan that allows three.
+     */
+    @Transactional(readOnly = true)
+    public LimitCheck employeeLimit(UUID shopId) {
+        return subscriptionLimits.checkForShop(
+                shopId, SubscriptionFeature.EMPLOYEES, subscriptionLimits.countActiveEmployees(shopId));
+    }
+
     @Transactional
     public TechnicianResponse create(UUID shopId, CreateTechnicianRequest request) {
+        // The backend is the authority: the client's own pre-check is a courtesy
+        // that keeps the user out of a form they cannot submit, and nothing the
+        // client sends is consulted here. The plan and the count are both read
+        // server-side from the authenticated shop.
+        subscriptionLimits.requireCapacity(shopId, SubscriptionFeature.EMPLOYEES,
+                subscriptionLimits.countActiveEmployees(shopId));
+
         Technician t = Technician.builder()
                 .shopId(shopId)
                 .userId(request.getUserId())
@@ -213,7 +239,18 @@ public class TechnicianService {
         if (request.getEmail() != null) t.setEmail(request.getEmail().trim());
         if (request.getPhone() != null) t.setPhone(request.getPhone().trim());
         if (request.getRoleLabel() != null) t.setRoleLabel(request.getRoleLabel().trim());
-        if (request.getIsAvailable() != null) t.setAvailable(request.getIsAvailable());
+        // Re-activation consumes a seat, so it is gated the same way creation is
+        // — otherwise the limit is trivially bypassed by deactivating someone,
+        // hiring a replacement, and switching the first one back on. Only a
+        // genuine off→on transition is checked: re-saving an already-active
+        // employee must not count them against the allowance a second time.
+        if (request.getIsAvailable() != null) {
+            if (request.getIsAvailable() && !t.isAvailable()) {
+                subscriptionLimits.requireCapacity(shopId, SubscriptionFeature.EMPLOYEES,
+                        subscriptionLimits.countActiveEmployees(shopId));
+            }
+            t.setAvailable(request.getIsAvailable());
+        }
         if (request.getSalaryAmount() != null) t.setSalaryAmount(request.getSalaryAmount().trim());
         if (request.getSalaryPeriod() != null) t.setSalaryPeriod(request.getSalaryPeriod().trim());
         if (request.getIdVerificationType() != null) t.setIdVerificationType(request.getIdVerificationType().trim());

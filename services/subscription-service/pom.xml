@@ -20,6 +20,15 @@
         <dependency><groupId>io.jsonwebtoken</groupId><artifactId>jjwt-jackson</artifactId><scope>runtime</scope></dependency>
         <dependency><groupId>org.springdoc</groupId><artifactId>springdoc-openapi-starter-webmvc-ui</artifactId></dependency>
         <dependency><groupId>org.projectlombok</groupId><artifactId>lombok</artifactId><optional>true</optional></dependency>
+
+        <!-- The shared plan catalogue + limit engine. The same jar backs the
+             enforcement in ticket-service, which is what keeps the allowance
+             this service advertises identical to the one that gets enforced. -->
+        <dependency>
+            <groupId>com.repairshop.saas</groupId>
+            <artifactId>common-subscription</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
 
     <build>

@@ -26,8 +26,9 @@
     </properties>
 
     <modules>
-        <!-- Library, not a service. Must build before the modules that depend on it. -->
+        <!-- Libraries, not services. Must build before the modules that depend on them. -->
         <module>common-media</module>
+        <module>common-subscription</module>
         <module>auth-service</module>
         <module>user-service</module>
         <module>shop-service</module>

@@ -1,5 +1,6 @@
 package com.repairshop.saas.auth.exception;
 
+import com.repairshop.saas.common.subscription.SubscriptionLimitExceededException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -11,7 +12,9 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestControllerAdvice
@@ -35,6 +38,23 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(AuthenticationException.class)
     public ResponseEntity<ApiError> handleAuth(AuthenticationException ex, HttpServletRequest req) {
         return response(HttpStatus.UNAUTHORIZED, ex.getMessage(), req.getRequestURI());
+    }
+
+    /**
+     * Plan allowance exhausted (provisioning an employee login past the seat
+     * limit), or the subscription has lapsed. 409 with the limit calculation
+     * inline, matching ticket-service's handler so the app can treat a refusal
+     * from either end of the two-call add-staff flow identically.
+     */
+    @ExceptionHandler(SubscriptionLimitExceededException.class)
+    public ResponseEntity<Map<String, Object>> handleSubscriptionLimit(
+            SubscriptionLimitExceededException ex, HttpServletRequest req) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("timestamp", Instant.now().toString());
+        body.put("status", HttpStatus.CONFLICT.value());
+        body.putAll(ex.toBody());
+        body.put("path", req.getRequestURI());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
     @ExceptionHandler(AccessDeniedException.class)

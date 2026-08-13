@@ -40,10 +40,17 @@ public class ShopOwnerView {
     private String addrPincode;
     private String role;
     private Boolean isActive;
-    /** users.id of the staff account that created this owner. NULL for pre-migration-91 rows. */
-    private UUID createdBy;
-    /** Display name of {@link #createdBy}, resolved at read time. NULL when unknown or deleted. */
-    private String createdByName;
+
+    /** Role of the creator — ADMIN or MARKET_PERSON. NULL for legacy rows. */
+    private String createdBy;
+    private UUID createdPersonId;
+    private String createdPersonName;
+
+    /** Role of the currently assigned person, and who that is. NULL when unassigned. */
+    private String activeRole;
+    private UUID activePersonId;
+    private String activePersonName;
+
     private Boolean emailVerified;
     private Integer profileCompletePercent;
     private Integer sectionsComplete;
