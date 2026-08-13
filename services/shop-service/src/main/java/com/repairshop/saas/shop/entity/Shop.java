@@ -56,6 +56,17 @@ public class Shop {
     @Column(precision = 3, scale = 1)
     private BigDecimal rating;
 
+    /**
+     * The shop's master pickup switch (migration 14). auth-service owns this
+     * column — it is the only service that writes it, via the owner's location
+     * PATCH — so it is mapped read-only here. insertable=false keeps
+     * shop-service's own createShop out of a NOT NULL violation: the column
+     * would otherwise be INSERTed as NULL instead of falling back to the
+     * DEFAULT FALSE that makes a new shop pickup-off until its owner opts in.
+     */
+    @Column(name = "pickup_enabled", insertable = false, updatable = false)
+    private Boolean pickupEnabled;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

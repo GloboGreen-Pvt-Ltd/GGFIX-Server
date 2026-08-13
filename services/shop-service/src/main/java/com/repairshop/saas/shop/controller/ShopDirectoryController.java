@@ -52,10 +52,14 @@ public class ShopDirectoryController {
     // shopId claim, so an owner editing a shop other than the one their current
     // token was minted for will be rejected — verify the shop-switch flow
     // re-mints the token's shopId before relying on this in production.
-    private void requireShopOwner(HttpServletRequest request, UUID shopId) {
+    private boolean isShopManager(HttpServletRequest request, UUID shopId) {
         List<String> roles = rolesFrom(request);
-        if (roles.contains("SUPER_ADMIN")) return;
-        if (roles.contains("SHOP_OWNER") && shopId != null && shopId.equals(tokenShopId(request))) return;
+        if (roles.contains("SUPER_ADMIN")) return true;
+        return roles.contains("SHOP_OWNER") && shopId != null && shopId.equals(tokenShopId(request));
+    }
+
+    private void requireShopOwner(HttpServletRequest request, UUID shopId) {
+        if (isShopManager(request, shopId)) return;
         throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You can only manage your own shop.");
     }
 
@@ -154,10 +158,27 @@ public class ShopDirectoryController {
         return ResponseEntity.ok(toDetails(shop));
     }
 
+    /**
+     * The shop's bookable pickup windows.
+     *
+     * <p>Pickup off means the shop is not taking pickups right now, so it offers
+     * no windows: customers get an empty list even if they reached this shop by
+     * a stale card or a deep link that skipped the pickup-nearby feed (which
+     * already filters on the same flag).
+     *
+     * <p>The rows themselves are never touched by the switch — they stay in
+     * shop_pickup_slots and come back exactly as they were when pickup is turned
+     * on again. The shop's own owner keeps reading them while pickup is off, so
+     * "turned it off and my slots are gone" can be disproved from the API rather
+     * than from the database.
+     */
     @GetMapping("/{id}/pickup-slots")
-    public ResponseEntity<List<PickupSlotResponse>> getPickupSlots(@PathVariable UUID id) {
-        if (!shopRepository.existsById(id)) {
-            throw new ResourceNotFoundException("Shop not found: " + id);
+    public ResponseEntity<List<PickupSlotResponse>> getPickupSlots(@PathVariable UUID id,
+                                                                   HttpServletRequest request) {
+        Shop shop = shopRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Shop not found: " + id));
+        if (!Boolean.TRUE.equals(shop.getPickupEnabled()) && !isShopManager(request, id)) {
+            return ResponseEntity.ok(List.of());
         }
         List<PickupSlotResponse> slots = pickupSlotRepository.findByShopId(id).stream()
                 .map(this::toSlotResponse)
