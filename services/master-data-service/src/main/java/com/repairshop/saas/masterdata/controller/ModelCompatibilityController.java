@@ -241,7 +241,7 @@ public class ModelCompatibilityController {
 
         List<CompatibleModelRef> models;
         try {
-            models = resolveModels(req.getModels());
+            models = resolveModels(req.getModels(), req.getCustomModels());
         } catch (UnknownModelException e) {
             return badRequest(e.getMessage());
         }
@@ -289,9 +289,12 @@ public class ModelCompatibilityController {
             if (boxName == null) return badRequest("Box Name cannot be blank.");
             e.setBoxName(boxName);
         }
-        if (req.getModels() != null) {
+        // Either list rebuilds the whole fitment list: they are two halves of one
+        // form, and taking only the one that was sent would drop the other's
+        // models. Both absent — the Active toggle's body — still leaves it alone.
+        if (req.getModels() != null || req.getCustomModels() != null) {
             try {
-                e.setModels(resolveModels(req.getModels()));
+                e.setModels(resolveModels(req.getModels(), req.getCustomModels()));
             } catch (UnknownModelException ex) {
                 return badRequest(ex.getMessage());
             }
@@ -322,6 +325,78 @@ public class ModelCompatibilityController {
     /* ------------------------------------------------------------------ */
 
     /**
+     * The box's whole fitment list: the catalogue models ticked in the form,
+     * followed by the names typed into it that the catalogue does not carry.
+     */
+    private List<CompatibleModelRef> resolveModels(List<UUID> ids,
+                                                   List<ModelCompatibilityRequest.CustomModel> customs) {
+        List<CompatibleModelRef> out = resolveCatalogueModels(ids);
+        appendCustomModels(out, customs);
+        return out;
+    }
+
+    /**
+     * Every name already on the box, keyed by brand — two models of different
+     * brands may share a name, so the brand is part of the key.
+     */
+    private static String nameKey(UUID brandId, String modelName) {
+        return brandId + "|" + String.valueOf(modelName).trim().replaceAll("\\s+", " ").toLowerCase();
+    }
+
+    /**
+     * Add the names typed into the form to a box that already holds its
+     * catalogue picks.
+     *
+     * A typed name is trusted for what it is — a label on this box — and for
+     * nothing else: it gets no master_models row, and its brand is still read
+     * from master_brands so the brand LABEL cannot be faked. A name that the
+     * catalogue (or an earlier custom entry) already covers is dropped rather
+     * than stored twice, which is what happens when a shop types a model it had
+     * not noticed was already ticked.
+     *
+     * @throws UnknownModelException if a brand id has no brand
+     */
+    private void appendCustomModels(List<CompatibleModelRef> out,
+                                    List<ModelCompatibilityRequest.CustomModel> customs) {
+        if (customs == null || customs.isEmpty()) return;
+
+        java.util.Set<String> taken = out.stream()
+                .map(r -> nameKey(r.getBrandId(), r.getModelName()))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        for (ModelCompatibilityRequest.CustomModel c : customs) {
+            String name = trimToNull(c.getModelName());
+            if (name == null) continue;
+            name = name.replaceAll("\\s+", " ");
+            if (name.length() > 120) {
+                throw new UnknownModelException("\"" + name.substring(0, 40)
+                        + "…\" is too long for a model name — 120 characters at most.");
+            }
+
+            UUID brandId = c.getBrandId();
+            String brandName = null;
+            if (brandId != null) {
+                MasterBrand brand = brandRepo.findById(brandId).orElse(null);
+                if (brand == null) {
+                    throw new UnknownModelException("No brand exists for id " + brandId
+                            + ". Reload the page and add that model again.");
+                }
+                brandName = brand.getName();
+            }
+
+            if (!taken.add(nameKey(brandId, name))) continue;
+
+            out.add(CompatibleModelRef.builder()
+                    .brandId(brandId)
+                    .brandName(brandName)
+                    .modelId(c.getModelId() == null ? UUID.randomUUID() : c.getModelId())
+                    .modelName(name)
+                    .custom(true)
+                    .build());
+        }
+    }
+
+    /**
      * Turn the ids the client ticked into stored refs carrying the brand and
      * model names.
      *
@@ -334,7 +409,7 @@ public class ModelCompatibilityController {
      *                               would show the admin a saved box missing a
      *                               model they had just ticked
      */
-    private List<CompatibleModelRef> resolveModels(List<UUID> ids) {
+    private List<CompatibleModelRef> resolveCatalogueModels(List<UUID> ids) {
         if (ids == null || ids.isEmpty()) return new ArrayList<>();
 
         List<UUID> wanted = new ArrayList<>(new LinkedHashSet<>(ids.stream().filter(java.util.Objects::nonNull).toList()));
