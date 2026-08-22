@@ -428,6 +428,29 @@ public class AuthController {
         return customerAuthService.login(request);
     }
 
+    @PostMapping("/customer/signup/otp/send")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Send a customer SIGN-UP OTP",
+            description = "Issues an OTP for a mobile that has no account yet (Create Account, step 1). "
+                    + "409 when the number is already registered — the app shows that as "
+                    + "\"This mobile number is already registered.\" and points the user at sign-in. "
+                    + "Distinct from /auth/customer/otp/send, which requires an EXISTING account.")
+    public Map<String, Object> customerSendSignupOtp(@RequestBody Map<String, String> body) {
+        String mobile = body == null ? null : (body.get("mobile") != null ? body.get("mobile") : body.get("identifier"));
+        return customerAuthService.sendSignupOtp(mobile);
+    }
+
+    @PostMapping("/customer/signup/otp/verify")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Verify a customer SIGN-UP OTP",
+            description = "Checks the code without consuming it (Create Account, step 2) so the client can "
+                    + "collect the name next; /auth/customer-register re-verifies and consumes it.")
+    public Map<String, Object> customerVerifySignupOtp(@RequestBody Map<String, String> body) {
+        String mobile = body == null ? null : (body.get("mobile") != null ? body.get("mobile") : body.get("identifier"));
+        String otp = body == null ? null : body.get("otp");
+        return customerAuthService.verifySignupOtp(mobile, otp);
+    }
+
     @PostMapping("/customer/otp/send")
     @ResponseStatus(HttpStatus.OK)
     @Operation(summary = "Send a customer login/reset OTP",

@@ -35,6 +35,11 @@ public class GlobalExceptionHandler {
         return response(HttpStatus.BAD_REQUEST, ex.getMessage(), req.getRequestURI());
     }
 
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ApiError> handleConflict(ConflictException ex, HttpServletRequest req) {
+        return response(HttpStatus.CONFLICT, ex.getMessage(), req.getRequestURI());
+    }
+
     @ExceptionHandler(AuthenticationException.class)
     public ResponseEntity<ApiError> handleAuth(AuthenticationException ex, HttpServletRequest req) {
         return response(HttpStatus.UNAUTHORIZED, ex.getMessage(), req.getRequestURI());

@@ -31,8 +31,21 @@ public class CustomerRegisterRequest {
     @Schema(description = "Customer mobile (unique)", example = "+919876543210", required = true)
     private String mobile;
 
-    @NotBlank(message = "Password is required")
+    /**
+     * Sign-up code from /auth/customer/signup/otp/send. The app's Create Account
+     * flow is OTP-only and sends this instead of a password; it is consumed here
+     * so an account can only be made for a number the caller verified.
+     */
+    @Size(max = 16)
+    @Schema(description = "Sign-up OTP for the mobile (required when no password is sent)", example = "123456")
+    private String otp;
+
+    /**
+     * Optional, and no longer collected by the customer app - customers sign in
+     * with an OTP. Kept for older clients that still post one; when absent the
+     * account is created with no password until "forgot password" sets one.
+     */
     @Size(min = 6, max = 100)
-    @Schema(description = "Password (min 6 chars)", required = true)
+    @Schema(description = "Password (min 6 chars). Optional — send `otp` instead.")
     private String password;
 }
