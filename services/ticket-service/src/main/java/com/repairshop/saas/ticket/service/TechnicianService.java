@@ -27,6 +27,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.format.TextStyle;
 import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
@@ -57,6 +58,8 @@ public class TechnicianService {
     // 100m shop geofence for attendance punches — same radius the product spec
     // asked for (the pickup-person "Reached Shop" gate uses 50m separately).
     private static final double SHOP_ATTENDANCE_RADIUS_METERS = 100.0;
+    // EC2 JVM default zone is UTC; attendance wall-clock must be IST regardless of host zone.
+    private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     // A check-in within this many minutes of the duty start still counts as
     // on-time (the "5-minute grace"). Applied both when the row is first
     // classified and when toAttendanceRecord re-derives the effective status.
@@ -556,14 +559,14 @@ public class TechnicianService {
         // measured distance (null when the shop has no coordinates configured,
         // in which case the gate is skipped).
         Integer distanceMeters = enforceShopGeofence(t.getShopId(), latitude, longitude);
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(IST);
         TechnicianAttendance a = attendanceRepository.findByTechnicianIdAndAttendanceDate(t.getId(), today)
                 .orElse(TechnicianAttendance.builder()
                         .technicianId(t.getId())
                         .attendanceDate(today)
                         .status("GENERAL")
                         .build());
-        LocalTime now = LocalTime.now();
+        LocalTime now = LocalTime.now(IST);
         a.setCheckInTime(now);
         // Auto-classify LATE if check-in exceeds the configured default plus the
         // grace window. Leave PERMISSION / LEAVE statuses alone so an explicit
@@ -586,10 +589,10 @@ public class TechnicianService {
                                                    Double latitude, Double longitude) {
         Technician t = technicianRepository.findByShopIdAndUserId(shopId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Technician profile not found"));
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(IST);
         TechnicianAttendance a = attendanceRepository.findByTechnicianIdAndAttendanceDate(t.getId(), today)
                 .orElseThrow(() -> new ResourceNotFoundException("No check-in found for today. Check in first."));
-        LocalTime now = LocalTime.now();
+        LocalTime now = LocalTime.now(IST);
         // Same 100m geofence as check-in — you must be at the shop to punch out.
         enforceShopGeofence(t.getShopId(), latitude, longitude);
         // Early-checkout guard: no leaving before the duty end time unless an
@@ -651,7 +654,7 @@ public class TechnicianService {
 
     /** True when the technician has an APPROVED HALF_DAY/PERMISSION covering today. */
     private boolean hasApprovedEarlyLeaveToday(UUID technicianId) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(IST);
         return leaveRepository.findOverlapping(technicianId, today, today).stream()
                 .anyMatch(l -> "APPROVED".equalsIgnoreCase(l.getStatus())
                         && l.getLeaveType() != null
@@ -678,7 +681,7 @@ public class TechnicianService {
     public Optional<AttendanceRecordResponse> getTodayAttendance(UUID shopId, UUID userId) {
         Technician t = technicianRepository.findByShopIdAndUserId(shopId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Technician profile not found"));
-        return attendanceRepository.findByTechnicianIdAndAttendanceDate(t.getId(), LocalDate.now())
+        return attendanceRepository.findByTechnicianIdAndAttendanceDate(t.getId(), LocalDate.now(IST))
                 .map(a -> toAttendanceRecord(a, t.getDefaultCheckIn()));
     }
 
