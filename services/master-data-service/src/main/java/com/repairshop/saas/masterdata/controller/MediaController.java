@@ -70,9 +70,12 @@ public class MediaController {
     /**
      * <pre>
      * POST /media/upload            (multipart/form-data)
-     *   file    the bytes  (jpeg | png | webp | mp4 | webm | m4a | mp3)
-     *   folder  optional destination prefix, e.g. "Devicefiles"
-     *   slot    optional filename stem,      e.g. "front" | "back" | "video"
+     *   file          the bytes  (jpeg | png | webp | mp4 | webm | m4a | mp3;
+     *                 add application/pdf with allowDocument=true)
+     *   folder        optional destination prefix, e.g. "Devicefiles"
+     *   slot          optional filename stem,      e.g. "front" | "back" | "video"
+     *   allowDocument optional; "true" for fields routinely scanned to PDF
+     *                 (KYC, GST/Udyam certificates) — pure artwork leaves it off
      * </pre>
      *
      * Returns the public URL plus the key it landed on. The response keeps the
@@ -81,10 +84,13 @@ public class MediaController {
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Map<String, Object>> upload(@RequestParam("file") MultipartFile file,
                                                       @RequestParam(value = "folder", required = false) String folder,
-                                                      @RequestParam(value = "slot", required = false) String slot) {
+                                                      @RequestParam(value = "slot", required = false) String slot,
+                                                      @RequestParam(value = "allowDocument", required = false, defaultValue = "false") boolean allowDocument) {
         // Throws MediaValidationException (400) or MediaStorageException (502),
         // both already turned into readable JSON by MediaExceptionHandler.
-        MediaUploadValidator.ValidatedUpload upload = validator.validateMedia(file);
+        MediaUploadValidator.ValidatedUpload upload = allowDocument
+                ? validator.validateDocument(file)
+                : validator.validateMedia(file);
         String key = MediaKeys.uploadKey(folder, slot, upload.extension());
         String url = storage.put(key, upload.bytes(), upload.contentType());
 
