@@ -315,6 +315,22 @@ jobs:
 
           NGINX_DIR="$HOME/ggfix-development-deploy/nginx"
           if [ -f "$NGINX_DIR/setup-nginx-tls.sh" ]; then
+            # This host already had some OTHER conf.d vhost claiming
+            # server_name == $API_DOMAIN (a pre-existing stub with no service
+            # routing). nginx loads conf.d alphabetically and keeps only the
+            # first match, silently ignoring ours ("conflicting server name
+            # ... ignored") - so the stub kept winning. Remove any such file
+            # before installing ours so ggfix-api.conf becomes the one nginx
+            # actually uses for this domain.
+            for f in /etc/nginx/conf.d/*.conf; do
+              [ -f "$f" ] || continue
+              [ "$(basename "$f")" = "ggfix-api.conf" ] && continue
+              if sudo grep -q "server_name[[:space:]].*\b$API_DOMAIN\b" "$f" 2>/dev/null; then
+                echo "Removing conflicting nginx vhost: $f"
+                sudo rm -f "$f"
+              fi
+            done
+
             chmod +x "$NGINX_DIR/setup-nginx-tls.sh"
             echo "Configuring nginx + TLS for $API_DOMAIN..."
             (cd "$NGINX_DIR" && API_DOMAIN="$API_DOMAIN" bash setup-nginx-tls.sh)
