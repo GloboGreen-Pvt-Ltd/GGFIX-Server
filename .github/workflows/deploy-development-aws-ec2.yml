@@ -204,6 +204,50 @@ jobs:
           ENVEOF
           chmod 600 "$ENV_FILE"
 
+          # Wrapper instead of a hardcoded /usr/bin/java: resolves the JRE via
+          # PATH (falling back to common install locations) at start time, so
+          # a JRE installed anywhere reasonable works, and JAVA_OPTS from the
+          # env file above is actually applied (a bare "ExecStart=java -jar"
+          # would silently ignore it - JAVA_OPTS is a convention read by this
+          # wrapper, not something the JVM understands on its own).
+          sudo install -d -m 0755 "$APP_DIR/bin"
+          cat > /tmp/ggfix-development-run-service.sh <<'RUNEOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          service_name="${1:?service name is required}"
+          env_file="__APP_DIR__/.env"
+          jar_file="__APP_DIR__/${service_name}/${service_name}.jar"
+
+          if [ -f "$env_file" ]; then
+            set -a
+            # shellcheck disable=SC1090
+            source "$env_file"
+            set +a
+          fi
+
+          java_bin="$(command -v java || true)"
+          if [ -z "$java_bin" ]; then
+            for candidate in /usr/bin/java /usr/lib/jvm/*/bin/java /opt/*/bin/java; do
+              if [ -x "$candidate" ]; then
+                java_bin="$candidate"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$java_bin" ]; then
+            echo "ERROR: no java executable found on PATH, /usr/bin/java, /usr/lib/jvm/*/bin/java, or /opt/*/bin/java." >&2
+            echo "Install a JRE on this host, e.g.: sudo dnf install -y java-25-amazon-corretto-headless (Amazon Linux) or sudo apt-get install -y openjdk-25-jre-headless (Ubuntu/Debian)." >&2
+            exit 1
+          fi
+
+          exec "$java_bin" ${JAVA_OPTS:-} -jar "$jar_file"
+          RUNEOF
+          sed -i "s#__APP_DIR__#$APP_DIR#g" /tmp/ggfix-development-run-service.sh
+          sudo install -m 0755 /tmp/ggfix-development-run-service.sh "$APP_DIR/bin/run-service"
+          rm -f /tmp/ggfix-development-run-service.sh
+
           UNIT_PATH="/etc/systemd/system/${SERVICE_PREFIX}@.service"
           sudo tee "$UNIT_PATH" > /dev/null <<EOF
           [Unit]
@@ -216,7 +260,7 @@ jobs:
           User=$(whoami)
           WorkingDirectory=$APP_DIR/%i
           EnvironmentFile=$APP_DIR/.env
-          ExecStart=/usr/bin/java -jar $APP_DIR/%i/%i.jar
+          ExecStart=$APP_DIR/bin/run-service %i
           SuccessExitStatus=143
           Restart=always
           RestartSec=10
