@@ -1,0 +1,254 @@
+name: Deploy Development Backend to AWS EC2
+
+# Branch isolation: this file only reacts to `development`. Preview and
+# production each get their own workflow file with their own single branch
+# trigger (deploy-preview-aws-ec2.yml / deploy-production-aws-ec2.yml) so a
+# push to one branch can never fan out into another environment's deploy.
+on:
+  push:
+    branches:
+      - development
+    paths:
+      - "services/**"
+      - ".github/workflows/deploy-development-aws-ec2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ggfix-development-deploy
+  # Queue a second push instead of cancelling a deploy that already stopped
+  # services mid-flight - cancelling here could leave a service down.
+  cancel-in-progress: false
+
+env:
+  APP_DIR: /opt/ggfix/development
+  SERVICE_PREFIX: ggfix-development
+  EC2_PORT: "22"
+  SERVICES: "auth-service user-service shop-service ticket-service technician-service inventory-service marketplace-service pickup-service notification-service subscription-service master-data-service order-service"
+
+jobs:
+  deploy:
+    name: Build and Deploy Development Backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: development
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Build backend services (Maven)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -x ./mvnw ]; then
+            ./mvnw -f services/pom.xml clean package -DskipTests
+          else
+            mvn -f services/pom.xml clean package -DskipTests
+          fi
+
+      - name: Package service JARs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf deploy-bundle ggfix-development-deploy.tgz
+          mkdir -p deploy-bundle
+
+          for service in $SERVICES; do
+            source_jar="services/$service/target/$service-1.0.0-SNAPSHOT.jar"
+
+            if [ ! -f "$source_jar" ]; then
+              echo "ERROR: JAR file not found: $source_jar"
+              ls -lah "services/$service/target" || true
+              exit 1
+            fi
+
+            mkdir -p "deploy-bundle/$service"
+            cp "$source_jar" "deploy-bundle/$service/$service.jar"
+          done
+
+          tar -czf ggfix-development-deploy.tgz -C deploy-bundle .
+          ls -lh ggfix-development-deploy.tgz
+
+      - name: Decode SSH key and configure known_hosts
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_PRIVATE_KEY_B64: ${{ secrets.EC2_SSH_PRIVATE_KEY_B64 }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+
+          : "${EC2_HOST:?EC2_HOST secret is required}"
+          : "${EC2_SSH_PRIVATE_KEY_B64:?EC2_SSH_PRIVATE_KEY_B64 secret is required}"
+          : "${EC2_KNOWN_HOSTS:?EC2_KNOWN_HOSTS secret is required}"
+
+          install -d -m 700 "$HOME/.ssh"
+
+          printf '%s' "$EC2_SSH_PRIVATE_KEY_B64" | base64 --decode > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+          ssh-keygen -lf "$HOME/.ssh/id_ed25519"
+
+          if ! grep -q "$EC2_HOST" "$HOME/.ssh/known_hosts"; then
+            echo "::warning::EC2_KNOWN_HOSTS has no entry for $EC2_HOST. Regenerate with: ssh-keyscan -H $EC2_HOST"
+          fi
+
+      - name: Copy deployment bundle to EC2 (SCP)
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+
+          : "${EC2_USER:?EC2_USER secret is required}"
+
+          ssh -i "$HOME/.ssh/id_ed25519" -p "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" "mkdir -p ~/ggfix-development-deploy"
+
+          scp -i "$HOME/.ssh/id_ed25519" -P "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            ggfix-development-deploy.tgz \
+            "$EC2_USER@$EC2_HOST:~/ggfix-development-deploy/ggfix-development-deploy.tgz"
+
+      # Stop -> replace jar -> restart, one service at a time, so the whole
+      # environment is never down at once. Each service runs as a templated
+      # systemd unit ggfix-development@<service>, installed/refreshed here so
+      # the very first deploy to a fresh EC2 host is enough to bring it up.
+      #
+      # EnvironmentFile is referenced with a leading "-" (optional): this
+      # workflow only ever manages code (the JAR), never DB/JWT/S3 config, so
+      # /opt/ggfix/development/.env must already exist on the host before
+      # services can actually connect to anything - that file is provisioned
+      # out of band, not by this pipeline.
+      - name: Deploy on EC2 (stop, replace JAR, restart)
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh -i "$HOME/.ssh/id_ed25519" -p "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" \
+            "APP_DIR='$APP_DIR' SERVICE_PREFIX='$SERVICE_PREFIX' SERVICES='$SERVICES' bash -s" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          ARCHIVE="$HOME/ggfix-development-deploy/ggfix-development-deploy.tgz"
+          STAGE_DIR="$HOME/ggfix-development-deploy/release"
+
+          if [ ! -f "$ARCHIVE" ]; then
+            echo "ERROR: deployment archive not found: $ARCHIVE" >&2
+            exit 1
+          fi
+
+          rm -rf "$STAGE_DIR"
+          mkdir -p "$STAGE_DIR"
+          tar -xzf "$ARCHIVE" -C "$STAGE_DIR"
+
+          sudo mkdir -p "$APP_DIR"
+          sudo chown "$(whoami):$(whoami)" "$APP_DIR"
+          for service in $SERVICES; do
+            mkdir -p "$APP_DIR/$service"
+          done
+
+          UNIT_PATH="/etc/systemd/system/${SERVICE_PREFIX}@.service"
+          sudo tee "$UNIT_PATH" > /dev/null <<EOF
+          [Unit]
+          Description=GGFIX Development backend service %i
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=$(whoami)
+          WorkingDirectory=$APP_DIR/%i
+          EnvironmentFile=-$APP_DIR/.env
+          ExecStart=/usr/bin/java -jar $APP_DIR/%i/%i.jar
+          SuccessExitStatus=143
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          sudo systemctl daemon-reload
+
+          for service in $SERVICES; do
+            unit="${SERVICE_PREFIX}@${service}"
+
+            echo "== $unit: stopping =="
+            sudo systemctl stop "$unit" 2>/dev/null || true
+
+            echo "== $unit: replacing jar =="
+            new_jar="$STAGE_DIR/$service/$service.jar"
+            if [ ! -f "$new_jar" ]; then
+              echo "ERROR: bundle is missing $new_jar" >&2
+              exit 1
+            fi
+            cp -f "$new_jar" "$APP_DIR/$service/$service.jar"
+
+            echo "== $unit: restarting =="
+            sudo systemctl enable "$unit"
+            sudo systemctl restart "$unit"
+          done
+
+          rm -f "$ARCHIVE"
+          echo "Development deployment complete."
+          REMOTE_SCRIPT
+
+      - name: Show systemd service status
+        if: always()
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh -i "$HOME/.ssh/id_ed25519" -p "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" \
+            "SERVICE_PREFIX='$SERVICE_PREFIX' SERVICES='$SERVICES' bash -s" <<'REMOTE_SCRIPT'
+          set -uo pipefail
+
+          failed=0
+          for service in $SERVICES; do
+            unit="${SERVICE_PREFIX}@${service}"
+
+            for _ in $(seq 1 15); do
+              sudo systemctl is-active --quiet "$unit" && break
+              sudo systemctl is-failed --quiet "$unit" && break
+              sleep 2
+            done
+
+            echo "===== $unit ====="
+            sudo systemctl --no-pager --full status "$unit" || true
+
+            if ! sudo systemctl is-active --quiet "$unit"; then
+              echo "ERROR: $unit is not active" >&2
+              failed=1
+            fi
+          done
+
+          exit "$failed"
+          REMOTE_SCRIPT
+
+      - name: Clean up local SSH key
+        if: always()
+        shell: bash
+        run: rm -f "$HOME/.ssh/id_ed25519"
