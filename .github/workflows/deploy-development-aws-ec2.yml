@@ -130,22 +130,36 @@ jobs:
       # systemd unit ggfix-development@<service>, installed/refreshed here so
       # the very first deploy to a fresh EC2 host is enough to bring it up.
       #
-      # EnvironmentFile is referenced with a leading "-" (optional): this
-      # workflow only ever manages code (the JAR), never DB/JWT/S3 config, so
-      # /opt/ggfix/development/.env must already exist on the host before
-      # services can actually connect to anything - that file is provisioned
-      # out of band, not by this pipeline.
+      # /opt/ggfix/development/.env is (re)written on every deploy from the
+      # development GitHub Environment's DB_HOST/DB_NAME/DB_USERNAME vars and
+      # DB_PASSWORD secret, so EnvironmentFile is required (no leading "-") -
+      # this pipeline now owns that file. JWT_SECRET is generated once and
+      # read back from the existing file on later deploys, so redeploying
+      # never invalidates every logged-in session.
       - name: Deploy on EC2 (stop, replace JAR, restart)
         shell: bash
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
+          DB_HOST: ${{ vars.DB_HOST }}
+          DB_NAME: ${{ vars.DB_NAME }}
+          DB_USERNAME: ${{ vars.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
           set -euo pipefail
 
+          : "${DB_HOST:?DB_HOST environment variable is required}"
+          : "${DB_NAME:?DB_NAME environment variable is required}"
+          : "${DB_USERNAME:?DB_USERNAME environment variable is required}"
+          : "${DB_PASSWORD:?DB_PASSWORD secret is required}"
+
+          # Base64 so an arbitrary DB password (quotes, $, etc.) can't break
+          # the quoting of the ssh command line it travels in below.
+          DB_PASSWORD_B64="$(printf '%s' "$DB_PASSWORD" | base64 | tr -d '\n')"
+
           ssh -i "$HOME/.ssh/id_ed25519" -p "$EC2_PORT" -o StrictHostKeyChecking=yes \
             "$EC2_USER@$EC2_HOST" \
-            "APP_DIR='$APP_DIR' SERVICE_PREFIX='$SERVICE_PREFIX' SERVICES='$SERVICES' bash -s" <<'REMOTE_SCRIPT'
+            "APP_DIR='$APP_DIR' SERVICE_PREFIX='$SERVICE_PREFIX' SERVICES='$SERVICES' DB_HOST='$DB_HOST' DB_NAME='$DB_NAME' DB_USER='$DB_USERNAME' DB_PASSWORD_B64='$DB_PASSWORD_B64' bash -s" <<'REMOTE_SCRIPT'
           set -euo pipefail
 
           ARCHIVE="$HOME/ggfix-development-deploy/ggfix-development-deploy.tgz"
@@ -166,6 +180,30 @@ jobs:
             mkdir -p "$APP_DIR/$service"
           done
 
+          ENV_FILE="$APP_DIR/.env"
+          DB_PASSWORD="$(printf '%s' "$DB_PASSWORD_B64" | base64 -d)"
+
+          # Carry a previously generated JWT secret forward instead of
+          # rotating it on every deploy, which would log everyone out.
+          jwt_secret=""
+          if [ -f "$ENV_FILE" ]; then
+            jwt_secret="$(sed -n 's/^JWT_SECRET=//p' "$ENV_FILE" | head -n1)"
+          fi
+          if [ -z "$jwt_secret" ]; then
+            jwt_secret="$(openssl rand -base64 48 | tr -d '\n')"
+          fi
+
+          cat > "$ENV_FILE" <<ENVEOF
+          DB_HOST=$DB_HOST
+          DB_PORT=5432
+          DB_NAME=$DB_NAME
+          DB_USER=$DB_USER
+          DB_PASSWORD=$DB_PASSWORD
+          JWT_SECRET=$jwt_secret
+          JAVA_OPTS=-Xms64m -Xmx160m
+          ENVEOF
+          chmod 600 "$ENV_FILE"
+
           UNIT_PATH="/etc/systemd/system/${SERVICE_PREFIX}@.service"
           sudo tee "$UNIT_PATH" > /dev/null <<EOF
           [Unit]
@@ -177,7 +215,7 @@ jobs:
           Type=simple
           User=$(whoami)
           WorkingDirectory=$APP_DIR/%i
-          EnvironmentFile=-$APP_DIR/.env
+          EnvironmentFile=$APP_DIR/.env
           ExecStart=/usr/bin/java -jar $APP_DIR/%i/%i.jar
           SuccessExitStatus=143
           Restart=always
