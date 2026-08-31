@@ -200,7 +200,7 @@ jobs:
           DB_USER=$DB_USER
           DB_PASSWORD=$DB_PASSWORD
           JWT_SECRET=$jwt_secret
-          JAVA_OPTS=-Xms64m -Xmx160m
+          JAVA_OPTS="-Xms64m -Xmx160m"
           ENVEOF
           chmod 600 "$ENV_FILE"
 
