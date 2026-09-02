@@ -1,0 +1,437 @@
+name: Deploy Production Backend to AWS EC2
+
+# Branch isolation: this file only reacts to `main`. Development and preview
+# each have their own workflow file with their own single branch trigger
+# (deploy-development-aws-ec2.yml / deploy-preview-aws-ec2.yml) so a push to
+# one branch can never fan out into another environment's deploy.
+on:
+  workflow_dispatch:
+    inputs:
+      api_domain:
+        description: "Public API domain fronted by nginx"
+        required: false
+        default: "api.ggfix.in"
+      skip_tls:
+        description: "Install nginx on :80 only, skip certbot (use if DNS/SG is not ready)"
+        type: boolean
+        required: false
+        default: false
+      skip_health_check:
+        description: "Deploy without failing the job on an unhealthy service"
+        type: boolean
+        required: false
+        default: false
+
+  push:
+    branches:
+      - main
+    paths:
+      - "services/**"
+      - "deploy/aws/**"
+      - ".github/workflows/deploy-production-aws-ec2.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ggfixserver-ec2-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build and Deploy to EC2
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      EC2_PORT: "22"
+      EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+      EC2_SSH_PRIVATE_KEY_B64: ${{ secrets.EC2_SSH_PRIVATE_KEY_B64 }}
+      API_DOMAIN: ${{ inputs.api_domain || 'api.ggfix.in' }}
+      CERTBOT_EMAIL: ${{ secrets.CERTBOT_EMAIL }}
+      SKIP_TLS: ${{ inputs.skip_tls && '1' || '0' }}
+      # Which RDS the services talk to, sourced from the production GitHub
+      # Environment's variables/secrets (never hard-coded here).
+      DB_HOST: ${{ vars.DB_HOST }}
+      DB_NAME: ${{ vars.DB_NAME }}
+      DB_USER: ${{ vars.DB_USERNAME }}
+      # RDS credential. Not defaulted in deploy-from-artifact.sh because this
+      # repository is public; on a host that already has a .env the previous
+      # value is reused, so this can be empty for redeploys.
+      #
+      # DB_PASSWORD_OVERRIDE goes with the variables above. Repointing at another
+      # database needs that database's password, and overwriting DB_PASSWORD to
+      # supply it would destroy the original: secrets are write-only, and the next
+      # deploy rewrites the copy in the EC2 .env too. A separate secret means the
+      # switch is undone by deleting it, with the original still intact.
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD_OVERRIDE || secrets.DB_PASSWORD }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Build backend services
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mvn -f services/pom.xml clean package -DskipTests
+
+      # Catches the failure mode where the A record and the deploy target have
+      # drifted apart. Without this the deploy "succeeds" onto a host the domain
+      # does not point at, and the health check fails with no obvious cause.
+      - name: Verify DNS points at the deploy target
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          : "${EC2_HOST:?EC2_HOST secret is required}"
+
+          resolved="$(getent ahostsv4 "$API_DOMAIN" | awk '{print $1}' | sort -u | tr '\n' ' ')"
+          echo "$API_DOMAIN resolves to : ${resolved:-<nothing>}"
+          echo "deploy target (EC2_HOST): $EC2_HOST"
+
+          if [ -z "$resolved" ]; then
+            echo "::error::$API_DOMAIN does not resolve. Create the A record before deploying."
+            exit 1
+          fi
+
+          # EC2_HOST may be a DNS name rather than a literal IP, so resolve it too.
+          target="$(getent ahostsv4 "$EC2_HOST" | awk '{print $1}' | sort -u | tr '\n' ' ')"
+          target="${target:-$EC2_HOST}"
+
+          for ip in $target; do
+            case " $resolved " in
+              *" $ip "*)
+                echo "OK: $API_DOMAIN -> $ip matches the deploy target."
+                exit 0
+                ;;
+            esac
+          done
+
+          echo "::error::$API_DOMAIN ($resolved) does not point at the deploy target ($target)."
+          echo "::error::Repoint the A record, or update the EC2_HOST secret."
+          exit 1
+
+      - name: Create deployment bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          services=(
+            auth-service
+            user-service
+            shop-service
+            ticket-service
+            technician-service
+            inventory-service
+            marketplace-service
+            pickup-service
+            notification-service
+            subscription-service
+            master-data-service
+            order-service
+          )
+
+          rm -rf deploy-bundle repair-shop-saas-deploy.tgz
+
+          mkdir -p \
+            deploy-bundle/services \
+            deploy-bundle/deploy/aws
+
+          cp -R deploy/aws/. deploy-bundle/deploy/aws/
+
+          for service in "${services[@]}"; do
+            source_jar="services/$service/target/$service-1.0.0-SNAPSHOT.jar"
+            destination_dir="deploy-bundle/services/$service"
+            destination_jar="$destination_dir/$service.jar"
+
+            if [ ! -f "$source_jar" ]; then
+              echo "ERROR: JAR file not found: $source_jar"
+              echo "Available files in services/$service/target:"
+              ls -lah "services/$service/target" || true
+              exit 1
+            fi
+
+            mkdir -p "$destination_dir"
+            cp "$source_jar" "$destination_jar"
+          done
+
+          tar -czf repair-shop-saas-deploy.tgz -C deploy-bundle .
+
+          echo "Deployment archive created:"
+          ls -lh repair-shop-saas-deploy.tgz
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${EC2_HOST:?EC2_HOST secret is required}"
+          : "${EC2_USER:?EC2_USER secret is required}"
+          : "${EC2_KNOWN_HOSTS:?EC2_KNOWN_HOSTS secret is required}"
+          : "${EC2_SSH_PRIVATE_KEY_B64:?EC2_SSH_PRIVATE_KEY_B64 secret is required}"
+
+          install -d -m 700 "$HOME/.ssh"
+
+          printf '%s' "$EC2_SSH_PRIVATE_KEY_B64" \
+            | base64 --decode > "$HOME/.ssh/id_ed25519"
+
+          chmod 600 "$HOME/.ssh/id_ed25519"
+
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+          echo "Checking private key format..."
+          ssh-keygen -lf "$HOME/.ssh/id_ed25519"
+
+          # StrictHostKeyChecking=yes below means a known_hosts entry that does
+          # not cover EC2_HOST fails with a confusing "Host key verification
+          # failed". Say so plainly instead.
+          if ! grep -q "$EC2_HOST" "$HOME/.ssh/known_hosts"; then
+            echo "::warning::EC2_KNOWN_HOSTS has no entry for $EC2_HOST."
+            echo "::warning::Regenerate it with: ssh-keyscan -H $EC2_HOST"
+          fi
+
+      - name: Verify EC2 SSH connection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -p "$EC2_PORT" \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
+            "$EC2_USER@$EC2_HOST" \
+            '
+              set -euo pipefail
+
+              echo "SSH connection successful"
+              echo "Host: $(hostname)"
+              echo "User: $(whoami)"
+              echo "Home: $HOME"
+            '
+
+      - name: Prepare EC2 deployment directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE_SIZE_KB="$(du -k repair-shop-saas-deploy.tgz | awk "{print \$1}")"
+
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -p "$EC2_PORT" \
+            -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" \
+            "ARCHIVE_SIZE_KB='$ARCHIVE_SIZE_KB' bash -s" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          DEPLOY_DIR="$HOME/ggfix-deploy"
+          ARCHIVE="$DEPLOY_DIR/repair-shop-saas-deploy.tgz"
+          RELEASE_DIR="$DEPLOY_DIR/release"
+
+          mkdir -p "$DEPLOY_DIR"
+
+          echo "Removing old deployment files..."
+          rm -f "$ARCHIVE"
+          rm -rf "$RELEASE_DIR"
+
+          echo ""
+          echo "=== Disk usage ==="
+          df -h "$HOME"
+          echo ""
+
+          echo "=== Inode usage ==="
+          df -i "$HOME"
+          echo ""
+
+          echo "=== Deployment directory ==="
+          ls -ld "$DEPLOY_DIR"
+          echo ""
+
+          echo "Testing write permission..."
+          touch "$DEPLOY_DIR/write-test"
+          rm -f "$DEPLOY_DIR/write-test"
+
+          AVAILABLE_KB="$(df -Pk "$HOME" | awk 'NR==2 {print $4}')"
+
+          # Archive + extracted release + minimum 200 MB safety buffer.
+          REQUIRED_KB=$((ARCHIVE_SIZE_KB * 3 + 204800))
+
+          echo "Archive size: ${ARCHIVE_SIZE_KB} KB"
+          echo "Required free space: ${REQUIRED_KB} KB"
+          echo "Available free space: ${AVAILABLE_KB} KB"
+
+          if [ "$AVAILABLE_KB" -lt "$REQUIRED_KB" ]; then
+            echo "ERROR: EC2 disk space is too low for deployment."
+            echo "Free disk space before deploying, then run the workflow again."
+            exit 1
+          fi
+
+          echo "EC2 deployment directory is ready."
+          REMOTE_SCRIPT
+
+      - name: Upload deployment bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Uploading deployment archive to EC2..."
+
+          scp \
+            -i "$HOME/.ssh/id_ed25519" \
+            -P "$EC2_PORT" \
+            -o StrictHostKeyChecking=yes \
+            repair-shop-saas-deploy.tgz \
+            "$EC2_USER@$EC2_HOST:ggfix-deploy/repair-shop-saas-deploy.tgz"
+
+      - name: Verify uploaded deployment bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LOCAL_SHA256="$(sha256sum repair-shop-saas-deploy.tgz | awk "{print \$1}")"
+
+          REMOTE_SHA256="$(
+            ssh \
+              -i "$HOME/.ssh/id_ed25519" \
+              -p "$EC2_PORT" \
+              -o StrictHostKeyChecking=yes \
+              "$EC2_USER@$EC2_HOST" \
+              "sha256sum ~/ggfix-deploy/repair-shop-saas-deploy.tgz | awk '{print \$1}'"
+          )"
+
+          echo "Local SHA256:  $LOCAL_SHA256"
+          echo "Remote SHA256: $REMOTE_SHA256"
+
+          if [ "$LOCAL_SHA256" != "$REMOTE_SHA256" ]; then
+            echo "ERROR: Uploaded archive checksum does not match local file."
+            exit 1
+          fi
+
+          echo "Archive upload verified successfully."
+
+      - name: Deploy on EC2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -p "$EC2_PORT" \
+            -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" \
+            "API_DOMAIN='$API_DOMAIN' CERTBOT_EMAIL='${CERTBOT_EMAIL:-}' SKIP_TLS='$SKIP_TLS' DB_HOST='${DB_HOST:-}' DB_NAME='${DB_NAME:-}' DB_USER='${DB_USER:-}' DB_PASSWORD='${DB_PASSWORD:-}' bash -s" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          DEPLOY_DIR="$HOME/ggfix-deploy"
+          ARCHIVE="$DEPLOY_DIR/repair-shop-saas-deploy.tgz"
+          RELEASE_DIR="$DEPLOY_DIR/release"
+
+          if [ ! -f "$ARCHIVE" ]; then
+            echo "ERROR: Deployment archive not found: $ARCHIVE"
+            exit 1
+          fi
+
+          rm -rf "$RELEASE_DIR"
+          mkdir -p "$RELEASE_DIR"
+
+          echo "Extracting deployment archive..."
+          tar -xzf "$ARCHIVE" -C "$RELEASE_DIR"
+
+          for required in install-ec2.sh deploy-from-artifact.sh setup-nginx-tls.sh nginx-ggfix-api.conf; do
+            if [ ! -f "$RELEASE_DIR/deploy/aws/$required" ]; then
+              echo "ERROR: $required was not found in deployment archive."
+              exit 1
+            fi
+          done
+
+          chmod +x "$RELEASE_DIR"/deploy/aws/*.sh
+
+          cd "$RELEASE_DIR"
+
+          echo "Running EC2 installation script..."
+          bash deploy/aws/install-ec2.sh
+
+          echo "Running deployment script..."
+          bash deploy/aws/deploy-from-artifact.sh
+
+          echo "Configuring nginx + TLS for $API_DOMAIN..."
+          bash deploy/aws/setup-nginx-tls.sh
+
+          echo "Removing uploaded archive..."
+          rm -f "$ARCHIVE"
+
+          echo "Deployment completed successfully."
+          REMOTE_SCRIPT
+
+      # The point of the whole workflow: prove the public domain actually serves
+      # the freshly deployed code before calling the deploy a success.
+      - name: Health check via API domain
+        if: ${{ !inputs.skip_health_check }}
+        shell: bash
+        env:
+          RETRIES: "30"
+          RETRY_DELAY: "10"
+        run: |
+          set -uo pipefail
+
+          if [ "$SKIP_TLS" = "1" ]; then
+            export API_BASE="http://${API_DOMAIN}"
+            echo "SKIP_TLS is set - probing over http instead of https."
+          else
+            export API_BASE="https://${API_DOMAIN}"
+          fi
+
+          bash deploy/aws/health-check.sh
+
+      - name: Report service status on failure
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          [ -f "$HOME/.ssh/id_ed25519" ] || exit 0
+
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -p "$EC2_PORT" \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
+            "$EC2_USER@$EC2_HOST" \
+            'bash -s' <<'REMOTE_SCRIPT' || true
+          echo "===== systemd units ====="
+          systemctl list-units "repair-shop-saas@*" --no-pager --no-legend || true
+
+          echo "===== failed units ====="
+          systemctl list-units "repair-shop-saas@*" --state=failed --no-pager --no-legend || true
+
+          echo "===== nginx ====="
+          sudo nginx -t 2>&1 || true
+          systemctl is-active nginx || true
+
+          echo "===== certificates ====="
+          sudo certbot certificates 2>&1 | head -20 || true
+
+          echo "===== logs for failed units ====="
+          for unit in $(systemctl list-units "repair-shop-saas@*" --state=failed --no-pager --no-legend | awk '{print $1}'); do
+            echo "--- $unit"
+            sudo journalctl -u "$unit" -n 40 --no-pager || true
+          done
+
+          echo "===== disk ====="
+          df -h "$HOME" | tail -1
+          REMOTE_SCRIPT
