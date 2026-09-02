@@ -1,0 +1,420 @@
+name: Deploy Preview Backend to AWS EC2
+
+# Branch isolation: this file only reacts to `preview`. Development and
+# production each get their own workflow file with their own single branch
+# trigger (deploy-development-aws-ec2.yml / deploy-production-aws-ec2.yml) so a
+# push to one branch can never fan out into another environment's deploy.
+on:
+  push:
+    branches:
+      - preview
+    paths:
+      - "services/**"
+      - ".github/workflows/deploy-preview-aws-ec2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ggfix-preview-deploy
+  # Queue a second push instead of cancelling a deploy that already stopped
+  # services mid-flight - cancelling here could leave a service down.
+  cancel-in-progress: false
+
+env:
+  APP_DIR: /opt/ggfix/preview
+  SERVICE_PREFIX: ggfix-preview
+  EC2_PORT: "22"
+  SERVICES: "auth-service user-service shop-service ticket-service technician-service inventory-service marketplace-service pickup-service notification-service subscription-service master-data-service order-service"
+  # Public domain fronting this environment. Its A record already resolves to
+  # this host; see the nginx step below.
+  API_DOMAIN: preview.api.ggfix.in
+
+jobs:
+  deploy:
+    name: Build and Deploy Preview Backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: preview
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Build backend services (Maven)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -x ./mvnw ]; then
+            ./mvnw -f services/pom.xml clean package -DskipTests
+          else
+            mvn -f services/pom.xml clean package -DskipTests
+          fi
+
+      - name: Package service JARs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf deploy-bundle ggfix-preview-deploy.tgz
+          mkdir -p deploy-bundle
+
+          for service in $SERVICES; do
+            source_jar="services/$service/target/$service-1.0.0-SNAPSHOT.jar"
+
+            if [ ! -f "$source_jar" ]; then
+              echo "ERROR: JAR file not found: $source_jar"
+              ls -lah "services/$service/target" || true
+              exit 1
+            fi
+
+            mkdir -p "deploy-bundle/$service"
+            cp "$source_jar" "deploy-bundle/$service/$service.jar"
+          done
+
+          tar -czf ggfix-preview-deploy.tgz -C deploy-bundle .
+          ls -lh ggfix-preview-deploy.tgz
+
+      - name: Decode SSH key and configure known_hosts
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_PRIVATE_KEY_B64: ${{ secrets.EC2_SSH_PRIVATE_KEY_B64 }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+
+          : "${EC2_HOST:?EC2_HOST secret is required}"
+          : "${EC2_SSH_PRIVATE_KEY_B64:?EC2_SSH_PRIVATE_KEY_B64 secret is required}"
+          : "${EC2_KNOWN_HOSTS:?EC2_KNOWN_HOSTS secret is required}"
+
+          install -d -m 700 "$HOME/.ssh"
+
+          printf '%s' "$EC2_SSH_PRIVATE_KEY_B64" | base64 --decode > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+          ssh-keygen -lf "$HOME/.ssh/id_ed25519"
+
+          if ! grep -q "$EC2_HOST" "$HOME/.ssh/known_hosts"; then
+            echo "::warning::EC2_KNOWN_HOSTS has no entry for $EC2_HOST. Regenerate with: ssh-keyscan -H $EC2_HOST"
+          fi
+
+      - name: Copy deployment bundle to EC2 (SCP)
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+
+          : "${EC2_USER:?EC2_USER secret is required}"
+
+          ssh -i "$HOME/.ssh/id_ed25519" -p "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" "mkdir -p ~/ggfix-preview-deploy"
+
+          scp -i "$HOME/.ssh/id_ed25519" -P "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            ggfix-preview-deploy.tgz \
+            "$EC2_USER@$EC2_HOST:~/ggfix-preview-deploy/ggfix-preview-deploy.tgz"
+
+      # This environment's nginx vhost was never installed on the EC2 host -
+      # requests to preview.api.ggfix.in hit nginx's bare default (404/405 with
+      # no CORS header), which the browser reports as a CORS failure even
+      # though the backend itself is fine. Ship the same template production
+      # uses so it fronts this host's identical local ports (8081-8092).
+      - name: Copy nginx config to EC2
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh -i "$HOME/.ssh/id_ed25519" -p "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" "mkdir -p ~/ggfix-preview-deploy/nginx"
+
+          scp -i "$HOME/.ssh/id_ed25519" -P "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            deploy/aws/setup-nginx-tls.sh deploy/aws/nginx-ggfix-api.conf \
+            "$EC2_USER@$EC2_HOST:~/ggfix-preview-deploy/nginx/"
+
+      # Stop -> replace jar -> restart, one service at a time, so the whole
+      # environment is never down at once. Each service runs as a templated
+      # systemd unit ggfix-preview@<service>, installed/refreshed here so the
+      # very first deploy to a fresh EC2 host is enough to bring it up.
+      #
+      # /opt/ggfix/preview/.env is (re)written on every deploy from the
+      # preview GitHub Environment's DB_HOST/DB_NAME/DB_USERNAME vars and
+      # DB_PASSWORD secret, so EnvironmentFile is required (no leading "-") -
+      # this pipeline now owns that file. JWT_SECRET is generated once and
+      # read back from the existing file on later deploys, so redeploying
+      # never invalidates every logged-in session.
+      - name: Deploy on EC2 (stop, replace JAR, restart)
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          DB_HOST: ${{ vars.DB_HOST }}
+          DB_NAME: ${{ vars.DB_NAME }}
+          DB_USERNAME: ${{ vars.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          : "${DB_HOST:?DB_HOST environment variable is required}"
+          : "${DB_NAME:?DB_NAME environment variable is required}"
+          : "${DB_USERNAME:?DB_USERNAME environment variable is required}"
+          : "${DB_PASSWORD:?DB_PASSWORD secret is required}"
+
+          # Base64 so an arbitrary DB password (quotes, $, etc.) can't break
+          # the quoting of the ssh command line it travels in below.
+          DB_PASSWORD_B64="$(printf '%s' "$DB_PASSWORD" | base64 | tr -d '\n')"
+
+          ssh -i "$HOME/.ssh/id_ed25519" -p "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" \
+            "APP_DIR='$APP_DIR' SERVICE_PREFIX='$SERVICE_PREFIX' SERVICES='$SERVICES' API_DOMAIN='$API_DOMAIN' DB_HOST='$DB_HOST' DB_NAME='$DB_NAME' DB_USER='$DB_USERNAME' DB_PASSWORD_B64='$DB_PASSWORD_B64' bash -s" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          ARCHIVE="$HOME/ggfix-preview-deploy/ggfix-preview-deploy.tgz"
+          STAGE_DIR="$HOME/ggfix-preview-deploy/release"
+
+          if [ ! -f "$ARCHIVE" ]; then
+            echo "ERROR: deployment archive not found: $ARCHIVE" >&2
+            exit 1
+          fi
+
+          rm -rf "$STAGE_DIR"
+          mkdir -p "$STAGE_DIR"
+          tar -xzf "$ARCHIVE" -C "$STAGE_DIR"
+
+          sudo mkdir -p "$APP_DIR"
+          sudo chown "$(whoami):$(whoami)" "$APP_DIR"
+          for service in $SERVICES; do
+            mkdir -p "$APP_DIR/$service"
+          done
+
+          # Fresh EC2 hosts have no JRE preinstalled - install one idempotently
+          # (a no-op if already present) so the very first deploy actually
+          # starts the services instead of only diagnosing the missing java
+          # in run-service below. Same package install-ec2.sh uses for prod.
+          if ! command -v java >/dev/null 2>&1; then
+            echo "No JRE found on PATH - installing one..."
+            if command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y java-25-amazon-corretto-headless
+            elif command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y openjdk-25-jre-headless
+            else
+              echo "ERROR: no supported package manager (dnf/apt-get) to install a JRE." >&2
+              exit 1
+            fi
+          fi
+
+          ENV_FILE="$APP_DIR/.env"
+          DB_PASSWORD="$(printf '%s' "$DB_PASSWORD_B64" | base64 -d)"
+
+          # Carry a previously generated JWT secret forward instead of
+          # rotating it on every deploy, which would log everyone out.
+          jwt_secret=""
+          if [ -f "$ENV_FILE" ]; then
+            jwt_secret="$(sed -n 's/^JWT_SECRET=//p' "$ENV_FILE" | head -n1)"
+          fi
+          if [ -z "$jwt_secret" ]; then
+            jwt_secret="$(openssl rand -base64 48 | tr -d '\n')"
+          fi
+
+          cat > "$ENV_FILE" <<ENVEOF
+          DB_HOST=$DB_HOST
+          DB_PORT=5432
+          DB_NAME=$DB_NAME
+          DB_USER=$DB_USER
+          DB_PASSWORD=$DB_PASSWORD
+          JWT_SECRET=$jwt_secret
+          JAVA_OPTS="-Xms64m -Xmx160m"
+          ENVEOF
+          chmod 600 "$ENV_FILE"
+
+          # Wrapper instead of a hardcoded /usr/bin/java: resolves the JRE via
+          # PATH (falling back to common install locations) at start time, so
+          # a JRE installed anywhere reasonable works, and JAVA_OPTS from the
+          # env file above is actually applied (a bare "ExecStart=java -jar"
+          # would silently ignore it - JAVA_OPTS is a convention read by this
+          # wrapper, not something the JVM understands on its own).
+          sudo install -d -m 0755 "$APP_DIR/bin"
+          cat > /tmp/ggfix-preview-run-service.sh <<'RUNEOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          service_name="${1:?service name is required}"
+          env_file="__APP_DIR__/.env"
+          jar_file="__APP_DIR__/${service_name}/${service_name}.jar"
+
+          if [ -f "$env_file" ]; then
+            set -a
+            # shellcheck disable=SC1090
+            source "$env_file"
+            set +a
+          fi
+
+          java_bin="$(command -v java || true)"
+          if [ -z "$java_bin" ]; then
+            for candidate in /usr/bin/java /usr/lib/jvm/*/bin/java /opt/*/bin/java; do
+              if [ -x "$candidate" ]; then
+                java_bin="$candidate"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$java_bin" ]; then
+            echo "ERROR: no java executable found on PATH, /usr/bin/java, /usr/lib/jvm/*/bin/java, or /opt/*/bin/java." >&2
+            echo "Install a JRE on this host, e.g.: sudo dnf install -y java-25-amazon-corretto-headless (Amazon Linux) or sudo apt-get install -y openjdk-25-jre-headless (Ubuntu/Debian)." >&2
+            exit 1
+          fi
+
+          exec "$java_bin" ${JAVA_OPTS:-} -jar "$jar_file"
+          RUNEOF
+          sed -i "s#__APP_DIR__#$APP_DIR#g" /tmp/ggfix-preview-run-service.sh
+          sudo install -m 0755 /tmp/ggfix-preview-run-service.sh "$APP_DIR/bin/run-service"
+          rm -f /tmp/ggfix-preview-run-service.sh
+
+          UNIT_PATH="/etc/systemd/system/${SERVICE_PREFIX}@.service"
+          sudo tee "$UNIT_PATH" > /dev/null <<EOF
+          [Unit]
+          Description=GGFIX Preview backend service %i
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=$(whoami)
+          WorkingDirectory=$APP_DIR/%i
+          EnvironmentFile=$APP_DIR/.env
+          ExecStart=$APP_DIR/bin/run-service %i
+          SuccessExitStatus=143
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          sudo systemctl daemon-reload
+
+          for service in $SERVICES; do
+            unit="${SERVICE_PREFIX}@${service}"
+
+            echo "== $unit: stopping =="
+            sudo systemctl stop "$unit" 2>/dev/null || true
+
+            echo "== $unit: replacing jar =="
+            new_jar="$STAGE_DIR/$service/$service.jar"
+            if [ ! -f "$new_jar" ]; then
+              echo "ERROR: bundle is missing $new_jar" >&2
+              exit 1
+            fi
+            cp -f "$new_jar" "$APP_DIR/$service/$service.jar"
+
+            echo "== $unit: restarting =="
+            sudo systemctl enable "$unit"
+            sudo systemctl restart "$unit"
+          done
+
+          NGINX_DIR="$HOME/ggfix-preview-deploy/nginx"
+          if [ -f "$NGINX_DIR/setup-nginx-tls.sh" ]; then
+            # This host already had some OTHER conf.d vhost claiming
+            # server_name == $API_DOMAIN (a pre-existing stub with no service
+            # routing). nginx loads conf.d alphabetically and keeps only the
+            # first match, silently ignoring ours ("conflicting server name
+            # ... ignored") - so the stub kept winning. Remove any such file
+            # before installing ours so ggfix-api.conf becomes the one nginx
+            # actually uses for this domain.
+            for f in /etc/nginx/conf.d/*.conf; do
+              [ -f "$f" ] || continue
+              [ "$(basename "$f")" = "ggfix-api.conf" ] && continue
+              if sudo grep -q "server_name[[:space:]].*\b$API_DOMAIN\b" "$f" 2>/dev/null; then
+                echo "Removing conflicting nginx vhost: $f"
+                sudo rm -f "$f"
+              fi
+            done
+
+            chmod +x "$NGINX_DIR/setup-nginx-tls.sh"
+            echo "Configuring nginx + TLS for $API_DOMAIN..."
+            (cd "$NGINX_DIR" && API_DOMAIN="$API_DOMAIN" bash setup-nginx-tls.sh)
+          else
+            echo "WARNING: $NGINX_DIR/setup-nginx-tls.sh not found, skipping nginx setup." >&2
+          fi
+
+          rm -f "$ARCHIVE"
+          echo "Preview deployment complete."
+          REMOTE_SCRIPT
+
+      # Proves the public domain actually serves the freshly deployed code,
+      # the same gate the production workflow uses.
+      - name: Health check via API domain
+        shell: bash
+        env:
+          RETRIES: "30"
+          RETRY_DELAY: "10"
+        run: |
+          set -uo pipefail
+
+          API_BASE="https://${API_DOMAIN}" bash deploy/aws/health-check.sh
+
+      - name: Show systemd service status
+        if: always()
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh -i "$HOME/.ssh/id_ed25519" -p "$EC2_PORT" -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" \
+            "SERVICE_PREFIX='$SERVICE_PREFIX' SERVICES='$SERVICES' bash -s" <<'REMOTE_SCRIPT'
+          set -uo pipefail
+
+          failed=0
+          for service in $SERVICES; do
+            unit="${SERVICE_PREFIX}@${service}"
+
+            for _ in $(seq 1 15); do
+              sudo systemctl is-active --quiet "$unit" && break
+              sudo systemctl is-failed --quiet "$unit" && break
+              sleep 2
+            done
+
+            echo "===== $unit ====="
+            sudo systemctl --no-pager --full status "$unit" || true
+
+            if ! sudo systemctl is-active --quiet "$unit"; then
+              echo "ERROR: $unit is not active" >&2
+              failed=1
+            fi
+          done
+
+          echo "===== nginx ====="
+          sudo nginx -t 2>&1 || true
+          systemctl is-active nginx || true
+
+          echo "===== certificates ====="
+          sudo certbot certificates 2>&1 | head -20 || true
+
+          exit "$failed"
+          REMOTE_SCRIPT
+
+      - name: Clean up local SSH key
+        if: always()
+        shell: bash
+        run: rm -f "$HOME/.ssh/id_ed25519"
