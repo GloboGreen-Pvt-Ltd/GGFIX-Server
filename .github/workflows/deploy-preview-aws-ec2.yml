@@ -203,6 +203,23 @@ jobs:
             mkdir -p "$APP_DIR/$service"
           done
 
+          # Fresh EC2 hosts have no JRE preinstalled - install one idempotently
+          # (a no-op if already present) so the very first deploy actually
+          # starts the services instead of only diagnosing the missing java
+          # in run-service below. Same package install-ec2.sh uses for prod.
+          if ! command -v java >/dev/null 2>&1; then
+            echo "No JRE found on PATH - installing one..."
+            if command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y java-25-amazon-corretto-headless
+            elif command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y openjdk-25-jre-headless
+            else
+              echo "ERROR: no supported package manager (dnf/apt-get) to install a JRE." >&2
+              exit 1
+            fi
+          fi
+
           ENV_FILE="$APP_DIR/.env"
           DB_PASSWORD="$(printf '%s' "$DB_PASSWORD_B64" | base64 -d)"
 
