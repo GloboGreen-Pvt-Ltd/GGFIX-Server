@@ -890,8 +890,11 @@ public class AuthService {
         if (notBlank(req.getPassword()))       u.setPasswordHash(passwordEncoder.encode(req.getPassword()));
         if (req.getPhone() != null)            u.setPhone(req.getPhone());
         if (req.getSecondaryMobile() != null)  u.setSecondaryMobile(req.getSecondaryMobile());
-        if (req.getAvatarUrl() != null)        u.setAvatarUrl(req.getAvatarUrl());
-        if (req.getIdProofUrl() != null)       u.setIdProofUrl(req.getIdProofUrl());
+        // Media URLs use notBlank, not a bare null check: a client that omits the
+        // field OR sends "" both mean "no new file" and must never wipe the
+        // stored image. Intentional removal is a separate action, not this one.
+        if (notBlank(req.getAvatarUrl()))      u.setAvatarUrl(req.getAvatarUrl());
+        if (notBlank(req.getIdProofUrl()))     u.setIdProofUrl(req.getIdProofUrl());
         if (req.getAadharFrontUrl() != null || req.getAadharBackUrl() != null || req.getPanUrl() != null) {
             u.setKycDocument(mergeKyc(u.getKycDocument(),
                     req.getAadharFrontUrl(), req.getAadharBackUrl(), req.getPanUrl()));
@@ -1184,8 +1187,10 @@ public class AuthService {
         if (loc.getGstNumber() != null)            shop.setGstNumber(loc.getGstNumber());
         if (loc.getLatitude() != null)             shop.setLatitude(loc.getLatitude());
         if (loc.getLongitude() != null)            shop.setLongitude(loc.getLongitude());
-        if (loc.getFrontImageUrl() != null)        shop.setFrontImageUrl(loc.getFrontImageUrl());
-        if (loc.getBannerImageUrl() != null)       shop.setBannerImageUrl(loc.getBannerImageUrl());
+        // Media URLs: notBlank, not a bare null check — see updateShopOwner above.
+        // A location edit that doesn't touch documents must never blank them out.
+        if (notBlank(loc.getFrontImageUrl()))       shop.setFrontImageUrl(loc.getFrontImageUrl());
+        if (notBlank(loc.getBannerImageUrl()))      shop.setBannerImageUrl(loc.getBannerImageUrl());
         if (loc.getPickupFromTime() != null)       shop.setPickupFromTime(loc.getPickupFromTime());
         if (loc.getPickupToTime() != null)         shop.setPickupToTime(loc.getPickupToTime());
         if (loc.getPickupDistanceKm() != null)     shop.setPickupDistanceKm(loc.getPickupDistanceKm());
@@ -1193,8 +1198,8 @@ public class AuthService {
         if (loc.getWorkingDays() != null)          shop.setWorkingDays(loc.getWorkingDays());
         if (loc.getOpeningTime() != null)          shop.setOpeningTime(loc.getOpeningTime());
         if (loc.getClosingTime() != null)          shop.setClosingTime(loc.getClosingTime());
-        if (loc.getGstCertificateUrl() != null)    shop.setGstCertificateUrl(loc.getGstCertificateUrl());
-        if (loc.getUdyamCertificateUrl() != null)  shop.setUdyamCertificateUrl(loc.getUdyamCertificateUrl());
+        if (notBlank(loc.getGstCertificateUrl()))   shop.setGstCertificateUrl(loc.getGstCertificateUrl());
+        if (notBlank(loc.getUdyamCertificateUrl())) shop.setUdyamCertificateUrl(loc.getUdyamCertificateUrl());
         if (loc.getServiceCategoriesJson() != null) shop.setServiceCategoriesJson(loc.getServiceCategoriesJson());
         shopRepository.save(shop);
 
