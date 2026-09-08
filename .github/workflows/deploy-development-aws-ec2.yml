@@ -233,6 +233,26 @@ jobs:
             jwt_secret="$(openssl rand -base64 48 | tr -d '\n')"
           fi
 
+          # S3 media (media.ggfix.in). Read back from the existing .env first so a
+          # value set on the box survives — this heredoc REWRITES .env on every
+          # deploy, so anything not carried through here is silently lost and
+          # uploads start failing again with "Image storage is unavailable".
+          # Credentials are deliberately absent: the SDK resolves them from the
+          # EC2 instance role, which needs s3:PutObject/s3:DeleteObject on the
+          # bucket (see deploy/aws/deploy-from-artifact.sh, which production's
+          # deploy already does this for).
+          aws_region=""
+          aws_bucket=""
+          aws_base_url=""
+          if [ -f "$ENV_FILE" ]; then
+            aws_region="$(sed -n 's/^AWS_REGION=//p' "$ENV_FILE" | head -n1)"
+            aws_bucket="$(sed -n 's/^AWS_S3_BUCKET=//p' "$ENV_FILE" | head -n1)"
+            aws_base_url="$(sed -n 's/^AWS_S3_BASE_URL=//p' "$ENV_FILE" | head -n1)"
+          fi
+          aws_region="${aws_region:-ap-south-1}"
+          aws_bucket="${aws_bucket:-ggfix-media-1762}"
+          aws_base_url="${aws_base_url:-https://media.ggfix.in}"
+
           cat > "$ENV_FILE" <<ENVEOF
           DB_HOST=$DB_HOST
           DB_PORT=5432
@@ -240,6 +260,9 @@ jobs:
           DB_USER=$DB_USER
           DB_PASSWORD=$DB_PASSWORD
           JWT_SECRET=$jwt_secret
+          AWS_REGION=$aws_region
+          AWS_S3_BUCKET=$aws_bucket
+          AWS_S3_BASE_URL=$aws_base_url
           JAVA_OPTS="-Xms64m -Xmx160m"
           ENVEOF
           chmod 600 "$ENV_FILE"
