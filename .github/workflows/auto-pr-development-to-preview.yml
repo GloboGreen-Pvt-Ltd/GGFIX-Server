@@ -39,12 +39,14 @@ jobs:
             exit 0
           fi
 
-          output="$(gh pr create --base preview --head development \
+          # `if output=$(...)` (not a bare assignment) is deliberate: this
+          # step's shell runs with `-e`, and a bare `output="$(cmd)"` where
+          # cmd fails aborts the script right there, before `status=$?` ever
+          # runs — bash only exempts an `if` condition (and similar) from
+          # errexit, not a plain assignment.
+          if output="$(gh pr create --base preview --head development \
             --title "Promote development to preview" \
-            --body "Auto-opened by CI on every push to \`development\`. Review and merge to promote these changes into the preview environment — merging this is what actually triggers the preview deploy. This workflow never merges on its own." 2>&1)"
-          status=$?
-
-          if [ $status -eq 0 ]; then
+            --body "Auto-opened by CI on every push to \`development\`. Review and merge to promote these changes into the preview environment — merging this is what actually triggers the preview deploy. This workflow never merges on its own." 2>&1)"; then
             echo "$output"
             exit 0
           fi
