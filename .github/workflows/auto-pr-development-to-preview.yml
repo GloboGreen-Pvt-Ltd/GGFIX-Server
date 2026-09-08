@@ -1,0 +1,63 @@
+name: Auto PR - development to preview
+
+# Keeps preview from silently drifting behind development. Every push to
+# development opens (or leaves alone, if one's already open) a PR promoting
+# it into preview — a human still has to review and click merge. This does
+# NOT auto-merge and therefore does NOT itself deploy anything: the actual
+# preview deploy only runs once that PR is merged, same as it always has.
+
+on:
+  push:
+    branches:
+      - development
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ggfix-auto-pr-development-to-preview
+  cancel-in-progress: false
+
+jobs:
+  open-or-update-pr:
+    name: Open promotion PR (development -> preview)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Open PR if one isn't already open
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          existing="$(gh pr list --base preview --head development --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            echo "PR #$existing is already open (development -> preview) — GitHub already shows this push's new commits on it, nothing to do."
+            exit 0
+          fi
+
+          # `if output=$(...)` (not a bare assignment) is deliberate: this
+          # step's shell runs with `-e`, and a bare `output="$(cmd)"` where
+          # cmd fails aborts the script right there, before `status=$?` ever
+          # runs — bash only exempts an `if` condition (and similar) from
+          # errexit, not a plain assignment.
+          if output="$(gh pr create --base preview --head development \
+            --title "Promote development to preview" \
+            --body "Auto-opened by CI on every push to \`development\`. Review and merge to promote these changes into the preview environment — merging this is what actually triggers the preview deploy. This workflow never merges on its own." 2>&1)"; then
+            echo "$output"
+            exit 0
+          fi
+
+          # "No commits between preview and development" means preview is
+          # already fully caught up — that is success, not a failure.
+          if echo "$output" | grep -qi "No commits between\|already exists"; then
+            echo "Nothing to promote right now:"
+            echo "$output"
+            exit 0
+          fi
+
+          echo "$output" >&2
+          exit 1
