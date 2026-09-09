@@ -39,6 +39,14 @@ jobs:
     environment: preview
 
     steps:
+      - name: Verify branch (preview only)
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "preview" ]; then
+            echo "ERROR: Preview deployment may only run from preview."
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
