@@ -70,6 +70,14 @@ jobs:
       DB_PASSWORD: ${{ secrets.DB_PASSWORD_OVERRIDE || secrets.DB_PASSWORD }}
 
     steps:
+      - name: Verify branch (main only)
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "ERROR: Production deployment may only run from main."
+            exit 1
+          fi
+
       - name: Checkout source code
         uses: actions/checkout@v4
 
