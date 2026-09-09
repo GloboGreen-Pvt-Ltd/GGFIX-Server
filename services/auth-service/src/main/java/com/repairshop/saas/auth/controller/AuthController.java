@@ -60,11 +60,7 @@ public class AuthController {
     @Operation(summary = "Current shop-owner profile",
             description = "Returns the authenticated user's ShopOwnerView (profile + owned shops). Used by mobile screens to hydrate forms with live data.")
     public ShopOwnerView me(HttpServletRequest httpRequest) {
-        String header = httpRequest.getHeader("Authorization");
-        if (header == null || !header.startsWith("Bearer "))
-            throw new UnauthorizedException("Missing or invalid Authorization header");
-        UUID userId = jwtService.getUserId(header.substring("Bearer ".length()).trim());
-        return authService.getShopOwner(userId);
+        return authService.getShopOwner(requireUserId(httpRequest));
     }
 
     @GetMapping("/me/kyc-documents")
@@ -85,6 +81,15 @@ public class AuthController {
                 body == null ? null : body.get("aadharFrontUrl"),
                 body == null ? null : body.get("aadharBackUrl"),
                 body == null ? null : body.get("panUrl"));
+    }
+
+    @PutMapping("/me/avatar")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Save current owner's profile photo",
+            description = "Owner-scoped save. Body: { avatarUrl }, the URL returned by POST /auth/me/kyc-documents/upload?type=avatar. Returns the refreshed ShopOwnerView.")
+    public ShopOwnerView saveMyAvatar(HttpServletRequest httpRequest, @RequestBody Map<String, String> body) {
+        UUID userId = requireUserId(httpRequest);
+        return authService.saveOwnerAvatar(userId, body == null ? null : body.get("avatarUrl"));
     }
 
     @PostMapping("/switch-shop")
