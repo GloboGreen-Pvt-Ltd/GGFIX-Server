@@ -39,6 +39,14 @@ jobs:
     environment: development
 
     steps:
+      - name: Verify branch (development only)
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "development" ]; then
+            echo "ERROR: Development deployment may only run from development."
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
