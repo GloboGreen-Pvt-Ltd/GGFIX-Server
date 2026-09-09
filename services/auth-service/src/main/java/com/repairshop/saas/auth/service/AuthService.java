@@ -956,6 +956,24 @@ public class AuthService {
         return u.getKycDocument() != null ? u.getKycDocument() : KycDocument.builder().build();
     }
 
+    /**
+     * Owner-scoped save of their own profile photo (from the web/mobile "My
+     * Profile" screen). Mirrors saveOwnerKyc's shape; unlike the admin-only
+     * PATCH /auth/shop-owners/{id} path, this always resolves the target
+     * user from the caller's own JWT, never a path param, so an owner can
+     * only ever overwrite their own avatar.
+     */
+    @Transactional
+    public ShopOwnerView saveOwnerAvatar(UUID userId, String avatarUrl) {
+        User u = userRepository.findById(userId)
+                .orElseThrow(() -> new BadRequestException("User not found: " + userId));
+        // notBlank, not a bare null check — same reasoning as updateShopOwner's
+        // avatar handling: omitted/blank means "no new file", never "clear it".
+        if (notBlank(avatarUrl)) u.setAvatarUrl(avatarUrl.trim());
+        userRepository.save(u);
+        return getShopOwner(userId);
+    }
+
     /** Owner-scoped save/resubmit of KYC documents (from the mobile app). */
     @Transactional
     public KycDocument saveOwnerKyc(UUID userId, String aadharFrontUrl, String aadharBackUrl, String panUrl) {
