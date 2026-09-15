@@ -119,6 +119,32 @@ jobs:
             echo "::warning::EC2_KNOWN_HOSTS has no entry for $EC2_HOST. Regenerate with: ssh-keyscan -H $EC2_HOST"
           fi
 
+      # Fails in ~10s with a clear cause instead of waiting through 2m+ of SSH/SCP
+      # timeouts (twice over - once here, once again at "Show systemd service
+      # status" below) whenever the box is simply unreachable. A TCP-level
+      # timeout here (as opposed to "Permission denied", which is an SSH-key
+      # problem) means the network path itself is broken: EC2_HOST is stale or
+      # wrong (points at a private IP, a previous public IP, or the preview/
+      # production host instead of this environment's), the instance has no
+      # public IPv4, its subnet's route table has no 0.0.0.0/0 route to an
+      # Internet Gateway, or a security group/Network ACL is dropping the
+      # connection before the OS ever sees it.
+      - name: Verify EC2 connectivity (TCP port)
+        shell: bash
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+
+          if ! timeout 10 bash -c "cat < /dev/null > /dev/tcp/$EC2_HOST/$EC2_PORT" 2>/dev/null; then
+            echo "::error::Cannot reach the Development EC2 host on TCP port $EC2_PORT within 10s."
+            echo "::error::This is a network-reachability failure, not an SSH key problem - a bad key fails fast as 'Permission denied', not a timeout."
+            echo "::error::Check, in order: the EC2_HOST secret matches this environment's CURRENT public IPv4/Elastic IP (not a private 10.x/172.x address, not a previous IP, not preview's or production's host, no https:// prefix, no path, no port suffix); the instance is running with a public IPv4 assigned; its subnet's route table sends 0.0.0.0/0 to an Internet Gateway; the security group and Network ACL allow inbound TCP $EC2_PORT from 0.0.0.0/0."
+            exit 1
+          fi
+
+          echo "TCP $EC2_PORT reachable on the configured EC2_HOST."
+
       - name: Copy deployment bundle to EC2 (SCP)
         shell: bash
         env:
