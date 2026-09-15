@@ -261,6 +261,15 @@ jobs:
           aws_bucket="${aws_bucket:-ggfix-media-1762}"
           aws_base_url="${aws_base_url:-https://media.ggfix.in}"
 
+          # Google Geocoding (reverse-geocode for the customer location picker).
+          # No repository secret wires this in — read back whatever was set by
+          # hand on the box (sudo nano "$ENV_FILE") after rotating the key, same
+          # as the AWS_* values above, so it survives this heredoc rewrite.
+          google_geocoding_key=""
+          if [ -f "$ENV_FILE" ]; then
+            google_geocoding_key="$(sed -n 's/^GOOGLE_GEOCODING_API_KEY=//p' "$ENV_FILE" | head -n1)"
+          fi
+
           cat > "$ENV_FILE" <<ENVEOF
           DB_HOST=$DB_HOST
           DB_PORT=5432
@@ -271,6 +280,7 @@ jobs:
           AWS_REGION=$aws_region
           AWS_S3_BUCKET=$aws_bucket
           AWS_S3_BASE_URL=$aws_base_url
+          GOOGLE_GEOCODING_API_KEY=$google_geocoding_key
           JAVA_OPTS="-Xms64m -Xmx160m"
           ENVEOF
           chmod 600 "$ENV_FILE"

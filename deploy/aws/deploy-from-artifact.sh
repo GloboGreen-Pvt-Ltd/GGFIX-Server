@@ -84,6 +84,12 @@ ensure_env_file() {
   aws_base_url="$(read_env_value AWS_S3_BASE_URL)"
   aws_base_url="${aws_base_url:-https://media.ggfix.in}"
 
+  # Google Geocoding (reverse-geocode for the customer location picker).
+  # Read back like the values above — no repository secret wires this one in,
+  # so it must be set once by hand on the box (sudo nano "$APP_DIR/.env") after
+  # rotating the key; this just carries that value forward on every deploy.
+  google_geocoding_key="$(read_env_value GOOGLE_GEOCODING_API_KEY)"
+
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
 DB_HOST=$RDS_DB_HOST
 DB_PORT=$RDS_DB_PORT
@@ -99,6 +105,7 @@ CLOUDINARY_FOLDER=$cloud_folder
 AWS_REGION=$aws_region
 AWS_S3_BUCKET=$aws_bucket
 AWS_S3_BASE_URL=$aws_base_url
+GOOGLE_GEOCODING_API_KEY=$google_geocoding_key
 JAVA_OPTS="-Xms64m -Xmx160m"
 SERVICES="$SERVICES_DEFAULT"
 EOF

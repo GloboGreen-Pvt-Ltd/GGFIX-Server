@@ -39,6 +39,12 @@ app:
     # this file is committed). Email OTP is disabled if unset.
     api-key: ${RESEND_API_KEY:}
     from: ${RESEND_FROM_EMAIL:noreply@globogreen.in}
+  google:
+    # Server-side only — reverse geocoding for the customer location picker.
+    # Provide via GOOGLE_GEOCODING_API_KEY (do NOT hardcode it here — this file
+    # is committed); never expose this key to any frontend. Reverse geocoding
+    # responds success=false (not an error) when unset.
+    geocoding-api-key: ${GOOGLE_GEOCODING_API_KEY:}
 
 springdoc:
   api-docs:

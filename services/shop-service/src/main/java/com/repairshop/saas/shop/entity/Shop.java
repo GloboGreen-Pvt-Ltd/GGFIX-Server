@@ -67,6 +67,21 @@ public class Shop {
     @Column(name = "pickup_enabled", insertable = false, updatable = false)
     private Boolean pickupEnabled;
 
+    /**
+     * Working hours (auth-service owns writes to these, via the owner's Shop
+     * Information screen) — mapped read-only-in-spirit here so /shops/nearby
+     * can compute a real isOpen instead of hardcoding it.
+     */
+    @Column(name = "opening_time", length = 16)
+    private String openingTime;
+
+    @Column(name = "closing_time", length = 16)
+    private String closingTime;
+
+    /** Preset day range: MON_FRI | MON_SAT | MON_SUN. */
+    @Column(name = "working_days", length = 20)
+    private String workingDays;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

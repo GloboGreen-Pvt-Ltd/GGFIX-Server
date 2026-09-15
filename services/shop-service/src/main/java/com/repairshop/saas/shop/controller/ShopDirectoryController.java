@@ -95,33 +95,40 @@ public class ShopDirectoryController {
         return ResponseEntity.ok(result);
     }
 
+    private static final double MAX_RADIUS_KM = 100.0;
+    private static final int MAX_LIMIT = 100;
+
     @GetMapping("/nearby")
     public ResponseEntity<List<ShopSummaryResponse>> nearby(
             @RequestParam(value = "lat", required = false) Double lat,
             @RequestParam(value = "lng", required = false) Double lng,
             @RequestParam(value = "radiusKm", required = false) Double radiusKm,
             @RequestParam(value = "limit", required = false, defaultValue = "50") Integer limit,
-            @RequestParam(value = "activeOnly", required = false, defaultValue = "false") Boolean activeOnly) {
+            @RequestParam(value = "pincode", required = false) String pincode) {
 
-        // Default: return ALL shops so the customer view never silently goes
-        // empty just because an admin forgot to toggle Active. Pass
-        // ?activeOnly=true to opt in to the stricter filter.
-        List<Shop> shops = Boolean.TRUE.equals(activeOnly)
-                ? shopRepository.findByIsActiveTrue()
-                : shopRepository.findAll();
+        int effectiveLimit = clampLimit(limit);
 
+        // No coordinates: fall back to an exact PIN-code match when one was
+        // given (e.g. Places/GPS didn't resolve, but the visitor typed a PIN),
+        // else the active directory sorted by rating. Only real, active GGFIX
+        // shops are ever returned — no silent "closest of everything" here.
         if (lat == null || lng == null) {
-            List<ShopSummaryResponse> sorted = shops.stream()
+            List<Shop> candidates = (pincode != null && !pincode.isBlank())
+                    ? shopRepository.findByIsActiveTrueAndPincode(pincode.trim())
+                    : shopRepository.findByIsActiveTrue();
+            List<ShopSummaryResponse> sorted = candidates.stream()
                     .sorted(Comparator.comparing(
                             (Shop s) -> s.getRating() == null ? BigDecimal.ZERO : s.getRating()).reversed())
-                    .limit(limit == null || limit <= 0 ? 50 : limit)
+                    .limit(effectiveLimit)
                     .map(s -> toSummary(s, null))
                     .toList();
             return ResponseEntity.ok(sorted);
         }
 
-        final double effectiveRadius = radiusKm == null ? Double.MAX_VALUE : radiusKm;
-        List<ShopSummaryResponse> result = shops.stream()
+        final double effectiveRadius = (radiusKm == null || radiusKm <= 0)
+                ? MAX_RADIUS_KM
+                : Math.min(radiusKm, MAX_RADIUS_KM);
+        List<ShopSummaryResponse> result = shopRepository.findByIsActiveTrue().stream()
                 .map(s -> {
                     Double distance = null;
                     if (s.getLatitude() != null && s.getLongitude() != null) {
@@ -139,9 +146,14 @@ public class ShopDirectoryController {
                 .sorted(Comparator.comparing(
                         ShopSummaryResponse::getDistanceKm,
                         Comparator.nullsLast(Double::compareTo)))
-                .limit(limit == null || limit <= 0 ? 50 : limit)
+                .limit(effectiveLimit)
                 .toList();
         return ResponseEntity.ok(result);
+    }
+
+    private static int clampLimit(Integer limit) {
+        if (limit == null || limit <= 0) return 50;
+        return Math.min(limit, MAX_LIMIT);
     }
 
     @GetMapping("/{id}")
@@ -414,7 +426,7 @@ public class ShopDirectoryController {
                 .longitude(s.getLongitude())
                 .rating(s.getRating())
                 .distanceKm(distanceKm)
-                .isOpen(Boolean.TRUE)
+                .isOpen(isOpenNow(s))
                 .build();
     }
 
@@ -438,7 +450,7 @@ public class ShopDirectoryController {
                 .latitude(s.getLatitude())
                 .longitude(s.getLongitude())
                 .rating(s.getRating())
-                .isOpen(Boolean.TRUE)
+                .isOpen(isOpenNow(s))
                 .email(s.getEmail())
                 .state(s.getState())
                 .pincode(s.getPincode())
@@ -456,6 +468,60 @@ public class ShopDirectoryController {
                 .endTime(slot.getEndTime())
                 .capacity(slot.getCapacity())
                 .build();
+    }
+
+    /**
+     * True when {@code s} is open right now, computed from its own
+     * opening_time/closing_time ("08:00 AM"-style strings), working_days
+     * preset (MON_FRI | MON_SAT | MON_SUN) and timezone. Defaults to {@code
+     * true} whenever any piece is missing — a shop that hasn't filled in its
+     * hours yet must not disappear as "closed", matching how the rest of this
+     * codebase treats optional shop-profile data.
+     */
+    private static boolean isOpenNow(Shop s) {
+        if (s.getOpeningTime() == null || s.getOpeningTime().isBlank()
+                || s.getClosingTime() == null || s.getClosingTime().isBlank()) {
+            return true;
+        }
+        try {
+            java.time.ZoneId zone = java.time.ZoneId.of(
+                    s.getTimezone() == null || s.getTimezone().isBlank() ? "Asia/Kolkata" : s.getTimezone());
+            java.time.ZonedDateTime now = java.time.ZonedDateTime.now(zone);
+
+            if (!worksToday(s.getWorkingDays(), now.getDayOfWeek())) return false;
+
+            // Locale pinned to English: opening/closing are always stored as "08:00 AM"
+            // (see the Shop entity javadoc), but DateTimeFormatter.ofPattern() without a
+            // locale uses the JVM DEFAULT locale's AM/PM text. On a server whose default
+            // locale isn't English, that mismatch would throw on every parse — caught
+            // below, so it would silently degrade to "always open" rather than crash, but
+            // that defeats the whole point of computing a real isOpen. Pin it instead.
+            java.time.format.DateTimeFormatter fmt =
+                    java.time.format.DateTimeFormatter.ofPattern("hh:mm a", java.util.Locale.ENGLISH);
+            java.time.LocalTime open = java.time.LocalTime.parse(s.getOpeningTime().trim().toUpperCase(java.util.Locale.ROOT), fmt);
+            java.time.LocalTime close = java.time.LocalTime.parse(s.getClosingTime().trim().toUpperCase(java.util.Locale.ROOT), fmt);
+            java.time.LocalTime nowTime = now.toLocalTime();
+
+            // Overnight window (e.g. 06:00 PM - 02:00 AM) wraps past midnight.
+            if (close.isBefore(open) || close.equals(open)) {
+                return !nowTime.isBefore(open) || nowTime.isBefore(close);
+            }
+            return !nowTime.isBefore(open) && nowTime.isBefore(close);
+        } catch (Exception e) {
+            // Unparseable/unknown zone — never let a formatting quirk hide a real shop.
+            return true;
+        }
+    }
+
+    private static boolean worksToday(String workingDays, java.time.DayOfWeek today) {
+        if (workingDays == null || workingDays.isBlank()) return true;
+        boolean isWeekend = today == java.time.DayOfWeek.SATURDAY || today == java.time.DayOfWeek.SUNDAY;
+        return switch (workingDays.trim().toUpperCase(java.util.Locale.ROOT)) {
+            case "MON_FRI" -> !isWeekend;
+            case "MON_SAT" -> today != java.time.DayOfWeek.SUNDAY;
+            case "MON_SUN" -> true;
+            default -> true; // unrecognised preset — don't hide the shop over it
+        };
     }
 
     private static double haversineKm(double lat1, double lon1, double lat2, double lon2) {
