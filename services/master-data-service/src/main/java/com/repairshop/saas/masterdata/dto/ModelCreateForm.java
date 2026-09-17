@@ -2,6 +2,8 @@ package com.repairshop.saas.masterdata.dto;
 
 import lombok.Data;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -13,19 +15,10 @@ import java.util.UUID;
  * its bytes land, and renaming a brand cannot split one folder in two because a
  * client cached the old string.
  *
- * <h2>Scope</h2>
- * These four fields are exactly what this endpoint persists. The admin's "New model"
- * screen also collects a model number and colour / RAM / storage variants; those are
- * deliberately NOT accepted here:
- * <ul>
- *   <li>{@code master_models} has no model_number column in this schema, so taking
- *       one would mean silently discarding it.</li>
- *   <li>Variants are {@code master_model_variants} rows keyed by ram_option_id,
- *       storage_option_id and color_id — option UUIDs, not free text — and are owned
- *       by the existing {@code POST /master/model-variants} endpoint.</li>
- * </ul>
- * The client posts this form first and then the variants against the returned model
- * id. Accepting fields we cannot store would look like it worked and lose the data.
+ * Colours, RAM/storage and model numbers are inline {@code jsonb} arrays on
+ * master_models (migrations 69/70/73) rather than separate variant rows, so they are
+ * set on the same insert. In a multipart body a repeated field name binds to a List,
+ * so the client appends {@code colors} once per value rather than sending JSON.
  */
 @Data
 public class ModelCreateForm {
@@ -41,4 +34,16 @@ public class ModelCreateForm {
 
     /** Display name, e.g. "Vivo Y20". Slugified into the model folder segment. */
     private String modelName;
+
+    /** Manufacturer numbers, e.g. V2043 — several per model across regions. */
+    private List<String> modelNumber = new ArrayList<>();
+
+    /** Colour names as shown in the picker, e.g. "Dawn White". */
+    private List<String> colors = new ArrayList<>();
+
+    /** Variant labels, e.g. "4GB+64GB", or storage-only "64GB". */
+    private List<String> ramStorage = new ArrayList<>();
+
+    /** Whether the model is offered in the Sell flow. Defaults to true, as in the entity. */
+    private Boolean sellActive;
 }

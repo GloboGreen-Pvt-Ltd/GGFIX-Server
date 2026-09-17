@@ -15,4 +15,7 @@ public interface MasterDeviceCategoryRepository extends JpaRepository<MasterDevi
     List<MasterDeviceCategory> findAllByOrderByNameAsc();
 
     Optional<MasterDeviceCategory> findByCodeIgnoreCase(String code);
+
+    /** Rows still using one image URL — the guard before deleting a superseded tile. */
+    long countByImageUrl(String imageUrl);
 }
