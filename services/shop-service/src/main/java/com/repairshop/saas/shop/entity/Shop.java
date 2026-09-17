@@ -56,32 +56,6 @@ public class Shop {
     @Column(precision = 3, scale = 1)
     private BigDecimal rating;
 
-    /**
-     * The shop's master pickup switch (migration 14). auth-service owns this
-     * column — it is the only service that writes it, via the owner's location
-     * PATCH — so it is mapped read-only here. insertable=false keeps
-     * shop-service's own createShop out of a NOT NULL violation: the column
-     * would otherwise be INSERTed as NULL instead of falling back to the
-     * DEFAULT FALSE that makes a new shop pickup-off until its owner opts in.
-     */
-    @Column(name = "pickup_enabled", insertable = false, updatable = false)
-    private Boolean pickupEnabled;
-
-    /**
-     * Working hours (auth-service owns writes to these, via the owner's Shop
-     * Information screen) — mapped read-only-in-spirit here so /shops/nearby
-     * can compute a real isOpen instead of hardcoding it.
-     */
-    @Column(name = "opening_time", length = 16)
-    private String openingTime;
-
-    @Column(name = "closing_time", length = 16)
-    private String closingTime;
-
-    /** Preset day range: MON_FRI | MON_SAT | MON_SUN. */
-    @Column(name = "working_days", length = 20)
-    private String workingDays;
-
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

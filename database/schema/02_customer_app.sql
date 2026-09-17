@@ -260,7 +260,7 @@ CREATE TABLE master_warranty_options (
 CREATE TABLE master_banners (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title           VARCHAR(255),
-    image_url       TEXT,
+    image_url       VARCHAR(500),
     image_base64    TEXT,
     link_target     VARCHAR(255),
     sort_order      INT NOT NULL DEFAULT 0,

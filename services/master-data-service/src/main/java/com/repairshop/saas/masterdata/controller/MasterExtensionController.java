@@ -23,6 +23,7 @@ public class MasterExtensionController {
     private final MasterDeviceCategoryRepository deviceCategoryRepo;
     private final MasterDeviceSeriesRepository deviceSeriesRepo;
     private final MasterColorRepository colorRepo;
+    private final MasterModelVariantRepository modelVariantRepo;
     private final MasterRepairCategoryRepository repairCategoryRepo;
     private final MasterScreeningQuestionRepository screeningQuestionRepo;
     private final MasterConditionGroupRepository conditionGroupRepo;
@@ -39,6 +40,7 @@ public class MasterExtensionController {
     public MasterExtensionController(MasterDeviceCategoryRepository deviceCategoryRepo,
                                      MasterDeviceSeriesRepository deviceSeriesRepo,
                                      MasterColorRepository colorRepo,
+                                     MasterModelVariantRepository modelVariantRepo,
                                      MasterRepairCategoryRepository repairCategoryRepo,
                                      MasterScreeningQuestionRepository screeningQuestionRepo,
                                      MasterConditionGroupRepository conditionGroupRepo,
@@ -54,6 +56,7 @@ public class MasterExtensionController {
         this.deviceCategoryRepo = deviceCategoryRepo;
         this.deviceSeriesRepo = deviceSeriesRepo;
         this.colorRepo = colorRepo;
+        this.modelVariantRepo = modelVariantRepo;
         this.repairCategoryRepo = repairCategoryRepo;
         this.screeningQuestionRepo = screeningQuestionRepo;
         this.conditionGroupRepo = conditionGroupRepo;
@@ -343,6 +346,50 @@ public class MasterExtensionController {
     public ResponseEntity<Void> deleteColor(@PathVariable UUID id) {
         if (!colorRepo.existsById(id)) return ResponseEntity.notFound().build();
         colorRepo.deleteById(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    // ---- Model variants ----
+    @GetMapping("/model-variants")
+    public ResponseEntity<List<MasterModelVariant>> getModelVariants() {
+        return ResponseEntity.ok(modelVariantRepo.findAll());
+    }
+
+    @GetMapping("/models/{modelId}/variants")
+    public ResponseEntity<List<MasterModelVariant>> getVariantsByModel(@PathVariable UUID modelId) {
+        return ResponseEntity.ok(modelVariantRepo.findByModelId(modelId));
+    }
+
+    @PostMapping("/model-variants")
+    public ResponseEntity<MasterModelVariant> createModelVariant(@RequestBody ModelVariantRequest req) {
+        MasterModelVariant e = MasterModelVariant.builder()
+                .modelId(req.getModelId())
+                .ramOptionId(req.getRamOptionId())
+                .storageOptionId(req.getStorageOptionId())
+                .colorId(req.getColorId())
+                .referencePrice(req.getReferencePrice())
+                .build();
+        return ResponseEntity.ok(modelVariantRepo.save(e));
+    }
+
+    @PutMapping("/model-variants/{id}")
+    public ResponseEntity<MasterModelVariant> updateModelVariant(@PathVariable UUID id, @RequestBody ModelVariantRequest req) {
+        return modelVariantRepo.findById(id)
+                .map(e -> {
+                    e.setModelId(req.getModelId());
+                    e.setRamOptionId(req.getRamOptionId());
+                    e.setStorageOptionId(req.getStorageOptionId());
+                    e.setColorId(req.getColorId());
+                    e.setReferencePrice(req.getReferencePrice());
+                    return ResponseEntity.ok(modelVariantRepo.save(e));
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    @DeleteMapping("/model-variants/{id}")
+    public ResponseEntity<Void> deleteModelVariant(@PathVariable UUID id) {
+        if (!modelVariantRepo.existsById(id)) return ResponseEntity.notFound().build();
+        modelVariantRepo.deleteById(id);
         return ResponseEntity.noContent().build();
     }
 
@@ -654,9 +701,9 @@ public class MasterExtensionController {
     public ResponseEntity<MasterBanner> createBanner(@RequestBody BannerRequest req) {
         MasterBanner e = MasterBanner.builder()
                 .title(req.getTitle())
-                .imageUrl(blankToNull(req.getImageUrl()))
+                .imageUrl(req.getImageUrl())
                 .imageBase64(req.getImageBase64())
-                .linkTarget(blankToNull(req.getLinkTarget()))
+                .linkTarget(req.getLinkTarget())
                 .sortOrder(nz(req.getSortOrder()))
                 .isActive(nzb(req.getIsActive()))
                 .build();
@@ -667,28 +714,15 @@ public class MasterExtensionController {
     public ResponseEntity<MasterBanner> updateBanner(@PathVariable UUID id, @RequestBody BannerRequest req) {
         return bannerRepo.findById(id)
                 .map(e -> {
-                    // Every field is null-guarded, so a partial PUT only touches
-                    // what it actually carries. title/imageUrl/linkTarget used to
-                    // be assigned unconditionally, which meant a body like
-                    // {"isActive": false} silently blanked the banner's title and
-                    // image instead of just toggling it off.
-                    if (req.getTitle() != null) e.setTitle(req.getTitle());
-                    if (req.getImageUrl() != null) e.setImageUrl(blankToNull(req.getImageUrl()));
+                    e.setTitle(req.getTitle());
+                    e.setImageUrl(req.getImageUrl());
                     if (req.getImageBase64() != null) e.setImageBase64(req.getImageBase64());
-                    if (req.getLinkTarget() != null) e.setLinkTarget(blankToNull(req.getLinkTarget()));
+                    e.setLinkTarget(req.getLinkTarget());
                     if (req.getSortOrder() != null) e.setSortOrder(req.getSortOrder());
                     if (req.getIsActive() != null) e.setIsActive(req.getIsActive());
                     return ResponseEntity.ok(bannerRepo.save(e));
                 })
                 .orElse(ResponseEntity.notFound().build());
-    }
-
-    /**
-     * Clearing an optional field is expressed as "" by the admin form, which we
-     * persist as NULL so "no image" is one value rather than two.
-     */
-    private static String blankToNull(String v) {
-        return v == null || v.isBlank() ? null : v;
     }
 
     @DeleteMapping("/banners/{id}")

@@ -16,6 +16,4 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
     Optional<Shop> findBySlug(String slug);
 
     List<Shop> findByCityIgnoreCaseAndIsActiveTrue(String city);
-
-    List<Shop> findByIsActiveTrueAndPincode(String pincode);
 }

@@ -17,9 +17,10 @@ spring:
       hibernate:
         jdbc:
           time_zone: UTC
-  # KYC docs in dev arrive as base64 data URIs (master-service Cloudinary
-  # fallback) — 1-3 MB per image. A 5-doc payload can be 15 MB. Default Tomcat
-  # cap is 2 MB which throws a generic 500 before the controller is reached.
+  # KYC docs now arrive as media.ggfix.in URLs, but this stays generous: legacy
+  # rows still hold 1-3 MB base64 data URIs from before the S3 switch, and a
+  # 5-doc resubmit can be 15 MB. The default Tomcat cap is 2 MB, which throws a
+  # generic 500 before the controller is ever reached.
   servlet:
     multipart:
       max-file-size: 50MB

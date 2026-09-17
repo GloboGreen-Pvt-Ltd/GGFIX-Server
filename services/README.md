@@ -4,7 +4,7 @@ Multi-module Maven project. Each service is a Spring Boot app with JWT, REST, Sw
 
 ## Quick start
 
-**Prerequisites:** Java 25+, Maven 3.8+, PostgreSQL with schema applied (`database/schema/01_schema.sql`).
+**Prerequisites:** Java 21+, Maven 3.8+, PostgreSQL with schema applied (`database/schema/01_schema.sql`).
 
 ### Shared secret (dev)
 

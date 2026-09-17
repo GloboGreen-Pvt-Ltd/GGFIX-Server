@@ -36,13 +36,6 @@ public class CreateShopOwnerRequest {
     private String avatarUrl;
     private String idProofUrl;
 
-    // Owner KYC documents (stored in users.kyc_document jsonb). Optional at
-    // create time — the admin may upload them here, or the owner uploads later
-    // from the mobile app.
-    private String aadharFrontUrl;
-    private String aadharBackUrl;
-    private String panUrl;
-
     // Legacy free-text address (kept for backward compatibility).
     private String personalAddress;
 

@@ -9,7 +9,4 @@ import org.springframework.stereotype.Repository;
 
 @Repository
 public interface MasterBrandRepository extends JpaRepository<MasterBrand, UUID> {
-
-    /** Rows still using one image URL — the guard before deleting a superseded logo. */
-    long countByImageUrl(String imageUrl);
 }

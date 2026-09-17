@@ -6,7 +6,6 @@ import com.repairshop.saas.user.dto.CustomerProfileResponse;
 import com.repairshop.saas.user.dto.SavedDeviceRequest;
 import com.repairshop.saas.user.dto.SavedDeviceResponse;
 import com.repairshop.saas.user.dto.UpdateProfileRequest;
-import com.repairshop.saas.user.entity.AddressEntry;
 import com.repairshop.saas.user.entity.CustomerAddress;
 import com.repairshop.saas.user.entity.CustomerSavedDevice;
 import com.repairshop.saas.user.entity.CustomerUser;
@@ -136,7 +135,6 @@ public class CustomerProfileController {
                 .isDefault(Boolean.TRUE.equals(body.getIsDefault()))
                 .build();
         CustomerAddress saved = customerAddressRepository.save(entity);
-        resyncAddressesJson(userId);
         return toAddressResponse(saved);
     }
 
@@ -172,7 +170,6 @@ public class CustomerProfileController {
         if (body.getLongitude() != null) entity.setLongitude(body.getLongitude());
         if (body.getIsDefault() != null) entity.setIsDefault(body.getIsDefault());
         CustomerAddress saved = customerAddressRepository.save(entity);
-        resyncAddressesJson(userId);
         return toAddressResponse(saved);
     }
 
@@ -184,7 +181,6 @@ public class CustomerProfileController {
                 .orElseThrow(() -> new ResourceNotFoundException("Address not found: " + id));
         ensureOwnedByUser(entity.getCustomerUserId(), userId);
         customerAddressRepository.delete(entity);
-        resyncAddressesJson(userId);
         return ResponseEntity.noContent().build();
     }
 
@@ -205,7 +201,6 @@ public class CustomerProfileController {
             }
         }
         target.setIsDefault(true);
-        resyncAddressesJson(userId);
         return toAddressResponse(target);
     }
 
@@ -324,44 +319,6 @@ public class CustomerProfileController {
         if (ownerId == null || !ownerId.equals(userId)) {
             throw new AccessDeniedException("Resource does not belong to current user");
         }
-    }
-
-    /**
-     * Phase A dual-write: after any address mutation, rebuild the inline
-     * customer_users.addresses jsonb mirror from the user's customer_addresses
-     * rows. Element ids equal the row ids, so the "orders resolve addresses by
-     * id" contract still holds once the source flips to jsonb in Phase B.
-     */
-    private void resyncAddressesJson(UUID userId) {
-        List<AddressEntry> entries = customerAddressRepository
-                .findByCustomerUserIdOrderByCreatedAtDesc(userId).stream()
-                .map(this::toAddressEntry).toList();
-        customerUserRepository.findById(userId).ifPresent(u -> {
-            u.setAddresses(entries);
-            customerUserRepository.save(u);
-        });
-    }
-
-    private AddressEntry toAddressEntry(CustomerAddress a) {
-        return AddressEntry.builder()
-                .id(a.getId())
-                .label(a.getLabel())
-                .fullName(a.getFullName())
-                .mobile(a.getMobile())
-                .pincode(a.getPincode())
-                .locality(a.getLocality())
-                .area(a.getArea() != null ? a.getArea() : a.getLocality())
-                .addressLine(a.getAddressLine())
-                .city(a.getCity())
-                .district(a.getDistrict() != null ? a.getDistrict() : a.getCity())
-                .taluk(a.getTaluk())
-                .state(a.getState())
-                .latitude(a.getLatitude())
-                .longitude(a.getLongitude())
-                .isDefault(a.getIsDefault())
-                .createdAt(a.getCreatedAt())
-                .updatedAt(a.getUpdatedAt())
-                .build();
     }
 
     private CustomerProfileResponse toProfileResponse(CustomerUser u) {

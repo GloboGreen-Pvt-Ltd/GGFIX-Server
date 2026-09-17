@@ -549,7 +549,7 @@ CREATE TABLE master_warranty_options (
 CREATE TABLE master_banners (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title           VARCHAR(255),
-    image_url       TEXT,
+    image_url       VARCHAR(500),
     image_base64    TEXT,
     link_target     VARCHAR(255),
     sort_order      INT NOT NULL DEFAULT 0,
@@ -981,9 +981,7 @@ ALTER TABLE users
     ADD COLUMN IF NOT EXISTS phone            VARCHAR(50),
     ADD COLUMN IF NOT EXISTS avatar_url       VARCHAR(1000),
     ADD COLUMN IF NOT EXISTS id_proof_url     VARCHAR(1000),
-    ADD COLUMN IF NOT EXISTS personal_address TEXT,
-    -- Owner KYC (Aadhar front/back + PAN) blob — see migration 77_users_kyc_document.sql.
-    ADD COLUMN IF NOT EXISTS kyc_document     jsonb;
+    ADD COLUMN IF NOT EXISTS personal_address TEXT;
 
 ALTER TABLE shops
     ADD COLUMN IF NOT EXISTS owner_user_id          UUID REFERENCES users(id) ON DELETE SET NULL,
@@ -1452,11 +1450,3 @@ CREATE INDEX IF NOT EXISTS idx_master_functional_issues_device_category
     ON master_functional_issues (device_category_id);
 
 COMMIT;
-
-
--- #############################################################################
--- 78_drop_shop_kyc_documents.sql
--- Owner KYC moved to users.kyc_document (see 05_shop_owner_extended above);
--- the per-shop shop_kyc_documents table is retired.
--- #############################################################################
-DROP TABLE IF EXISTS shop_kyc_documents;

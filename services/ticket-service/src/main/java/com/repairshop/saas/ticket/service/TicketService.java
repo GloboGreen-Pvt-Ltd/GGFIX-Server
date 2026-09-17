@@ -7,16 +7,12 @@ import com.repairshop.saas.ticket.dto.SolutionPackResponse;
 import com.repairshop.saas.ticket.dto.TicketEventResponse;
 import com.repairshop.saas.ticket.dto.TicketRequest;
 import com.repairshop.saas.ticket.dto.TicketResponse;
-import com.repairshop.saas.ticket.entity.Invoice;
 import com.repairshop.saas.ticket.entity.PlatformRepairBookingEvent;
 import com.repairshop.saas.ticket.entity.RepairNote;
 import com.repairshop.saas.ticket.entity.Technician;
 import com.repairshop.saas.ticket.entity.Ticket;
 import com.repairshop.saas.ticket.entity.TicketSolutionPack;
-import com.repairshop.saas.ticket.dto.ImeiAvailabilityResponse;
-import com.repairshop.saas.ticket.exception.ImeiConflictException;
 import com.repairshop.saas.ticket.exception.ResourceNotFoundException;
-import com.repairshop.saas.ticket.repository.InvoiceRepository;
 import com.repairshop.saas.ticket.repository.MasterTechnicianWorkStatusViewRepository;
 import com.repairshop.saas.ticket.repository.PlatformCustomerAddressRepository;
 import com.repairshop.saas.ticket.repository.PlatformCustomerUserRepository;
@@ -60,7 +56,6 @@ public class TicketService {
     private final RepairNoteRepository repairNoteRepository;
     private final TicketSolutionPackRepository ticketSolutionPackRepository;
     private final MasterTechnicianWorkStatusViewRepository masterWorkStatusRepository;
-    private final InvoiceRepository invoiceRepository;
     private final CustomerOrderMirrorService customerOrderMirrorService;
 
     private static final String TRACKING_PREFIX = "CSPEN";
@@ -141,19 +136,6 @@ public class TicketService {
             emitBookingEvent(t.getId(), "WAITING_FOR_CUSTOMER_APPROVAL",
                     "Waiting for Customer Approval", "TECHNICIAN");
         }
-        // CUSTOMER_APPROVED is deliberately NOT derived here. It used to be
-        // back-filled from tickets.customer_approval (and from a status that had
-        // advanced past the gate), which lit "Customer Approved" on the rail for
-        // an approval nobody gave: a shop that ticked the approval box while
-        // creating the booking got a green Customer Approved stamped at the first
-        // page load — minutes before the technician was even assigned, and with
-        // "Service Re-estimated" still grey above it.
-        //
-        // Approval is an event, not a state to be inferred. The only writers are
-        // the three real approval actions, each stamping its own instant:
-        //   * update() / patch()  — shop ticks "Customer Repair Approval"
-        //   * RepairBookingController#customerApproval — customer taps Approve
-        // All three route through onCustomerApproved().
         if (hasAtLeastOneUrl(t.getTechnicianPhotosJson())) {
             emitBookingEvent(t.getId(), "TECHNICIAN_UPLOADED_DEVICE_IMAGES",
                     "Technician Uploaded Device Images", "TECHNICIAN");
@@ -163,35 +145,14 @@ public class TicketService {
                 .findByTicketIdOrderByCreatedAtDesc(t.getId()).stream()
                 .anyMatch(n -> !Boolean.TRUE.equals(n.getIsInternal()));
         if (hasComplianceNote) {
-            emitBookingEvent(t.getId(), KEY_ISSUE_VERIFIED,
+            emitBookingEvent(t.getId(), "TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED",
                     "Technician Issue Verified & Updated", "TECHNICIAN");
         }
-        // "Repair Work In Progress" is not derived at all any more. It used to be
-        // paired to "Technician Issue Verified & Updated", carrying that row's
-        // exact timestamp — but verifying the issue is diagnosis, not repair, so
-        // the rail showed repair work starting at the minute the technician
-        // described the fault, before the re-estimate had even been sent. The
-        // only writer now is the technician's own checklist tap
-        // (emitProgressStepEvent), stamped when they actually start.
         boolean hasNewSolutionPack = !ticketSolutionPackRepository
                 .findByTicketIdAndPackTypeOrderByCreatedAtDesc(t.getId(), "NEW").isEmpty();
         if (hasNewSolutionPack) {
             emitBookingEvent(t.getId(), "ISSUE_IDENTIFIED",
                     "Issue identified by technician", "TECHNICIAN");
-        }
-        // An invoice row IS the record that the step happened, so a booking that
-        // has one must carry the step. InvoiceService writes the event itself now;
-        // this heals the invoices raised before it did — the client used to post
-        // that event separately and a dropped call left a generated invoice with a
-        // grey "Invoice Generated" on the rail for good. Stamped with the
-        // invoice's own generatedAt, not now(), so the healed row reads as the
-        // moment the bill was actually raised. Written only when missing: this
-        // runs on every ticket read, and re-writing it each time would churn.
-        if (!hasBookingEvent(t.getId(), "INVOICE_GENERATED")) {
-            invoiceRepository.findByTicketId(t.getId()).ifPresent(inv ->
-                    emitOrUpdateBookingEvent(t.getId(), "INVOICE_GENERATED",
-                            InvoiceService.invoiceGeneratedNote(inv), "OWNER",
-                            null, null, inv.getGeneratedAt()));
         }
     }
 
@@ -225,38 +186,30 @@ public class TicketService {
                 : normalizedStatus != null
                         ? ticketRepository.findByShopIdAndStatus(shopId, normalizedStatus, pageable)
                         : ticketRepository.findByShopId(shopId, pageable);
-        return toResponsePage(page);
+        return page.map(this::toResponse);
     }
 
     @Transactional(readOnly = true)
     public Page<TicketResponse> listByAssignedTechnician(UUID technicianId, Pageable pageable) {
-        return toResponsePage(ticketRepository.findByAssignedTechnicianId(technicianId, pageable));
+        return ticketRepository.findByAssignedTechnicianId(technicianId, pageable).map(this::toResponse);
     }
 
     /** For technician "my tickets": resolve user id to technician id then list assigned tickets. */
     @Transactional(readOnly = true)
     public Page<TicketResponse> listByAssignedUser(UUID userId, Pageable pageable) {
         return technicianRepository.findFirstByUserId(userId)
-                .map(tech -> toResponsePage(ticketRepository.findByAssignedTechnicianId(tech.getId(), pageable)))
+                .map(tech -> ticketRepository.findByAssignedTechnicianId(tech.getId(), pageable).map(this::toResponse))
                 .orElse(new PageImpl<>(Collections.emptyList(), pageable, 0));
     }
 
     /**
      * Returns booking/ticket counts for the shop (for owner dashboard).
-     * Keys: CREATED, IN_DIAGNOSIS, QUOTED, APPROVED, IN_REPAIR, READY,
-     * INVOICE_GENERATED, INVOICE_READY, DELIVERED_PROCESSING, DELIVERED,
-     * CANCELLED, total, assignedCount.
-     *
-     * The two invoice substates are here because the owner Home "Ready for
-     * Delivery" tile sums the whole post-repair band (READY + the billing /
-     * handover substates) to agree with the bookings-list chip it opens.
-     * Without them the tile read 0 the moment a booking's invoice was raised.
+     * Keys: CREATED, IN_DIAGNOSIS, QUOTED, APPROVED, IN_REPAIR, READY, DELIVERED, CANCELLED, total, assignedCount.
      */
     @Transactional(readOnly = true)
     public Map<String, Long> getCountsByShop(UUID shopId) {
         Map<String, Long> counts = new HashMap<>();
-        String[] statuses = { "CREATED", "IN_DIAGNOSIS", "QUOTED", "APPROVED", "IN_REPAIR", "READY",
-                "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING", "DELIVERED", "CANCELLED" };
+        String[] statuses = { "CREATED", "IN_DIAGNOSIS", "QUOTED", "APPROVED", "IN_REPAIR", "READY", "DELIVERED", "CANCELLED" };
         for (String s : statuses) {
             counts.put(s, ticketRepository.countByShopIdAndStatus(shopId, s));
         }
@@ -296,10 +249,6 @@ public class TicketService {
                 .trackingId(trackingId)
                 .status("CREATED")
                 .build();
-        // After the builder, not inside it: the payment block is derived from
-        // the prices set above (balance, and the guard that refuses an amount
-        // over the bill), so it needs the ticket assembled first.
-        applyPayment(ticket, request.getPaymentType(), request.getPaymentAmount());
         // saveAndFlush + mirrorOnUpsertInline (REQUIRED propagation, not
         // REQUIRES_NEW) — the booking mirror writes repair_bookings.ticket_id
         // with a FK to tickets.id, and PlatformRepairBooking has only a plain
@@ -343,10 +292,6 @@ public class TicketService {
         ticket.setCustomerApproval(request.getCustomerApproval());
         ticket.setEstimatedReadyAt(request.getEstimatedReadyAt());
         ticket.setEstimatedDeliveryAt(request.getEstimatedDeliveryAt());
-        // Last, after setEstimatedPrice: a re-estimate changes what the payment
-        // is measured against, so the balance this writes has to be computed
-        // from the NEW price, not the one the ticket carried in.
-        applyPayment(ticket, request.getPaymentType(), request.getPaymentAmount());
         // Re-edit semantics: when the shop edits a ticket the customer had
         // already approved AND the edit didn't carry a fresh approval, treat
         // it as a re-booking — clear the prior approval and refresh the
@@ -376,23 +321,18 @@ public class TicketService {
         if (priceItemsChanged || estimateChanged) {
             emitOrUpdateBookingEvent(ticket.getId(),
                     "RE_ESTIMATED_CONFIRMED",
-                    NOTE_RE_ESTIMATED,
+                    "Service Re-estimated",
                     "SHOP");
-            // The event alone only feeds the Service History rail. The owner's
-            // Re-Estimated list and the card badge both read ticket.status, so
-            // without this the booking stayed "Service Accepted" (= CREATED) and
-            // the Re-Estimated tile counted 0 while the timeline said otherwise.
-            markReEstimated(ticket);
         }
         // Shop-side approval flip (owner ticked "Customer Repair Approval" in
-        // the edit flow). Customer-side approval comes in through
-        // RepairBookingController#customerApproval; both land on the same
-        // handler so the pair of rows it writes is identical either way.
-        //
-        // The !wasApproved guard means this only runs on a real false -> true
-        // transition, so an ordinary re-save can't drag the timestamp forward.
+        // the edit flow): light up CUSTOMER_APPROVED. Customer-side approval
+        // is emitted from RepairBookingController#customerApproval; emitBookingEvent
+        // dedupes so an existing row won't double-write.
         if (!wasApproved && Boolean.TRUE.equals(ticket.getCustomerApproval())) {
-            onCustomerApproved(ticket, "SHOP");
+            emitBookingEvent(ticket.getId(),
+                    "CUSTOMER_APPROVED",
+                    "Customer Approved",
+                    "SHOP");
         }
         return toResponse(ticket);
     }
@@ -424,12 +364,7 @@ public class TicketService {
         // Honor only the ones backed by a column; quietly ignore unknown keys.
         if (body.containsKey("imei")) {
             Object raw = body.get("imei");
-            // Blank clears the field and skips both checks — the gate only ever
-            // sends a value, but an edit screen must still be able to wipe a
-            // wrong number without tripping format validation on "".
-            String imei = raw == null ? null : normalizeImei(String.valueOf(raw));
-            if (imei != null) assertImeiAvailable(shopId, id, imei);
-            ticket.setImei(imei);
+            ticket.setImei(raw == null ? null : String.valueOf(raw));
         }
         if (body.containsKey("issueDescription")) {
             Object raw = body.get("issueDescription");
@@ -450,19 +385,6 @@ public class TicketService {
                     ? body.get("customerApproved")
                     : body.get("customerApproval");
             ticket.setCustomerApproval(parseBooleanOrNull(raw));
-        }
-        // Payment mode + amount. Either key alone is honored by re-using what
-        // the ticket already holds for the other — a PATCH that raises the
-        // amount shouldn't have to restate the mode to keep it.
-        boolean payingPatch = body.containsKey("paymentType") || body.containsKey("paymentAmount");
-        if (payingPatch) {
-            String rawType = body.containsKey("paymentType")
-                    ? (body.get("paymentType") == null ? null : String.valueOf(body.get("paymentType")))
-                    : ticket.getPaymentType();
-            BigDecimal rawAmount = body.containsKey("paymentAmount")
-                    ? parseAmountOrNull(body.get("paymentAmount"))
-                    : ticket.getPaymentAmount();
-            applyPayment(ticket, rawType, rawAmount);
         }
         if (body.containsKey("assignedTechnicianId")) {
             Object raw = body.get("assignedTechnicianId");
@@ -512,10 +434,6 @@ public class TicketService {
             ticket.setTechnicianPhotosJson(newValue);
         }
 
-        // Unconditional, not only on a paying patch: it is also what backfills
-        // the balance and PENDING status on a ticket booked before migration 85
-        // that has never been through a payment-aware write.
-        recomputeBalance(ticket);
         ticket = ticketRepository.save(ticket);
         customerOrderMirrorService.mirrorOnUpsert(ticket);
 
@@ -535,20 +453,10 @@ public class TicketService {
             emitStepEventsForTicketStatus(ticket.getId(), ticket.getStatus());
         }
         // Technician assignment changed — light up the customer/owner timeline
-        // rows for it.
-        //
-        // The status keys here MUST be the ones the timelines render
-        // (SHOP_BOOKING_STATUS_OPTIONS in serviceHistoryPhases.js:
-        // ASSIGNED_TO_TECHNICIAN / REASSIGNED_TO_TECHNICIAN). They used to be
-        // TECHNICIAN_ASSIGNED / TECHNICIAN_REASSIGNED, which no rail has a row
-        // for: the events were written and then rendered nowhere, so a booking
-        // with a technician on it showed a grey "Assigned to Technician" —
-        // and a re-assignment showed nothing at all, since the mirror only
-        // emits the first assign.
-        //
-        // Assign is emit-if-absent (the first one is the record); re-assign is
-        // emit-or-update, so the row names whoever holds the booking NOW rather
-        // than freezing on the first replacement.
+        // row that says "Assigned to <Tech>". emitBookingEvent is idempotent
+        // on (booking, statusKey) so a re-save of the same technician id is
+        // a no-op, but a re-assignment to a different technician fires
+        // TECHNICIAN_REASSIGNED so the rail can show both steps.
         UUID technicianAfterPatch = ticket.getAssignedTechnicianId();
         boolean technicianChanged = !java.util.Objects.equals(technicianBeforePatch, technicianAfterPatch);
         if (technicianChanged && technicianAfterPatch != null) {
@@ -556,26 +464,19 @@ public class TicketService {
                     ? assignedTechAfterPatch.getName()
                     : "Technician";
             if (technicianBeforePatch == null) {
-                emitBookingEvent(ticket.getId(), "ASSIGNED_TO_TECHNICIAN",
+                emitBookingEvent(ticket.getId(), "TECHNICIAN_ASSIGNED",
                         "Assigned to " + techName, "SHOP");
             } else {
-                emitOrUpdateBookingEvent(ticket.getId(), "REASSIGNED_TO_TECHNICIAN",
+                emitBookingEvent(ticket.getId(), "TECHNICIAN_REASSIGNED",
                         "Re-assigned to " + techName, "SHOP");
             }
-            // The patch above cleared technician_accepted_at, so the booking is
-            // waiting on the new technician's tap — re-stamped rather than
-            // emitted once, or a re-assignment would carry the first
-            // assignment's "awaiting" timestamp.
-            emitOrUpdateBookingEvent(ticket.getId(), "AWAITING_TECHNICIAN_ACCEPTANCE",
-                    "Awaiting Technician Acceptance", "SHOP");
         }
-        // Owner ticked "Customer Repair Approval" in the Edit Booking screen —
-        // same handler as update() and as the customer's own Approve tap, so the
-        // approval and the repair-work row it opens are written identically
-        // whichever screen triggered them. The !wasApprovedBeforePatch guard
-        // keeps a no-op re-save with the flag already true from touching them.
+        // Owner ticked "Customer Repair Approval" in the Edit Booking screen.
+        // Light up CUSTOMER_APPROVED on the timeline; emitBookingEvent dedupes
+        // so a no-op re-save with the flag already true won't double-write.
         if (!wasApprovedBeforePatch && Boolean.TRUE.equals(ticket.getCustomerApproval())) {
-            onCustomerApproved(ticket, "SHOP");
+            emitBookingEvent(ticket.getId(), "CUSTOMER_APPROVED",
+                    "Customer Approved", "SHOP");
         }
         return toResponse(ticket);
     }
@@ -597,115 +498,6 @@ public class TicketService {
         if ("true".equalsIgnoreCase(s) || "1".equals(s)) return Boolean.TRUE;
         if ("false".equalsIgnoreCase(s) || "0".equals(s)) return Boolean.FALSE;
         return null;
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    // Payment
-    //
-    // Four of the five payment columns are written only here. The request
-    // carries a mode and an amount; status, balance and the paid-at stamp are
-    // derived, so a client cannot report money as PAID without an amount or
-    // back-date when it was taken.
-    // ════════════════════════════════════════════════════════════════════════
-
-    /**
-     * ADVANCE | FULL, or null for anything else. Normalizing here rather than
-     * bean-validating the request keeps the CHECK constraint added by migration
-     * 85 unreachable from user input: an unknown mode degrades to "nothing
-     * collected" instead of 500-ing the whole booking submit.
-     */
-    private static String normalizePaymentType(String raw) {
-        if (raw == null) return null;
-        String v = raw.trim().toUpperCase();
-        return ("ADVANCE".equals(v) || "FULL".equals(v)) ? v : null;
-    }
-
-    /**
-     * The total a payment is measured against: what the repair ended up costing
-     * once that is known, otherwise the estimate. Both may be absent on a
-     * half-filled ticket, hence ZERO rather than null — a payment against no
-     * priced work at all is what the over-payment guard should reject.
-     */
-    private static BigDecimal applicableTotal(Ticket t) {
-        if (t.getFinalPrice() != null) return t.getFinalPrice();
-        if (t.getEstimatedPrice() != null) return t.getEstimatedPrice();
-        return BigDecimal.ZERO;
-    }
-
-    /**
-     * Writes the whole payment block from a mode + amount, and is the ONLY
-     * place that does. Call it after the ticket's prices are set, since the
-     * balance and the over-payment guard both read them.
-     *
-     * An amount is only meaningful next to a mode — a bare number with no
-     * ADVANCE/FULL beside it can't be read as either a deposit or a settled
-     * bill — so either one missing clears the block to "nothing collected".
-     * Negatives and zero clear it too; money out of the shop is a Cash Book
-     * entry, not a booking payment.
-     *
-     * paymentPaidAt is refreshed only when the type or amount actually changes.
-     * An unrelated edit (a re-estimate, an IMEI correction) must not re-date a
-     * receipt for cash that was taken days earlier.
-     */
-    private void applyPayment(Ticket ticket, String rawType, BigDecimal rawAmount) {
-        String type = normalizePaymentType(rawType);
-        BigDecimal amount = (rawAmount == null || rawAmount.signum() <= 0) ? null : rawAmount;
-
-        if (type == null || amount == null) {
-            ticket.setPaymentType(null);
-            ticket.setPaymentAmount(null);
-            ticket.setPaymentPaidAt(null);
-            ticket.setPaymentStatus("PENDING");
-            recomputeBalance(ticket);
-            return;
-        }
-
-        BigDecimal total = applicableTotal(ticket);
-        if (amount.compareTo(total) > 0) {
-            // 400 via GlobalExceptionHandler. Refused rather than clamped: a
-            // client that sent more than the bill has a number the shop and the
-            // customer do not agree on, and silently keeping the smaller one
-            // would hide that from both.
-            throw new IllegalArgumentException(
-                    "paymentAmount " + amount.toPlainString()
-                            + " is more than the amount due " + total.toPlainString());
-        }
-
-        boolean changed = !type.equals(ticket.getPaymentType())
-                || ticket.getPaymentAmount() == null
-                || ticket.getPaymentAmount().compareTo(amount) != 0;
-
-        ticket.setPaymentType(type);
-        ticket.setPaymentAmount(amount);
-        ticket.setPaymentStatus("PAID");
-        if (changed || ticket.getPaymentPaidAt() == null) {
-            ticket.setPaymentPaidAt(Instant.now());
-        }
-        recomputeBalance(ticket);
-    }
-
-    /**
-     * Balance = applicable total − collected, floored at zero. Runs on every
-     * path that can move either side of that subtraction, so a re-estimate can
-     * never leave the stored balance quoting the old price.
-     */
-    private void recomputeBalance(Ticket ticket) {
-        BigDecimal total = applicableTotal(ticket);
-        BigDecimal paid = ticket.getPaymentAmount() == null ? BigDecimal.ZERO : ticket.getPaymentAmount();
-        BigDecimal balance = total.subtract(paid);
-        ticket.setBalanceAmount(balance.signum() < 0 ? BigDecimal.ZERO : balance);
-        if (ticket.getPaymentStatus() == null) {
-            ticket.setPaymentStatus(ticket.getPaymentAmount() == null ? "PENDING" : "PAID");
-        }
-    }
-
-    private static BigDecimal parseAmountOrNull(Object raw) {
-        if (raw == null) return null;
-        if (raw instanceof BigDecimal b) return b;
-        if (raw instanceof Number n) return new BigDecimal(n.toString());
-        String s = String.valueOf(raw).trim();
-        if (s.isEmpty()) return null;
-        try { return new BigDecimal(s); } catch (NumberFormatException e) { return null; }
     }
 
     /**
@@ -763,50 +555,6 @@ public class TicketService {
         return !trimmed.isEmpty() && !trimmed.equals("[]") && trimmed.contains("http");
     }
 
-    // DB-stored event codes, not the labels — see serviceHistoryPhases.js
-    // SHOP_BOOKING_STATUS_OPTIONS.
-    private static final String KEY_ISSUE_VERIFIED = "TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED";
-    private static final String KEY_RE_ESTIMATED = "RE_ESTIMATED_CONFIRMED";
-
-    // Notes read on the Service History rail under each step's label. The
-    // renderer hides a note identical to the label, so these deliberately say
-    // what happened rather than repeating the row title.
-    static final String NOTE_RE_ESTIMATED = "Re-estimated service submitted";
-    static final String NOTE_APPROVED_RE_ESTIMATE = "Customer approved the re-estimated service";
-    static final String NOTE_APPROVED = "Customer approved the estimate";
-
-    /**
-     * The customer's verdict landed — from the customer app's Approve tap or
-     * from the shop ticking "Customer Repair Approval" on their behalf.
-     *
-     * Writes CUSTOMER_APPROVED and nothing else. "Repair Work In Progress" is
-     * NOT opened here: an approval means the customer agreed to the price, not
-     * that a technician has picked the device back up. That row belongs to the
-     * technician's own checklist tap (emitProgressStepEvent), which stamps the
-     * minute work actually resumed. Nothing on this rail is auto-derived any
-     * more — every step waits for the action it describes.
-     *
-     * emitOrUpdate, not the insert-only emit: a re-estimate clears the prior
-     * approval and re-prompts, so the customer approves a SECOND time. Dedupe by
-     * status key would keep the first approval's createdAt and leave the rail
-     * showing "Service Re-estimated" later than the approval that followed it.
-     */
-    private void onCustomerApproved(Ticket ticket, String actor) {
-        boolean afterReEstimate = hasBookingEvent(ticket.getId(), KEY_RE_ESTIMATED);
-        emitOrUpdateBookingEvent(ticket.getId(), "CUSTOMER_APPROVED",
-                afterReEstimate ? NOTE_APPROVED_RE_ESTIMATE : NOTE_APPROVED,
-                actor, null, null, java.time.Instant.now());
-    }
-
-    private boolean hasBookingEvent(UUID ticketId, String statusKey) {
-        return platformRepairBookingRepository.findByTicketId(ticketId)
-                .map(booking -> platformRepairBookingEventRepository
-                        .findByBookingIdOrderByCreatedAtAsc(booking.getId())
-                        .stream()
-                        .anyMatch(e -> statusKey.equalsIgnoreCase(e.getStatus())))
-                .orElse(false);
-    }
-
     // Idempotent event emit for the customer/owner Service History rail. Looks
     // up the booking mirrored against the ticket; skips if an event with the
     // same status key already exists so re-saves don't double-emit.
@@ -823,66 +571,39 @@ public class TicketService {
                     .note(note)
                     .actor(actor)
                     .build());
-            // Ping the customer's AND the shop owner's Notifications screens for
-            // the same status, so each sees one entry per real-life update
-            // (technician uploaded images, issue verified, repair completed,
-            // etc.). The mirror keeps a separate template map per audience and
-            // silently drops low-signal statuses, walk-ins (no customer_user_id)
-            // and bookings no shop has taken on yet. Called as two separate
-            // proxied invocations so each keeps its own REQUIRES_NEW — one feed
-            // failing must not roll back the other or this event save.
+            // Ping the customer's Notifications screen for the same status,
+            // so they see one entry per real-life update (technician
+            // uploaded images, issue verified, repair completed, etc.).
+            // The mirror's template map silently drops low-signal statuses
+            // and walk-in (no customer_user_id) cases.
             customerOrderMirrorService.emitCustomerNotificationForStatus(booking.getId(), statusKey);
-            customerOrderMirrorService.emitShopNotificationForStatus(booking.getId(), statusKey);
         });
     }
 
     /** Manual emit endpoint for service-progress checklist rows on the
-     *  technician's Ticket Detail screen — Repair Work In Progress, Spare
-     *  Parts Waiting, Quality Check Completed, Repair Completed.
-     *  Idempotent: re-submitting refreshes the existing row's note +
-     *  timestamp instead of inserting a duplicate.
-     *
-     *  Two step pairs were each collapsed to a single status, and their
-     *  retired halves must stay OUT of this set — an old installed build
-     *  still posting one has to be rejected, not silently written back into
-     *  a table the migration just cleaned:
-     *    * PARTS_REQUIRED ("Spare Parts Waiting") replaced PARTS_REQUIRED +
-     *      PARTS_REPLACED (migration 87).
-     *    * QUALITY_CHECK_COMPLETED replaced QUALITY_CHECK_STARTED +
-     *      QUALITY_CHECK_COMPLETED (migration 88). There is no "pending"
-     *      half any more: the completion event IS the record, and its
-     *      createdAt — stamped server-side in emitOrUpdateBookingEvent — is
-     *      the moment the technician marked the check done. */
+     *  technician's Ticket Detail screen — Repair Work In Progress, Parts
+     *  Required, Parts Replaced, Quality Check Started/Completed, Repair
+     *  Completed. Idempotent: re-submitting refreshes the existing row's
+     *  note + timestamp instead of inserting a duplicate. */
     private static final java.util.Set<String> ALLOWED_PROGRESS_STEP_KEYS = java.util.Set.of(
-            "IN_REPAIR", "PARTS_REQUIRED",
-            "QUALITY_CHECK_COMPLETED", "REPAIR_COMPLETED",
+            "IN_REPAIR", "PARTS_REQUIRED", "PARTS_REPLACED",
+            "QUALITY_CHECK_STARTED", "QUALITY_CHECK_COMPLETED", "REPAIR_COMPLETED",
             // READY -> billing/handover sub-flow -> DELIVERED. Each substep is
             // its own emit so the customer history rail surfaces the invoice and
             // handover states distinctly instead of skipping straight to
             // "Delivered to Customer".
             "READY", "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING",
             "DELIVERED", "CANCELLED",
-            // Return-Device flow. RETURN_DELIVERY is the "device not repaired,
-            // returning as-is" counterpart to READY. CUSTOMER_REJECTED is the
-            // other way onto that branch — the customer turned the estimate
-            // down — and is emitted by the shop's Update Service Status sheet;
-            // order-service raises the same key from the customer's own reject
-            // tap, so both routes land on one row.
-            "RETURN_DELIVERY", "CUSTOMER_REJECTED",
+            // RETURN_DELIVERY is the "device not repaired, returning as-is"
+            // counterpart to READY. Added so the technician can mark a job
+            // returned without going through the full Repair Completed path.
+            "RETURN_DELIVERY",
             // REPAIR_NOT_COMPLETED is the technician's "tried but couldn't fix"
             // signal — surfaced on the customer / shop history rail with the
             // canonical "Your repair is not completed" note. Does NOT advance
             // ticket.status; the row is for visibility only.
             "REPAIR_NOT_COMPLETED");
 
-    // Who may be recorded as having performed a step. The endpoint is shop-scoped
-    // rather than role-gated, so an owner token and an employee token can both
-    // post here — QUALITY_CHECK_COMPLETED is deliberately raisable from either
-    // side (the technician's checklist or the owner's Service History screen),
-    // and the actor is what tells the two apps apart afterwards:
-    //   TECHNICIAN — the employee app's checklist (the default when unset)
-    //   OWNER      — a person tapping in the shop app
-    //   SHOP       — auto/derived emits, which the employee checklist ignores
     private static final java.util.Set<String> ALLOWED_PROGRESS_ACTORS = java.util.Set.of(
             "TECHNICIAN", "OWNER", "SHOP");
 
@@ -894,29 +615,12 @@ public class TicketService {
         if (!ALLOWED_PROGRESS_STEP_KEYS.contains(key)) {
             throw new IllegalArgumentException("Status key not allowed: " + key);
         }
-        // A delivered or cancelled booking is closed: the device is with the
-        // customer (or the job was called off) and there is no further status to
-        // record. The owner app already hides the picker at that point, but the
-        // refusal belongs here — an employee-app checklist tap, a stale screen or
-        // a retried request must not reopen a closed booking's flow.
-        //
-        // Re-posting a step the booking ALREADY carries stays allowed: that is a
-        // refresh of an existing row (a corrected invoice re-emitting
-        // INVOICE_GENERATED, a double Submit), not a new status.
-        String lifecycle = t.getStatus() == null ? "" : t.getStatus().trim().toUpperCase();
-        if (("DELIVERED".equals(lifecycle) || "CANCELLED".equals(lifecycle))
-                && !hasBookingEvent(t.getId(), key)) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "DELIVERED".equals(lifecycle)
-                            ? "This booking is closed — the device is with the customer."
-                            : "This booking is closed — the repair was cancelled.");
-        }
         String text = note != null && !note.isBlank() ? note.trim() : defaultProgressLabel(key);
         String a = actor == null ? "" : actor.trim().toUpperCase();
         if (!ALLOWED_PROGRESS_ACTORS.contains(a)) a = "TECHNICIAN";
         emitOrUpdateBookingEvent(t.getId(), key, text, a);
         // The BookingsHistory list reads ticket.status directly, so a work-status
-        // event alone (Spare Parts Waiting, Repair Completed, Delivered to Customer,
+        // event alone (Parts Required, Repair Completed, Delivered to Customer,
         // ...) used to leave the badge stuck on the previous lifecycle status.
         // Resolve the admin-managed master row for this code and advance
         // ticket.status to its `ticket_status` mapping so the list badge moves
@@ -969,59 +673,21 @@ public class TicketService {
         customerOrderMirrorService.mirrorOnUpsert(t);
     }
 
-    /**
-     * Move a re-estimated ticket to QUOTED.
-     *
-     * Deliberately NOT routed through advanceTicketStatusForWorkCode: that one
-     * is forward-only and consults the admin-managed master work-status table,
-     * neither of which fits here. A re-estimate is a re-quote — the price the
-     * customer agreed to no longer holds, which is why update() already clears
-     * customerApproval and re-emits WAITING_FOR_CUSTOMER_APPROVAL on a re-edit
-     * after approval. So APPROVED / IN_REPAIR are walked BACK to QUOTED rather
-     * than left alone; otherwise the very bookings most in need of re-approval
-     * would be the ones missing from the owner's Re-Estimated list.
-     *
-     * READY and beyond are left untouched: past that point the repair is done
-     * and a price change is a billing adjustment, not a re-quote. Demoting
-     * would unwind the invoice / handover chain that LIFECYCLE_ORDER gates.
-     */
-    private void markReEstimated(Ticket t) {
-        String current = t.getStatus() == null ? "CREATED" : t.getStatus().trim().toUpperCase();
-        if (current.isBlank()) current = "CREATED";
-        if ("QUOTED".equals(current)) return;
-        // Terminal — a cancelled or returned job is not back in the queue.
-        if ("CANCELLED".equals(current) || "RETURNED".equals(current)) return;
-        int currentIdx = LIFECYCLE_ORDER.indexOf(current);
-        int repairIdx = LIFECYCLE_ORDER.indexOf("IN_REPAIR");
-        // Unknown status → leave it be rather than guess where it sits.
-        if (currentIdx < 0 || currentIdx > repairIdx) return;
-        t.setStatus("QUOTED");
-        ticketRepository.save(t);
-        // Re-mirror: update() already mirrored above with the pre-re-estimate
-        // status, so repair_bookings.status would otherwise stay behind.
-        customerOrderMirrorService.mirrorOnUpsert(t);
-    }
-
-    // Note text written when the caller sends none. These deliberately MATCH the
-    // rail's row labels: the timeline hides a note identical to its label, so a
-    // matching string renders as a clean row instead of repeating itself
-    // underneath. Only REPAIR_NOT_COMPLETED differs on purpose — it carries the
-    // sentence the customer should read.
     private static String defaultProgressLabel(String key) {
         switch (key) {
             case "IN_REPAIR":              return "Repair Work In Progress";
             case "PARTS_REQUIRED":         return "Spare Parts Waiting";
+            case "PARTS_REPLACED":         return "Parts Replaced";
+            case "QUALITY_CHECK_STARTED":  return "Quality Check Started";
             case "QUALITY_CHECK_COMPLETED":return "Quality Check Completed";
             case "REPAIR_COMPLETED":       return "Repair Completed";
             case "REPAIR_NOT_COMPLETED":   return "Your repair is not completed";
-            case "CUSTOMER_REJECTED":      return "Customer Rejected";
-            case "RETURN_DELIVERY":        return "Return Delivery";
             case "INVOICE_GENERATED":      return "Invoice Generated";
             case "INVOICE_READY":          return "Invoice Ready";
-            case "DELIVERED_PROCESSING":   return "Out for Delivery";
+            case "DELIVERED_PROCESSING":   return "Delivered to Customer Processing";
             case "READY":                  return "Ready for Delivery";
             case "DELIVERED":              return "Delivered to Customer";
-            case "CANCELLED":              return "Repair Cancelled";
+            case "CANCELLED":              return "Work Cancelled";
             default:                       return key;
         }
     }
@@ -1036,17 +702,6 @@ public class TicketService {
 
     private void emitOrUpdateBookingEvent(UUID ticketId, String statusKey, String note, String actor,
                                           String audioUrl, String imagesJson) {
-        emitOrUpdateBookingEvent(ticketId, statusKey, note, actor, audioUrl, imagesJson, null);
-    }
-
-    // `at` pins the event's timestamp instead of stamping now(). Callers pass it
-    // when a step has to land on an instant that is already decided — the only
-    // case today is the compliance-note submit, which hands the same instant to
-    // the paired "Repair Work In Progress" row. Still a server clock value: the
-    // caller reads it from Instant.now(), never from the request.
-    private void emitOrUpdateBookingEvent(UUID ticketId, String statusKey, String note, String actor,
-                                          String audioUrl, String imagesJson, java.time.Instant at) {
-        java.time.Instant stamp = at != null ? at : java.time.Instant.now();
         platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
             var existing = platformRepairBookingEventRepository
                     .findByBookingIdOrderByCreatedAtAsc(booking.getId())
@@ -1066,7 +721,7 @@ public class TicketService {
                 // reflects this as the most recent action — required because
                 // the dedup keyed by status would otherwise keep the original
                 // (now stale) createdAt.
-                e.setCreatedAt(stamp);
+                e.setCreatedAt(java.time.Instant.now());
                 platformRepairBookingEventRepository.save(e);
             } else {
                 platformRepairBookingEventRepository.save(PlatformRepairBookingEvent.builder()
@@ -1076,51 +731,23 @@ public class TicketService {
                         .actor(actor)
                         .audioUrl(audioUrl)
                         .imagesJson(imagesJson)
-                        // Set here rather than left to @PrePersist so an insert
-                        // and an update of the same step are stamped alike.
-                        .createdAt(stamp)
                         .build());
-                // First-time emit of this status → ping the customer's and the
-                // shop's Notifications screens. Update branch above
-                // intentionally skips this so re-emits (e.g., the technician
-                // editing a verified note) don't spam the same alert twice.
-                // The actor goes to the shop feed so a step the OWNER just
-                // performed in their own app doesn't notify them about it.
+                // First-time emit of this status → ping the customer's
+                // Notifications screen. Update branch above intentionally
+                // skips this so re-emits (e.g., the technician editing a
+                // verified note) don't spam the same alert twice.
                 customerOrderMirrorService.emitCustomerNotificationForStatus(booking.getId(), statusKey);
-                customerOrderMirrorService.emitShopNotificationForStatus(booking.getId(), statusKey, actor);
             }
         });
     }
 
-    /**
-     * A status the Service History rail draws a row for under its own name.
-     *
-     * These are the codes SHOP_BOOKING_STATUS_OPTIONS renders directly, so
-     * writing one to ticket.status without emitting the matching event leaves
-     * the badge and the rail telling different stories — the card reads
-     * "Invoice Generated" while the newest lit step is still "Ready for
-     * Delivery". CREATED / IN_DIAGNOSIS / APPROVED are absent on purpose: they
-     * have no row of their own, and the switch below already derives the steps
-     * they do imply.
-     */
-    private static final java.util.Set<String> SELF_NAMED_TIMELINE_STATUSES = java.util.Set.of(
-            "READY", "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING",
-            "DELIVERED", "CANCELLED");
-
-    // Emit the step events implied by a ticket status:
+    // Emit the In-Service-Process step events implied by a ticket status:
     //   IN_REPAIR    → TECH_WORK_STARTED   ("Technician Work Started")
     //   QUOTED       → WAITING_APPROVAL    ("Waiting for Customer Approval")
     //   APPROVED     → also TECH_WORK_STARTED — when the customer approves the
     //                 quote, work resumes; this ensures the timeline reflects it
     //                 even if updateStatus was skipped server-side.
     // Step keys match serviceHistoryPhases.js (repair-shop-mobile).
-    //
-    // Anything in SELF_NAMED_TIMELINE_STATUSES additionally emits itself. The
-    // handover tail used to fall through to `default: break`, so a status set
-    // through PUT /tickets/{id}/status — the Update Service Status sheet's path
-    // — moved the badge and left the rail behind. emitBookingEvent is idempotent
-    // per (booking, statusKey), so a status that also arrives through
-    // /progress-events writes one row, not two, whichever lands first.
     private void emitStepEventsForTicketStatus(UUID ticketId, String status) {
         if (status == null) return;
         String s = status.trim().toUpperCase();
@@ -1135,14 +762,9 @@ public class TicketService {
                         "Waiting for Customer Approval", "TECHNICIAN");
                 break;
             default:
+                // No step event for CREATED / IN_DIAGNOSIS / READY / DELIVERED /
+                // CANCELLED — those map to phase-level transitions instead.
                 break;
-        }
-        if (SELF_NAMED_TIMELINE_STATUSES.contains(s)) {
-            // SHOP, not TECHNICIAN: this path is only reached from the owner's
-            // status sheet. defaultProgressLabel is the same wording
-            // /progress-events would have written, so the row reads identically
-            // whichever door the status came through.
-            emitBookingEvent(ticketId, s, defaultProgressLabel(s), "SHOP");
         }
     }
 
@@ -1166,31 +788,6 @@ public class TicketService {
     }
 
     private TicketResponse toResponse(Ticket t) {
-        return toResponse(t, invoiceRepository.findByTicketId(t.getId()).orElse(null));
-    }
-
-    /**
-     * Map a whole page, looking the invoices up in ONE query instead of one per
-     * row. The bookings list asks for 500 tickets at a time — a per-row lookup
-     * there is 500 round trips for a field that decides whether a card shows its
-     * Invoice action.
-     */
-    private Page<TicketResponse> toResponsePage(Page<Ticket> page) {
-        Map<UUID, Invoice> byTicket = invoicesByTicketId(page.getContent());
-        return page.map(t -> toResponse(t, byTicket.get(t.getId())));
-    }
-
-    private Map<UUID, Invoice> invoicesByTicketId(List<Ticket> tickets) {
-        List<UUID> ids = tickets.stream().map(Ticket::getId).filter(java.util.Objects::nonNull).toList();
-        if (ids.isEmpty()) return Collections.emptyMap();
-        Map<UUID, Invoice> out = new HashMap<>();
-        for (Invoice inv : invoiceRepository.findByTicketIdIn(ids)) {
-            out.put(inv.getTicketId(), inv);
-        }
-        return out;
-    }
-
-    private TicketResponse toResponse(Ticket t, Invoice invoice) {
         // Resolve the few "booking-side" fields once — these all share the
         // same fallback shape (use the ticket column if present, otherwise
         // pull from the linked repair_booking). Doing the lookup once means
@@ -1224,24 +821,9 @@ public class TicketService {
                 .ramOptionId(t.getRamOptionId())
                 .storageOptionId(t.getStorageOptionId())
                 .color(t.getColor())
-                .imei(fallback.imei)
                 .status(t.getStatus())
                 .estimatedPrice(t.getEstimatedPrice())
                 .finalPrice(t.getFinalPrice())
-                .paymentType(t.getPaymentType())
-                .paymentAmount(t.getPaymentAmount())
-                // Derived rather than read straight through, so a ticket last
-                // written before migration 85 still answers "what is owed"
-                // instead of rendering a blank line in Price Summary.
-                .balanceAmount(t.getBalanceAmount() != null
-                        ? t.getBalanceAmount()
-                        : applicableTotal(t).subtract(
-                                t.getPaymentAmount() == null ? BigDecimal.ZERO : t.getPaymentAmount())
-                                .max(BigDecimal.ZERO))
-                .paymentStatus(t.getPaymentStatus() != null
-                        ? t.getPaymentStatus()
-                        : (t.getPaymentAmount() != null ? "PAID" : "PENDING"))
-                .paymentPaidAt(t.getPaymentPaidAt())
                 .issueDescription(t.getIssueDescription())
                 .issueAudioUrl(t.getIssueAudioUrl())
                 .createdAt(t.getCreatedAt())
@@ -1258,9 +840,6 @@ public class TicketService {
                 .customerApproval(fallback.customerApproval)
                 .estimatedReadyAt(fallback.estimatedReadyAt)
                 .estimatedDeliveryAt(fallback.estimatedDeliveryAt)
-                .invoiceId(invoice != null ? invoice.getId() : null)
-                .invoiceNo(invoice != null ? invoice.getInvoiceNo() : null)
-                .invoiceGeneratedAt(invoice != null ? invoice.getGeneratedAt() : null)
                 .complianceNote(complianceNote != null ? complianceNote.getNote() : null)
                 .complianceAudioUrl(complianceNote != null ? complianceNote.getAudioUrl() : null)
                 .complianceImageUrls(complianceImages)
@@ -1284,7 +863,6 @@ public class TicketService {
         String devicePhotosJson;
         String missingPartsJson;
         String deviceSecurityValue;
-        String imei;
         Boolean customerApproval;
         Instant estimatedReadyAt;
         Instant estimatedDeliveryAt;
@@ -1298,7 +876,6 @@ public class TicketService {
         f.devicePhotosJson = t.getDevicePhotosJson();
         f.missingPartsJson = t.getMissingPartsJson();
         f.deviceSecurityValue = t.getDeviceSecurityValue();
-        f.imei = t.getImei();
         f.customerApproval = t.getCustomerApproval();
         f.estimatedReadyAt = t.getEstimatedReadyAt();
         f.estimatedDeliveryAt = t.getEstimatedDeliveryAt();
@@ -1309,9 +886,6 @@ public class TicketService {
             }
             if (isBlankStr(f.customerPhone) && b.getCustomerMobile() != null && !b.getCustomerMobile().isBlank()) {
                 f.customerPhone = b.getCustomerMobile();
-            }
-            if (isBlankStr(f.imei) && b.getImei() != null && !b.getImei().isBlank()) {
-                f.imei = b.getImei();
             }
             if (isBlankStr(f.customerAddress) && b.getPickupAddressId() != null) {
                 platformCustomerAddressRepository.findById(b.getPickupAddressId()).ifPresent(addr -> {
@@ -1393,7 +967,6 @@ public class TicketService {
                 || isBlankJson(f.devicePhotosJson)
                 || isBlankJson(f.missingPartsJson)
                 || isBlankStr(f.deviceSecurityValue)
-                || isBlankStr(f.imei)
                 || f.customerApproval == null
                 || f.estimatedReadyAt == null
                 || f.estimatedDeliveryAt == null;
@@ -1425,91 +998,6 @@ public class TicketService {
     // booking lookup, so the booking detail screens render the same data
     // whether the ticket was minted before or after mintTicketFromBooking
     // learned to copy these snapshot fields at mint time.
-
-    // ---------- IMEI uniqueness -------------------------------------------
-
-    // A booking past these no longer holds the device, so the same handset can
-    // legitimately come back for another repair and reuse its IMEI. Anything
-    // else counts as still open and blocks a second booking from claiming it.
-    private static final java.util.Set<String> IMEI_RELEASED_STATUSES =
-            java.util.Set.of("DELIVERED", "CANCELLED", "RETURNED");
-
-    /**
-     * Digits only, 14–17 long (15 is the IMEI proper; 14 is the TAC+serial
-     * without the check digit, 16/17 cover IMEISV). Mirrors normaliseImei in
-     * the shop app so the two ends agree on what a valid number looks like.
-     * Returns null for blank input; throws for a non-blank value that isn't a
-     * plausible IMEI.
-     */
-    private static String normalizeImei(String raw) {
-        if (raw == null) return null;
-        String digits = raw.replaceAll("[^0-9]", "");
-        if (digits.isEmpty()) return null;
-        if (digits.length() < 14 || digits.length() > 17) {
-            throw new IllegalArgumentException(
-                    "IMEI must be 14 to 17 digits — got " + digits.length());
-        }
-        return digits;
-    }
-
-    /**
-     * Refuse an IMEI that another still-open booking in this shop already
-     * holds. The frontend asks first so it can show a proper alert, but this is
-     * the check that counts: two staff members can be on the same device at
-     * once, and only the write path is ordered.
-     */
-    private void assertImeiAvailable(UUID shopId, UUID ticketId, String imei) {
-        findImeiConflict(shopId, ticketId, imei).ifPresent(other -> {
-            throw new ImeiConflictException(
-                    "IMEI " + imei + " is already on booking "
-                            + (other.getTrackingId() != null ? other.getTrackingId() : other.getId())
-                            + ", which is still open.",
-                    other.getTrackingId());
-        });
-    }
-
-    private java.util.Optional<Ticket> findImeiConflict(UUID shopId, UUID ticketId, String imei) {
-        return ticketRepository.findByShopIdAndImei(shopId, imei).stream()
-                .filter(t -> ticketId == null || !ticketId.equals(t.getId()))
-                .filter(t -> !IMEI_RELEASED_STATUSES.contains(
-                        t.getStatus() == null ? "" : t.getStatus().trim().toUpperCase()))
-                .findFirst();
-    }
-
-    /**
-     * Read-only counterpart of {@link #assertImeiAvailable}, for the shop app's
-     * pre-flight check. Used in BOTH branches of the invoice gate: on a booking
-     * that already carries an IMEI there is nothing to save, so this is the only
-     * thing standing between a duplicate number and an invoice.
-     */
-    @Transactional(readOnly = true)
-    public ImeiAvailabilityResponse checkImeiAvailability(UUID shopId, UUID ticketId, String rawImei) {
-        Ticket t = ticketRepository.findByShopIdAndId(shopId, ticketId)
-                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
-        // Fall back to what the ticket already carries so the caller can ask
-        // "is my own IMEI still clean?" without repeating it in the query.
-        String candidate = rawImei != null && !rawImei.isBlank() ? rawImei : t.getImei();
-        String imei;
-        try {
-            imei = normalizeImei(candidate);
-        } catch (IllegalArgumentException e) {
-            return ImeiAvailabilityResponse.builder()
-                    .imei(candidate).available(false).valid(false).message(e.getMessage()).build();
-        }
-        if (imei == null) {
-            return ImeiAvailabilityResponse.builder()
-                    .imei(null).available(false).valid(false)
-                    .message("No IMEI on this booking yet.").build();
-        }
-        return findImeiConflict(shopId, t.getId(), imei)
-                .map(other -> ImeiAvailabilityResponse.builder()
-                        .imei(imei).available(false).valid(true)
-                        .conflictTrackingId(other.getTrackingId())
-                        .message("This IMEI number is already associated with another service booking.")
-                        .build())
-                .orElseGet(() -> ImeiAvailabilityResponse.builder()
-                        .imei(imei).available(true).valid(true).build());
-    }
 
     // ---------- Repair notes ----------------------------------------------
 
@@ -1550,102 +1038,12 @@ public class TicketService {
             // Carry the voice-note + image attachments onto the timeline event
             // so the customer / owner Issue Verified row can render the media
             // inline without a separate fetch from repair_notes.
-            // One server clock reading for this submit. Taken here, not in the
-            // request and not in the app, so both rows below are stamped from the
-            // same instant even if the two writes straddle a tick.
-            java.time.Instant verifiedAt = java.time.Instant.now();
             emitOrUpdateBookingEvent(t.getId(),
-                    KEY_ISSUE_VERIFIED,
+                    "TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED",
                     noteText, "TECHNICIAN",
-                    audioUrl, imagesJson, verifiedAt);
-            // Nothing else is emitted here. "Repair Work In Progress" used to be
-            // written alongside this row, carrying the identical timestamp — but
-            // verifying the issue is diagnosis, and the customer has not yet seen
-            // (let alone approved) the re-estimate that follows it. That row is
-            // the technician's to raise, from their checklist, when work starts.
+                    audioUrl, imagesJson);
         }
         return toNoteResponse(saved);
-    }
-
-    /**
-     * Edit a note the technician already submitted (Submitted Notes → Edit).
-     *
-     * Two rules make this behave like a correction rather than a new action:
-     *
-     *  1. repair_notes.created_at is NOT touched — the note still belongs to the
-     *     moment the work was recorded. Only updated_at moves, and the app shows
-     *     it as an "Edited" marker.
-     *  2. When the edited note is the one currently on the customer / owner
-     *     Service History rail, that row is refreshed in place with the new text
-     *     and media but pinned to the row's EXISTING timestamp. Letting
-     *     emitOrUpdateBookingEvent stamp now() would drag "Technician Issue
-     *     Verified & Updated" to the top of the rail — and hand it the NEW badge —
-     *     because someone fixed a typo.
-     *
-     * Editing an OLDER note leaves the rail alone: the row mirrors the latest
-     * customer-visible note, and an old note's text must not overwrite it.
-     * No notification is raised either way — emitOrUpdateBookingEvent only pings
-     * the feeds on a first-time emit.
-     */
-    @Transactional
-    public RepairNoteResponse updateRepairNote(UUID shopId, UUID ticketId, UUID noteId,
-                                               CreateRepairNoteRequest body) {
-        Ticket t = ticketRepository.findByShopIdAndId(shopId, ticketId)
-                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
-        RepairNote note = repairNoteRepository.findByIdAndTicketId(noteId, t.getId())
-                .orElseThrow(() -> new ResourceNotFoundException("Note not found: " + noteId));
-
-        String imagesJson = null;
-        if (body.getImageUrls() != null && !body.getImageUrls().isEmpty()) {
-            try {
-                imagesJson = new com.fasterxml.jackson.databind.ObjectMapper()
-                        .writeValueAsString(body.getImageUrls());
-            } catch (Exception ignored) { /* leave null on malformed input */ }
-        }
-        String audioUrl = body.getAudioUrl();
-        if (audioUrl != null && audioUrl.isBlank()) audioUrl = null;
-
-        // Clearing an attachment is a real edit: an absent/empty imageUrls list
-        // means "the technician removed the photos", so null is written rather
-        // than the previous value being preserved.
-        note.setNote(body.getNote());
-        note.setAudioUrl(audioUrl);
-        note.setImagesJson(imagesJson);
-        if (body.getIsInternal() != null) note.setIsInternal(body.getIsInternal());
-        note.setUpdatedAt(java.time.Instant.now());
-        RepairNote saved = repairNoteRepository.save(note);
-
-        if (!Boolean.TRUE.equals(saved.getIsInternal()) && isLatestVisibleNote(t.getId(), saved)) {
-            String noteText = saved.getNote() != null && !saved.getNote().isBlank()
-                    ? saved.getNote()
-                    : "Technician Issue Verified & Updated";
-            emitOrUpdateBookingEvent(t.getId(), KEY_ISSUE_VERIFIED, noteText, "TECHNICIAN",
-                    saved.getAudioUrl(), saved.getImagesJson(),
-                    existingEventInstant(t.getId(), KEY_ISSUE_VERIFIED, saved.getCreatedAt()));
-        }
-        return toNoteResponse(saved);
-    }
-
-    /** True when no other customer-visible note on this ticket is newer. */
-    private boolean isLatestVisibleNote(UUID ticketId, RepairNote note) {
-        return repairNoteRepository.findByTicketIdOrderByCreatedAtDesc(ticketId).stream()
-                .filter(n -> !Boolean.TRUE.equals(n.getIsInternal()))
-                .findFirst()
-                .map(latest -> latest.getId().equals(note.getId()))
-                .orElse(true);
-    }
-
-    /** Current timestamp of a timeline row, so a refresh can pin it in place. */
-    private java.time.Instant existingEventInstant(UUID ticketId, String statusKey,
-                                                   java.time.Instant fallback) {
-        return platformRepairBookingRepository.findByTicketId(ticketId)
-                .flatMap(b -> platformRepairBookingEventRepository
-                        .findByBookingIdOrderByCreatedAtAsc(b.getId())
-                        .stream()
-                        .filter(e -> statusKey.equalsIgnoreCase(e.getStatus()))
-                        .findFirst()
-                        .map(PlatformRepairBookingEvent::getCreatedAt))
-                .orElse(fallback != null ? fallback : java.time.Instant.now());
     }
 
     @Transactional(readOnly = true)
@@ -1667,7 +1065,6 @@ public class TicketService {
                 .audioUrl(n.getAudioUrl())
                 .imageUrls(parseImagesJson(n.getImagesJson()))
                 .createdAt(n.getCreatedAt())
-                .updatedAt(n.getUpdatedAt())
                 .build();
     }
 

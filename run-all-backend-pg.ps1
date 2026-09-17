@@ -5,7 +5,7 @@
 # uses the `dev` Spring profile, which for most services points at an in-memory
 # or file-based H2 — useful for quick demos, dangerous if you assume Postgres.
 #
-# Requires Maven + Java 25+ on PATH and a running PostgreSQL with database
+# Requires Maven + Java 21+ on PATH and a running PostgreSQL with database
 # `repairshop` and the schema applied (see database/schema/*.sql).
 #
 # Run from the backend root:

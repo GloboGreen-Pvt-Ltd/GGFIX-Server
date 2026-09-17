@@ -11,7 +11,7 @@ import org.springframework.security.web.SecurityFilterChain;
 
 /**
  * This service is still a stub (no controllers yet). Without an explicit chain,
- * Spring Boot's default security puts HTTP Basic in front of everything,
+ * Spring Boot's default security would put HTTP Basic in front of everything,
  * including /actuator/health, which the EC2 deploy health gate probes. Health
  * stays public; anything added later is authenticated by default.
  */

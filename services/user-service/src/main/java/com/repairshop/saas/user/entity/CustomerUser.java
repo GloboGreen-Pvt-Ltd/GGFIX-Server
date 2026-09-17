@@ -2,13 +2,9 @@ package com.repairshop.saas.user.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
 import org.springframework.data.domain.Persistable;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.UUID;
 
 @Entity
@@ -54,17 +50,6 @@ public class CustomerUser implements Persistable<UUID> {
 
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
-
-    /**
-     * The customer's address book, inlined as a jsonb array (replaces the
-     * separate customer_addresses table — see migration 72). Kept as a live
-     * mirror of customer_addresses during Phase A; becomes the source of truth
-     * in Phase B. Each element carries the original address id.
-     */
-    @Builder.Default
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "addresses")
-    private List<AddressEntry> addresses = new ArrayList<>();
 
     @PrePersist
     void prePersist() {

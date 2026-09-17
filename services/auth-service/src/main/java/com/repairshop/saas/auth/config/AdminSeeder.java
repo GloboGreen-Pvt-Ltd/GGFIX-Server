@@ -12,10 +12,6 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Seeds the platform super-admin operator accounts on startup. Super-admins
  * are platform-level (no parent shop) — they have users.shop_id = NULL.
- *
- * These are the ONLY accounts granted admin-panel access (the admin web gates
- * on loginType == SUPER_ADMIN). The legacy barani/barani admin was removed so
- * only the two operators below can reach /admin/*.
  */
 @Component
 @Profile("dev")
@@ -24,12 +20,13 @@ public class AdminSeeder implements CommandLineRunner {
 
     private static final String SUPER_ADMIN_1_EMAIL = "globogreenmobile@gmail.com";
     private static final String SUPER_ADMIN_1_PASSWORD = "Dhar@1254";
-    private static final String SUPER_ADMIN_1_OTP = "5642";
-    private static final String SUPER_ADMIN_1_PHONE = "8012345280";
+    private static final String SUPER_ADMIN_1_OTP = "801234";
     private static final String SUPER_ADMIN_2_EMAIL = "snandhadeveloper592000@gmail.com";
-    private static final String SUPER_ADMIN_2_PASSWORD = "nandha56@";
-    private static final String SUPER_ADMIN_2_OTP = "5914";
-    private static final String SUPER_ADMIN_2_PHONE = "8939615914";
+    private static final String SUPER_ADMIN_2_PASSWORD = "Nandha56@";
+    private static final String SUPER_ADMIN_2_OTP = "592000";
+    private static final String LEGACY_ADMIN_EMAIL = "barani";
+    private static final String LEGACY_ADMIN_PASSWORD = "barani";
+    private static final String LEGACY_ADMIN_OTP = "123456";
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
@@ -37,12 +34,13 @@ public class AdminSeeder implements CommandLineRunner {
     @Override
     @Transactional
     public void run(String... args) {
-        upsertSuperAdmin(SUPER_ADMIN_1_EMAIL, SUPER_ADMIN_1_PASSWORD, SUPER_ADMIN_1_OTP, SUPER_ADMIN_1_PHONE, "Globo Green Mobile");
-        upsertSuperAdmin(SUPER_ADMIN_2_EMAIL, SUPER_ADMIN_2_PASSWORD, SUPER_ADMIN_2_OTP, SUPER_ADMIN_2_PHONE, "Nandha Developer");
+        upsertSuperAdmin(SUPER_ADMIN_1_EMAIL, SUPER_ADMIN_1_PASSWORD, SUPER_ADMIN_1_OTP, "Globo Green Mobile");
+        upsertSuperAdmin(SUPER_ADMIN_2_EMAIL, SUPER_ADMIN_2_PASSWORD, SUPER_ADMIN_2_OTP, "Nandha Developer");
+        upsertSuperAdmin(LEGACY_ADMIN_EMAIL,  LEGACY_ADMIN_PASSWORD,  LEGACY_ADMIN_OTP,  "Barani");
     }
 
     /** Idempotent upsert by email; super-admins are platform-level (shop=null). */
-    private void upsertSuperAdmin(String email, String password, String otp, String phone, String name) {
+    private void upsertSuperAdmin(String email, String password, String otp, String name) {
         userRepository.findByEmail(email).ifPresentOrElse(
                 existing -> {
                     boolean dirty = false;
@@ -53,10 +51,6 @@ public class AdminSeeder implements CommandLineRunner {
                     }
                     if (existing.getOtpCode() == null || !existing.getOtpCode().equals(otp)) {
                         existing.setOtpCode(otp);
-                        dirty = true;
-                    }
-                    if (!java.util.Objects.equals(existing.getPhone(), phone)) {
-                        existing.setPhone(phone);
                         dirty = true;
                     }
                     if (!"SUPER_ADMIN".equals(existing.getRole())) {
@@ -70,7 +64,6 @@ public class AdminSeeder implements CommandLineRunner {
                         .email(email)
                         .passwordHash(passwordEncoder.encode(password))
                         .otpCode(otp)
-                        .phone(phone)
                         .name(name)
                         .role("SUPER_ADMIN")
                         .isActive(true)

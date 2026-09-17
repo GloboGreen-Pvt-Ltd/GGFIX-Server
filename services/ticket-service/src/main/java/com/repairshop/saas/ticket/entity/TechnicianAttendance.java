@@ -44,24 +44,6 @@ public class TechnicianAttendance {
     @Column(name = "notes", length = 500)
     private String notes;
 
-    // GPS proof for the 100m shop geofence — captured at the moment of each
-    // punch (migration 65). Nullable so shops without saved coordinates, and
-    // rows written before this feature, stay valid.
-    @Column(name = "check_in_latitude", precision = 10, scale = 7)
-    private java.math.BigDecimal checkInLatitude;
-
-    @Column(name = "check_in_longitude", precision = 10, scale = 7)
-    private java.math.BigDecimal checkInLongitude;
-
-    @Column(name = "check_in_distance_meters")
-    private Integer checkInDistanceMeters;
-
-    @Column(name = "check_out_latitude", precision = 10, scale = 7)
-    private java.math.BigDecimal checkOutLatitude;
-
-    @Column(name = "check_out_longitude", precision = 10, scale = 7)
-    private java.math.BigDecimal checkOutLongitude;
-
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

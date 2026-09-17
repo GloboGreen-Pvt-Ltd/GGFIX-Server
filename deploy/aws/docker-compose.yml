@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: repairshop-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-repairshop}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - repairshop_pgdata:/var/lib/postgresql/data
+      - /opt/repair-shop-saas/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-repairshop}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  repairshop_pgdata:
+

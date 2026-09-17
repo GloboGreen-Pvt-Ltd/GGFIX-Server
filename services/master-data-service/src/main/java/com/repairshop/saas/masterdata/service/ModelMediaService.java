@@ -6,12 +6,12 @@ import com.repairshop.saas.masterdata.entity.MasterBrand;
 import com.repairshop.saas.masterdata.entity.MasterDeviceCategory;
 import com.repairshop.saas.masterdata.entity.MasterDeviceSeries;
 import com.repairshop.saas.masterdata.entity.MasterModel;
-import com.repairshop.saas.common.media.MediaUploadValidator;
-import com.repairshop.saas.common.media.MediaKeys;
-import com.repairshop.saas.common.media.MediaProperties;
-import com.repairshop.saas.common.media.MediaValidationException;
-import com.repairshop.saas.common.media.S3StorageService;
-import com.repairshop.saas.common.media.Slugify;
+import com.repairshop.saas.masterdata.media.ImageValidator;
+import com.repairshop.saas.masterdata.media.MediaKeys;
+import com.repairshop.saas.masterdata.media.MediaProperties;
+import com.repairshop.saas.masterdata.media.MediaValidationException;
+import com.repairshop.saas.masterdata.media.S3StorageService;
+import com.repairshop.saas.masterdata.media.Slugify;
 import com.repairshop.saas.masterdata.repository.MasterBrandRepository;
 import com.repairshop.saas.masterdata.repository.MasterCategoryBrandMappingRepository;
 import com.repairshop.saas.masterdata.repository.MasterDeviceCategoryRepository;
@@ -63,7 +63,7 @@ public class ModelMediaService {
     private final MasterDeviceCategoryRepository categoryRepo;
     private final MasterDeviceSeriesRepository seriesRepo;
     private final MasterCategoryBrandMappingRepository mappingRepo;
-    private final MediaUploadValidator validator;
+    private final ImageValidator validator;
     private final S3StorageService storage;
     private final MediaProperties props;
     private final TransactionTemplate tx;
@@ -73,7 +73,7 @@ public class ModelMediaService {
                              MasterDeviceCategoryRepository categoryRepo,
                              MasterDeviceSeriesRepository seriesRepo,
                              MasterCategoryBrandMappingRepository mappingRepo,
-                             MediaUploadValidator validator,
+                             ImageValidator validator,
                              S3StorageService storage,
                              MediaProperties props,
                              TransactionTemplate tx) {
@@ -95,7 +95,7 @@ public class ModelMediaService {
     // ------------------------------------------------------------------ create --
 
     public ModelImageResponse createWithImage(ModelCreateForm form, MultipartFile file) {
-        MediaUploadValidator.ValidatedUpload image = validator.validateImage(file);
+        ImageValidator.ValidatedImage image = validator.validate(file);
 
         String modelName = form.getModelName() == null ? "" : form.getModelName().trim();
         if (modelName.isEmpty()) {
@@ -117,7 +117,7 @@ public class ModelMediaService {
 
         // Upload BEFORE the insert: an object with no row is invisible and sweepable,
         // a row with no object is a broken image on every storefront that renders it.
-        String publicUrl = storage.put(imageKey, image.bytes(), image.contentType());
+        storage.put(imageKey, image.bytes(), image.contentType());
 
         MasterModel saved;
         try {
@@ -128,17 +128,11 @@ public class ModelMediaService {
                         .seriesId(taxonomy.series().getId())
                         .name(modelName)
                         .slug(Slugify.requireSlug(modelName, "model name"))
-                        // Inline jsonb arrays (migrations 69/70/73); master_model_variants
-                        // was dropped in 71, so these belong on the same insert.
-                        .modelNumber(nullSafe(form.getModelNumber()))
-                        .colors(nullSafe(form.getColors()))
-                        .ramStorage(nullSafe(form.getRamStorage()))
-                        .sellActive(form.getSellActive() == null ? Boolean.TRUE : form.getSellActive())
-                        // The public media.ggfix.in URL goes into the EXISTING
-                        // image_url column. Dedicated key columns needed a migration
-                        // that was never applied to production and took the catalogue
-                        // down twice; none of that metadata was load-bearing.
-                        .imageUrl(publicUrl)
+                        .mediaFolderKey(folderKey)
+                        .imageKey(imageKey)
+                        .imageOriginalName(image.originalName())
+                        .imageContentType(image.contentType())
+                        .imageSizeBytes(image.size())
                         .build();
                 return modelRepo.save(model);
             });
@@ -150,8 +144,7 @@ public class ModelMediaService {
             throw e;
         }
 
-        // A create has no previous image, so there is never anything to clean up.
-        return toResponse(saved, folderKey, imageKey, image, null, false);
+        return toResponse(saved);
     }
 
     // ----------------------------------------------------------------- replace --
@@ -161,53 +154,46 @@ public class ModelMediaService {
      *
      * The previous object is removed only once the new key is committed, so an
      * interrupted replacement degrades to "still showing the old image" rather than
-     * to a model with no image at all. See {@link #removeSupersededImage} for what
-     * has to hold before anything is deleted.
+     * to a model with no image at all.
      */
     public ModelImageResponse replaceImage(UUID modelId, MultipartFile file) {
-        MediaUploadValidator.ValidatedUpload image = validator.validateImage(file);
+        ImageValidator.ValidatedImage image = validator.validate(file);
 
         MasterModel existing = modelRepo.findById(modelId)
                 .orElseThrow(() -> new MediaValidationException("No model with id " + modelId + "."));
 
         // Legacy rows (Cloudinary-era) have no folder yet; derive it now from the
         // taxonomy they already carry so they migrate on first replacement.
-        // ~4% of live models have no series (measured across 825 rows). The folder
-        // genuinely needs one, so this cannot be papered over — but the generic
-        // "categoryId, brandId and seriesId are all required" reads as a client
-        // mistake, and on this path the client sent none of them. Name the real fix.
-        if (existing.getSeriesId() == null || existing.getCategoryId() == null
-                || existing.getBrandId() == null) {
-            throw new MediaValidationException(
-                    "'" + existing.getName() + "' has no category, brand and series set, so there is "
-                            + "nowhere to file its image. Set them on the model first, then upload.");
+        String folderKey = existing.getMediaFolderKey();
+        if (folderKey == null || folderKey.isBlank()) {
+            Taxonomy taxonomy = resolveAndValidate(
+                    existing.getCategoryId(), existing.getBrandId(), existing.getSeriesId());
+            folderKey = MediaKeys.modelFolder(
+                    taxonomy.category().getName(),
+                    taxonomy.brand().getName(),
+                    taxonomy.series().getName(),
+                    existing.getName());
         }
 
-        // Derived every time rather than read back from a stored column: the folder
-        // is a pure function of the taxonomy, so recomputing it is cheaper than the
-        // schema needed to remember it.
-        Taxonomy taxonomy = resolveAndValidate(
-                existing.getCategoryId(), existing.getBrandId(), existing.getSeriesId());
-        String folderKey = MediaKeys.modelFolder(
-                taxonomy.category().getName(),
-                taxonomy.brand().getName(),
-                taxonomy.series().getName(),
-                existing.getName());
-
+        String previousKey = existing.getImageKey();
         String newKey = MediaKeys.modelImageKey(folderKey, image.extension());
-        String newUrl = storage.put(newKey, image.bytes(), image.contentType());
+        String finalFolderKey = folderKey;
 
-        // Read before the update, because the row is about to stop pointing at it.
-        String previousUrl = existing.getImageUrl();
+        storage.put(newKey, image.bytes(), image.contentType());
 
         MasterModel saved;
         try {
             saved = tx.execute(status -> {
                 MasterModel model = modelRepo.findById(modelId)
                         .orElseThrow(() -> new MediaValidationException("No model with id " + modelId + "."));
-                model.setImageUrl(newUrl);
-                // The inline base64 is a stale multi-megabyte copy; leaving it would
-                // defeat the point of moving the bytes to S3.
+                model.setMediaFolderKey(finalFolderKey);
+                model.setImageKey(newKey);
+                model.setImageOriginalName(image.originalName());
+                model.setImageContentType(image.contentType());
+                model.setImageSizeBytes(image.size());
+                // The Cloudinary URL and any inline base64 are now stale and would
+                // otherwise keep winning in clients that prefer image_url.
+                model.setImageUrl(null);
                 model.setImageBase64(null);
                 return modelRepo.save(model);
             });
@@ -217,46 +203,18 @@ public class ModelMediaService {
             throw e;
         }
 
-        boolean previousRemoved = removeSupersededImage(previousUrl, newKey);
+        // Committed. Only now is the old object unreferenced and safe to remove.
+        if (previousKey != null && !previousKey.isBlank() && !previousKey.equals(newKey)) {
+            if (modelRepo.findByImageKey(previousKey).isEmpty()) {
+                storage.deleteQuietly(previousKey);
+            } else {
+                // Defensive: the unique index should make this impossible, but a
+                // delete is irreversible and sharing would mean breaking another row.
+                log.warn("Kept previous object {} — another model still references it.", previousKey);
+            }
+        }
 
-        return toResponse(saved, folderKey, newKey, image, previousUrl, previousRemoved);
-    }
-
-    /**
-     * Delete the object the replacement superseded, strictly after the commit.
-     *
-     * This used to be left in the bucket, on the grounds that image_key is not stored
-     * so the old key could not be proven. It can: the stored URL is composed from the
-     * key by {@link com.repairshop.saas.common.media.MediaProperties#publicUrl}, so
-     * {@code keyForPublicUrl} inverts it exactly — a data URI or a Cloudinary link
-     * resolves to nothing and is left alone. Two further conditions before anything
-     * is removed, because a wrong delete breaks a live product image:
-     *
-     * <ul>
-     *   <li>the key must have the catalogue shape, so a hand-pasted URL pointing at a
-     *       category tile or a banner cannot take that other record's image with it;</li>
-     *   <li>no other model may still reference it — uploads always mint a unique key,
-     *       but image_url is editable by hand on the admin form, so sharing is possible.</li>
-     * </ul>
-     *
-     * Failure here is swallowed: the replacement has already succeeded, and turning a
-     * saved model into an error response over a leaked object would be the worse
-     * outcome. The result is reported to the admin instead.
-     */
-    private boolean removeSupersededImage(String previousUrl, String newKey) {
-        String previousKey = props.keyForPublicUrl(previousUrl);
-        if (previousKey == null || previousKey.equals(newKey)) {
-            return false;
-        }
-        if (!MediaKeys.isModelImageKey(previousKey)) {
-            log.info("Keeping {} — not a model image key, so it may belong to another record", previousKey);
-            return false;
-        }
-        if (modelRepo.countByImageUrl(previousUrl) > 0) {
-            log.info("Keeping {} — still referenced by another model", previousKey);
-            return false;
-        }
-        return storage.deleteSupersededQuietly(previousUrl, newKey);
+        return toResponse(saved);
     }
 
     // ----------------------------------------------------------------- preview --
@@ -325,34 +283,16 @@ public class ModelMediaService {
         return new Taxonomy(category, brand, series);
     }
 
-    /**
-     * Multipart binding leaves an omitted repeated field null rather than empty, and
-     * the jsonb columns are declared NOT NULL with a [] default — so a null here
-     * would fail the insert rather than mean "no colours".
-     */
-    private static java.util.List<String> nullSafe(java.util.List<String> values) {
-        return values == null ? new java.util.ArrayList<>() : values;
-    }
-
-    /**
-     * The folder and key are recomputed for the response rather than read from the
-     * row: they are not stored, and the caller still wants to see where the object
-     * landed. imageUrl is the persisted value and the one clients actually read.
-     */
-    private ModelImageResponse toResponse(MasterModel model, String folderKey, String imageKey,
-                                          MediaUploadValidator.ValidatedUpload upload,
-                                          String previousUrl, boolean previousRemoved) {
+    private ModelImageResponse toResponse(MasterModel model) {
         return new ModelImageResponse(
                 model.getId(),
                 model.getName(),
                 model.getSlug(),
-                folderKey,
-                imageKey,
-                model.getImageUrl(),
-                upload.originalName(),
-                upload.contentType(),
-                upload.size(),
-                previousUrl,
-                previousRemoved);
+                model.getMediaFolderKey(),
+                model.getImageKey(),
+                props.publicUrl(model.getImageKey()),
+                model.getImageOriginalName(),
+                model.getImageContentType(),
+                model.getImageSizeBytes());
     }
 }

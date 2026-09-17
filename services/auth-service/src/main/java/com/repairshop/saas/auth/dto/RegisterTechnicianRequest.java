@@ -1,6 +1,7 @@
 package com.repairshop.saas.auth.dto;
 
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.NotBlank;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -10,21 +11,16 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-@Schema(description = "Provision an employee login. At least one of email or phone is required — "
-        + "employees are usually keyed by mobile, in which case login is mobile + OTP.")
+@Schema(description = "Add a technician to a shop")
 public class RegisterTechnicianRequest {
 
-    @Schema(description = "Employee email (optional login identifier)", example = "tech@shop.com")
+    @NotBlank(message = "Email is required")
+    @Schema(description = "Technician email (used as login)", example = "tech@shop.com", required = true)
     private String email;
 
-    @Schema(description = "Password (optional — omit for OTP-only login)")
+    @NotBlank(message = "Password is required")
+    @Schema(description = "Password", required = true)
     private String password;
-
-    @Schema(description = "Employee mobile number — primary login identifier for staff", example = "7603856616")
-    private String phone;
-
-    @Schema(description = "Login OTP (optional — defaults to 123456 when omitted)", example = "123456")
-    private String otp;
 
     @Schema(description = "Display name")
     private String name;

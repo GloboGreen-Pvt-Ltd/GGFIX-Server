@@ -12,11 +12,4 @@ import org.springframework.stereotype.Repository;
 public interface MasterBannerRepository extends JpaRepository<MasterBanner, UUID> {
 
     List<MasterBanner> findAllByOrderBySortOrderAsc();
-
-    /**
-     * Rows still using one image URL — the guard before deleting a superseded banner
-     * image. Banners share artwork more readily than the other tables: a slide gets
-     * duplicated to reorder it, and both copies then hold the same URL.
-     */
-    long countByImageUrl(String imageUrl);
 }

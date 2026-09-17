@@ -8,15 +8,15 @@ import lombok.NoArgsConstructor;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
-@Schema(description = "Optional notes + GPS coordinates for the shop geofence gate")
+@Schema(description = "Optional notes and location for check-in/check-out")
 public class AttendanceCheckRequest {
 
     @Schema(description = "Optional notes")
     private String notes;
 
-    @Schema(description = "Employee's current latitude (required when the shop has coordinates configured)")
+    @Schema(description = "Optional latitude")
     private Double latitude;
 
-    @Schema(description = "Employee's current longitude (required when the shop has coordinates configured)")
+    @Schema(description = "Optional longitude")
     private Double longitude;
 }

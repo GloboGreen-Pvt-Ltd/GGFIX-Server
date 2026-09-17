@@ -19,20 +19,16 @@ spring:
   servlet:
     multipart:
       enabled: true
-      max-file-size: 10MB
-      max-request-size: 12MB
+      # Matches the default profile: sized for a 30s device coverage video.
+      max-file-size: ${MULTIPART_MAX_FILE_SIZE:50MB}
+      max-request-size: ${MULTIPART_MAX_REQUEST_SIZE:52MB}
 
 server:
   port: ${PORT:8091}
 
-# Set CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET
-# in the environment to enable hosted uploads. When blank, media upload falls
-# back to inline base64 data URIs for local development.
-app:
-  cloudinary:
-    cloud-name: ${CLOUDINARY_CLOUD_NAME:}
-    api-key: ${CLOUDINARY_API_KEY:}
-    api-secret: ${CLOUDINARY_API_SECRET:}
-    # Base folder. Admin pages append a subfolder like "categories", "brands",
-    # "models" so uploads land in ggifx/categories etc.
-    folder: ${CLOUDINARY_FOLDER:ggfix/master}
+# Uploads go to S3 behind media.ggfix.in — there is no local fallback any more
+# (the base64 one wrote multi-MB data URIs into URL columns). To upload from a dev
+# machine, set MEDIA_S3_BUCKET and have credentials the SDK's default chain can
+# find: AWS_PROFILE, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or ~/.aws/credentials.
+# Without them every upload returns 502 and GET /media/ping reports "s3":"disabled";
+# the rest of master-data works unaffected.

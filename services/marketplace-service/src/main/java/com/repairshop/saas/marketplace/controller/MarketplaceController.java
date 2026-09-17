@@ -62,23 +62,8 @@ public class MarketplaceController {
         if (u != null) {
             try { sellerUserId = UUID.fromString(u.toString()); } catch (IllegalArgumentException ignored) {}
         }
-        // shop_id is NOT NULL (FK to shops). The client may POST a null shopId when
-        // its active-shop state hasn't hydrated yet; a null there fails the DB
-        // constraint with an opaque 500 ("Listing failed"). The JWT's shopId claim
-        // is authoritative for shop-owner / shop-login sessions, so derive it from
-        // the token when the body doesn't carry one — mirrors the sellerUserId
-        // fallback above.
-        UUID shopId = req.getShopId();
-        Object s = httpReq.getAttribute("shopId");
-        if (shopId == null && s != null) {
-            try { shopId = UUID.fromString(s.toString()); } catch (IllegalArgumentException ignored) {}
-        }
-        if (shopId == null) {
-            throw new IllegalArgumentException(
-                    "A shop is required to create a listing. Please re-open the app so your shop loads, then try again.");
-        }
         MarketplaceProduct p = MarketplaceProduct.builder()
-                .shopId(shopId)
+                .shopId(req.getShopId())
                 .sellerUserId(sellerUserId)
                 .brandId(req.getBrandId())
                 .modelId(req.getModelId())

@@ -5,12 +5,9 @@ import com.repairshop.saas.masterdata.entity.*;
 import com.repairshop.saas.masterdata.repository.*;
 
 import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 @RestController
@@ -23,20 +20,17 @@ public class MasterDataController {
     private final MasterStorageOptionRepository storageRepo;
     private final MasterRepairServiceRepository repairServiceRepo;
     private final MasterRepairCategoryRepository repairCategoryRepo;
-    private final JdbcTemplate jdbc;
 
     public MasterDataController(MasterBrandRepository brandRepo, MasterModelRepository modelRepo,
                                  MasterRamOptionRepository ramRepo, MasterStorageOptionRepository storageRepo,
                                  MasterRepairServiceRepository repairServiceRepo,
-                                 MasterRepairCategoryRepository repairCategoryRepo,
-                                 JdbcTemplate jdbc) {
+                                 MasterRepairCategoryRepository repairCategoryRepo) {
         this.brandRepo = brandRepo;
         this.modelRepo = modelRepo;
         this.ramRepo = ramRepo;
         this.storageRepo = storageRepo;
         this.repairServiceRepo = repairServiceRepo;
         this.repairCategoryRepo = repairCategoryRepo;
-        this.jdbc = jdbc;
     }
 
     // ---- Brands ----
@@ -75,72 +69,9 @@ public class MasterDataController {
     }
 
     // ---- Models ----
-
-    /**
-     * Every model, in one request, without the base64 weight.
-     *
-     * The admin previously assembled this list with one call per brand — 55
-     * sequential round-trips — because a full listing had once exhausted the heap.
-     * ModelListItem drops the inline data: URIs that accounted for 82% of the bytes,
-     * so the whole catalogue now fits comfortably in a single response.
-     *
-     * Optional filters keep the existing per-brand and per-series views working off
-     * the same endpoint.
-     */
-    @GetMapping("/models")
-    public ResponseEntity<List<ModelListItem>> listModels(
-            @RequestParam(value = "brandId", required = false) UUID brandId,
-            @RequestParam(value = "seriesId", required = false) UUID seriesId) {
-        List<MasterModel> rows;
-        if (seriesId != null) {
-            rows = modelRepo.findBySeriesIdOrderByName(seriesId);
-        } else if (brandId != null) {
-            rows = modelRepo.findByBrandIdOrderByName(brandId);
-        } else {
-            rows = modelRepo.findAll(org.springframework.data.domain.Sort.by("name"));
-        }
-        return ResponseEntity.ok(rows.stream().map(ModelListItem::from).toList());
-    }
-
     @GetMapping("/brands/{brandId}/models")
     public ResponseEntity<List<MasterModel>> getModelsByBrand(@PathVariable UUID brandId) {
         return ResponseEntity.ok(modelRepo.findByBrandIdOrderByName(brandId));
-    }
-
-    /**
-     * Resolve a device's raw Build.MODEL code (e.g. "RMX3999") — or a plain
-     * model name — to its catalog model via master_models.model_number (jsonb).
-     * Match each stored code by its prefix-before-space/paren, then fall back to
-     * the display name. Used by the customer app Home "Sell This Device" card.
-     */
-    @GetMapping("/models/by-number")
-    public ResponseEntity<Map<String, Object>> getModelByNumber(@RequestParam("number") String number) {
-        if (number == null || number.isBlank()) return ResponseEntity.notFound().build();
-        final String num = number.trim();
-        final String sql =
-                "SELECT id, name, image_url, image_base64 FROM master_models " +
-                "WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(" +
-                "  CASE WHEN jsonb_typeof(model_number) = 'array' THEN model_number ELSE '[]'::jsonb END) e " +
-                "  WHERE lower((regexp_match(trim(e), '^[^ (]+'))[1]) = lower(?)) " +
-                "OR lower(name) = lower(?) LIMIT 1";
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, num, num);
-        if (rows.isEmpty()) return ResponseEntity.notFound().build();
-        Map<String, Object> r = rows.get(0);
-        Map<String, Object> out = new HashMap<>();
-        out.put("id", r.get("id"));
-        out.put("name", r.get("name"));
-        out.put("imageUrl", r.get("image_url"));
-        out.put("imageBase64", r.get("image_base64"));
-        return ResponseEntity.ok(out);
-    }
-
-    /** Single model, incl. its inline colors + ram_storage — used by the mobile
-     * variant pickers to read a model's configured options in one fetch. */
-    @GetMapping("/models/{id}")
-    public ResponseEntity<MasterModel> getModel(@PathVariable UUID id) {
-        return modelRepo.findById(id)
-                .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
     }
 
     @PostMapping("/models")
@@ -150,14 +81,10 @@ public class MasterDataController {
                 .categoryId(req.getCategoryId())
                 .seriesId(req.getSeriesId())
                 .name(req.getName())
-                .modelNumber(req.getModelNumber() != null ? req.getModelNumber() : new java.util.ArrayList<>())
                 .slug(req.getSlug())
                 .imageUrl(req.getImageUrl())
                 .imageBase64(req.getImageBase64())
                 .category(req.getCategory())
-                .sellActive(req.getSellActive() == null ? Boolean.TRUE : req.getSellActive())
-                .colors(req.getColors() != null ? req.getColors() : new java.util.ArrayList<>())
-                .ramStorage(req.getRamStorage() != null ? req.getRamStorage() : new java.util.ArrayList<>())
                 .build();
         return ResponseEntity.ok(modelRepo.save(e));
     }
@@ -170,25 +97,10 @@ public class MasterDataController {
                     if (req.getCategoryId() != null) e.setCategoryId(req.getCategoryId());
                     if (req.getSeriesId() != null) e.setSeriesId(req.getSeriesId());
                     e.setName(req.getName());
-                    if (req.getModelNumber() != null) e.setModelNumber(req.getModelNumber());
                     if (req.getSlug() != null) e.setSlug(req.getSlug());
                     e.setImageUrl(req.getImageUrl());
                     if (req.getImageBase64() != null) e.setImageBase64(req.getImageBase64());
                     e.setCategory(req.getCategory());
-                    if (req.getSellActive() != null) e.setSellActive(req.getSellActive());
-                    if (req.getColors() != null) e.setColors(req.getColors());
-                    if (req.getRamStorage() != null) e.setRamStorage(req.getRamStorage());
-                    return ResponseEntity.ok(modelRepo.save(e));
-                })
-                .orElse(ResponseEntity.notFound().build());
-    }
-
-    /** Toggle only the Sell-flow visibility flag — used by the admin Models table switch. */
-    @PatchMapping("/models/{id}/sell-active")
-    public ResponseEntity<MasterModel> setModelSellActive(@PathVariable UUID id, @RequestBody ModelRequest req) {
-        return modelRepo.findById(id)
-                .map(e -> {
-                    e.setSellActive(req.getSellActive() != null ? req.getSellActive() : Boolean.TRUE);
                     return ResponseEntity.ok(modelRepo.save(e));
                 })
                 .orElse(ResponseEntity.notFound().build());

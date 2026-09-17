@@ -1,6 +1,6 @@
 # Run auth, master-data, and ticket services with in-memory H2 (no PostgreSQL).
 # Use this for end-to-end testing: login, add technician, create booking, accept booking.
-# Requires Maven and Java 25+ on PATH. Run from repo root: .\run-backend-dev.ps1
+# Requires Maven and Java 17+ on PATH. Run from repo root: .\run-backend-dev.ps1
 # Or run each service from your IDE with VM option: -Dspring.profiles.active=dev
 
 $ErrorActionPreference = "Stop"

@@ -1,8 +1,4 @@
-# dev profile — in-memory H2 (turnkey, no Postgres required), matching the
-# other services and run-all-backend-dev.ps1's "dev = H2" contract. On startup
-# Hibernate creates the schema and AdminSeeder/CustomerSeeder (@Profile("dev"))
-# seed the logins (barani/barani + super-admins).
-# Run with: spring.profiles.active=dev (or -Dspring.profiles.active=dev)
+# H2 in-memory for E2E (no PostgreSQL)
 spring:
   datasource:
     url: jdbc:h2:mem:auth;DB_CLOSE_DELAY=-1
@@ -14,3 +10,6 @@ spring:
       ddl-auto: update
     database-platform: org.hibernate.dialect.H2Dialect
     show-sql: false
+
+server:
+  port: ${PORT:8081}

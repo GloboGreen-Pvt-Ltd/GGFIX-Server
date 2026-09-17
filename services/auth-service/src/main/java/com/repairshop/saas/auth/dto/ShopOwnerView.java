@@ -1,6 +1,5 @@
 package com.repairshop.saas.auth.dto;
 
-import com.repairshop.saas.auth.entity.KycDocument;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -29,8 +28,6 @@ public class ShopOwnerView {
     private String secondaryMobile;
     private String avatarUrl;
     private String idProofUrl;
-    /** Owner KYC documents (Aadhar front/back + PAN) + review status. NULL when never submitted. */
-    private KycDocument kycDocument;
     private String personalAddress;
     private String addrState;
     private String addrDistrict;
@@ -40,25 +37,11 @@ public class ShopOwnerView {
     private String addrPincode;
     private String role;
     private Boolean isActive;
-
-    /** Role of the creator — ADMIN or MARKET_PERSON. NULL for legacy rows. */
-    private String createdBy;
-    private UUID createdPersonId;
-    private String createdPersonName;
-
-    /** Role of the currently assigned person, and who that is. NULL when unassigned. */
-    private String activeRole;
-    private UUID activePersonId;
-    private String activePersonName;
-
     private Boolean emailVerified;
     private Integer profileCompletePercent;
     private Integer sectionsComplete;
     private Integer sectionsTotal;
     private Instant createdAt;
-    // Subscription window (from the owner's subscriptions row; null if none).
-    private Instant activeDate;
-    private Instant inactiveDate;
     private List<ShopLocationView> locations;
 
     @Data

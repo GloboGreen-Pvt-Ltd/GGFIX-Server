@@ -1,6 +1,6 @@
 [Unit]
 Description=Repair Shop SaaS service %i
-After=network-online.target
+After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]

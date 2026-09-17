@@ -46,10 +46,6 @@ public class RepairNote {
     @Column(name = "created_at", insertable = false, updatable = false)
     private Instant createdAt;
 
-    // Writable on UPDATE only. The column is NOT NULL DEFAULT now() with no
-    // trigger behind it, so an insert must let the default apply
-    // (insertable = false) while an edit has to stamp it explicitly — see
-    // TicketService#updateRepairNote.
-    @Column(name = "updated_at", insertable = false)
+    @Column(name = "updated_at", insertable = false, updatable = false)
     private Instant updatedAt;
 }

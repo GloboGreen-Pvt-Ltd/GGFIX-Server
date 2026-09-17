@@ -85,13 +85,4 @@ public class TechnicianResponse {
 
     @Schema(description = "Photo URL")
     private String photoUrl;
-
-    @Schema(description = "Shop this technician belongs to")
-    private UUID shopId;
-
-    @Schema(description = "Shop latitude (null if the shop has no saved coordinates) — used by the employee app's 100m attendance geofence")
-    private Double shopLatitude;
-
-    @Schema(description = "Shop longitude (null if the shop has no saved coordinates)")
-    private Double shopLongitude;
 }

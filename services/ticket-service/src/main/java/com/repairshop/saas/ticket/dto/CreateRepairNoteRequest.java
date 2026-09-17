@@ -23,9 +23,9 @@ public class CreateRepairNoteRequest {
     @Schema(description = "Hide from customer? Defaults to false (visible to customer + shop)")
     private Boolean isInternal;
 
-    @Schema(description = "Cloudinary URL of the optional voice-note recording attached to this note.")
+    @Schema(description = "Hosted URL (media.ggfix.in) of the optional voice-note recording attached to this note.")
     private String audioUrl;
 
-    @Schema(description = "Optional list of Cloudinary image URLs attached to this note (up to 3).")
+    @Schema(description = "Optional list of hosted image URLs (media.ggfix.in) attached to this note (up to 3).")
     private List<String> imageUrls;
 }

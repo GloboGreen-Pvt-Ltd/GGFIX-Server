@@ -24,11 +24,6 @@ public class UpdateShopOwnerRequest {
     private String secondaryMobile;
     private String avatarUrl;
     private String idProofUrl;
-    // Owner KYC documents (users.kyc_document jsonb). Any non-null value resets
-    // the KYC status back to PENDING_REVIEW (see AuthService.updateShopOwner).
-    private String aadharFrontUrl;
-    private String aadharBackUrl;
-    private String panUrl;
     private String personalAddress;
     private String addrState;
     private String addrDistrict;

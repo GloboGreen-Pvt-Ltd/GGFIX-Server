@@ -14,11 +14,19 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 
 /**
  * Master-data serves public reference data (brands / models / categories) that
- * the apps read WITHOUT a token, so those stay permitAll. The ONE exception is
- * {@code /media/**}: it signs uploads with the shop's Cloudinary secret, so an
- * unauthenticated upload lets anyone host arbitrary files on the shop's paid
- * account. That path now requires a valid Bearer JWT (validated by JwtAuthFilter
- * against the shared app.jwt.secret).
+ * the apps read WITHOUT a token, so those stay permitAll. The exceptions are the
+ * write paths that put bytes into paid storage:
+ *
+ * <ul>
+ *   <li>{@code /media/upload} writes straight into the media.ggfix.in S3 bucket, so
+ *       an unauthenticated upload lets anyone host arbitrary files on our own
+ *       domain and bill us for the storage and egress.</li>
+ *   <li>{@code /master/models/with-image} and {@code /master/models/*​/image} write
+ *       objects into the media.ggfix.in S3 bucket and create catalogue rows.</li>
+ * </ul>
+ *
+ * Each requires a valid Bearer JWT (validated by JwtAuthFilter against the shared
+ * app.jwt.secret).
  *
  * NOTE before deploy: confirm EVERY media uploader (customer / shop / EMPLOYEE /
  * ADMIN apps) sends `Authorization: Bearer <token>` on /media/upload — otherwise
@@ -48,13 +56,11 @@ public class SecurityConfig {
                         // S3-backed model images. Same reasoning as /media/upload —
                         // these write objects into the paid media.ggfix.in bucket and
                         // create catalogue rows, so they must never be anonymous.
+                        // The catalogue GETs below stay public, as the apps read them
+                        // without a token.
                         .requestMatchers("/master/models/with-image").authenticated()
                         .requestMatchers("/master/models/*/image").authenticated()
                         .requestMatchers("/master/models/media-path/preview").authenticated()
-                        .requestMatchers("/master/device-categories/*/image").authenticated()
-                        .requestMatchers("/master/brands/*/image").authenticated()
-                        .requestMatchers("/master/banners/*/image").authenticated()
-                        .requestMatchers("/master/model-compatibility/*/image").authenticated()
                         .anyRequest().permitAll())
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();

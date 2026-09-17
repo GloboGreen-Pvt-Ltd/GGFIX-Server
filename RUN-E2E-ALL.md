@@ -6,7 +6,7 @@ Use this to run all backend services, the admin panel, and the mobile app so you
 
 ## Prerequisites
 
-- **Java 25+** and **Maven** (`mvn` on PATH) for the backend
+- **Java 17+** and **Maven** (`mvn` on PATH) for the backend
 - **Node.js** (LTS) for admin and mobile
 - **Expo Go** on your phone (optional; for running the app on device)
 

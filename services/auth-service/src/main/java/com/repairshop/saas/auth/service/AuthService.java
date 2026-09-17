@@ -15,62 +15,30 @@ import com.repairshop.saas.auth.dto.ShopResponse;
 import com.repairshop.saas.auth.dto.UpdateShopOwnerRequest;
 import com.repairshop.saas.auth.dto.TechnicianResponse;
 import com.repairshop.saas.auth.dto.UserResponse;
-import com.repairshop.saas.common.subscription.SubscriptionFeature;
-import com.repairshop.saas.auth.entity.KycDocument;
-import com.repairshop.saas.auth.entity.Roles;
 import com.repairshop.saas.auth.entity.Shop;
-import com.repairshop.saas.auth.entity.Subscription;
 import com.repairshop.saas.auth.entity.User;
 import com.repairshop.saas.auth.exception.BadRequestException;
 import com.repairshop.saas.auth.exception.UnauthorizedException;
 import com.repairshop.saas.auth.repository.ShopRepository;
-import com.repairshop.saas.auth.repository.SubscriptionRepository;
 import com.repairshop.saas.auth.repository.UserRepository;
 import com.repairshop.saas.auth.security.JwtService;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
-import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 @Service
-@Slf4j
 @RequiredArgsConstructor
 public class AuthService {
 
-    /**
-     * Shown verbatim to a user whose account an admin has deactivated. Kept as
-     * one constant so every login path (email/mobile, shop-mobile, customer)
-     * returns the same wording — clients surface this string directly.
-     */
-    public static final String INACTIVE_ACCOUNT_MESSAGE =
-            "Your account is inactive. Please contact the administrator.";
-
     private final UserRepository userRepository;
     private final ShopRepository shopRepository;
-    private final SubscriptionRepository subscriptionRepository;
-    private final com.repairshop.saas.common.subscription.SubscriptionLimitService subscriptionLimits;
     private final JwtService jwtService;
     private final PasswordEncoder passwordEncoder;
     private final OtpStore otpStore;
-    private final EmailService emailService;
-    // ticket-service owns the `technicians` table but shares this Postgres DB.
-    // We JDBC-link a technician's user_id when provisioning its login so the
-    // employee app's /technicians/me (keyed by user_id) resolves.
-    private final JdbcTemplate jdbc;
 
     /**
      * Unified login. The identifier in {@code request.email} may be either an
@@ -103,17 +71,11 @@ public class AuthService {
 
         if (userOpt.isPresent()) {
             User user = userOpt.get();
-            if (!Boolean.TRUE.equals(user.getIsActive()))
-                throw new UnauthorizedException(INACTIVE_ACCOUNT_MESSAGE);
+            if (!user.getIsActive())
+                throw new UnauthorizedException("Account is disabled");
 
             if (usingOtp) {
-                // Accept either the account's static OTP (e.g. 123456 default) or a
-                // freshly-issued OtpStore code (email "sign in with OTP"). Static is
-                // checked first so a valid one doesn't consume the single-use code.
-                String entered = request.getOtp().trim();
-                boolean ok = (user.getOtpCode() != null && user.getOtpCode().equals(entered))
-                        || otpStore.verify(request.getEmail().trim(), entered);
-                if (!ok)
+                if (user.getOtpCode() == null || !user.getOtpCode().equals(request.getOtp().trim()))
                     throw new UnauthorizedException("Invalid OTP");
             } else {
                 if (user.getPasswordHash() == null
@@ -173,7 +135,7 @@ public class AuthService {
         User owner = userRepository.findById(shop.getOwnerUserId())
                 .orElseThrow(() -> new UnauthorizedException("Shop owner not found"));
         if (!Boolean.TRUE.equals(owner.getIsActive()))
-            throw new UnauthorizedException(INACTIVE_ACCOUNT_MESSAGE);
+            throw new UnauthorizedException("Owner account is disabled");
 
         return buildShopScopedLoginResponse(owner, shop);
     }
@@ -293,20 +255,15 @@ public class AuthService {
 
     /**
      * Map a stored users.role to the wire-level loginType the clients route on.
-     * SHOP_OWNER, SUPER_ADMIN and MARKET_PERSON are 1:1; every other employee
-     * role (TECHNICIAN, STAFF, PICKUP_PERSON) collapses to EMPLOYEE so the
-     * mobile app can route them through the technician/employee UI uniformly.
-     *
-     * MARKET_PERSON gets its own loginType rather than folding into SUPER_ADMIN:
-     * both sign in to the admin web, but only SUPER_ADMIN may change account
-     * status, so the client has to be able to tell them apart.
+     * SHOP_OWNER and SUPER_ADMIN are 1:1; every other employee role (TECHNICIAN,
+     * STAFF, PICKUP_PERSON) collapses to EMPLOYEE so the mobile app can route
+     * them through the technician/employee UI uniformly.
      */
     private static String loginTypeForRole(String role) {
         if (role == null) return "EMPLOYEE";
         String r = role.trim().toUpperCase();
-        if (Roles.isAdmin(r))         return "SUPER_ADMIN";
-        if (Roles.isMarketPerson(r))  return "MARKET_PERSON";
-        if (Roles.isShopOwner(r))     return "SHOP_OWNER";
+        if ("SUPER_ADMIN".equals(r)) return "SUPER_ADMIN";
+        if ("SHOP_OWNER".equals(r))  return "SHOP_OWNER";
         return "EMPLOYEE";
     }
 
@@ -337,9 +294,6 @@ public class AuthService {
                 .build();
         user = userRepository.save(user);
 
-        // Auto-start a 15-day FREE_TRIAL. Best-effort: never break registration.
-        createFreeTrial(user.getId(), shop.getId());
-
         return RegisterResponse.builder()
                 .userId(user.getId().toString())
                 .shopId(shop.getId().toString())
@@ -347,45 +301,6 @@ public class AuthService {
                 .email(user.getEmail())
                 .message("Registration successful")
                 .build();
-    }
-
-    /**
-     * Create the 15-day FREE_TRIAL subscription row for a newly registered
-     * owner. Wrapped so a failure here (e.g. migration 66 not yet applied) is
-     * logged and swallowed rather than rolling back the registration itself.
-     * Idempotent: skips if the owner already has a subscription.
-     */
-    private void createFreeTrial(UUID ownerUserId, UUID shopId) {
-        try {
-            if (ownerUserId == null) return;
-            if (subscriptionRepository.findByOwnerUserId(ownerUserId).isPresent()) return;
-            Instant now = Instant.now();
-            Instant end = now.plus(15, ChronoUnit.DAYS);
-            Subscription sub = Subscription.builder()
-                    .ownerUserId(ownerUserId)
-                    .shopId(shopId)
-                    .planCode("FREE_TRIAL")
-                    .status("FREE_TRIAL")
-                    .subscriptionType("FREE_TRIAL")
-                    .trialStartDate(now)
-                    .trialEndDate(end)
-                    .activeDate(now)
-                    .inactiveDate(end)
-                    .shopLimit(2)
-                    .employeeLimit(3)
-                    .sellLimit(5)
-                    .pickupServiceEnabled(true)
-                    .buyProductUnlimited(true)
-                    .sellProductUnlimited(false)
-                    .shopCount(1)
-                    .priceAmount(BigDecimal.ZERO)
-                    .startedAt(now)
-                    .currentPeriodEnd(end)
-                    .build();
-            subscriptionRepository.save(sub);
-        } catch (Exception e) {
-            log.warn("createFreeTrial failed for owner={} shop={}: {}", ownerUserId, shopId, e.getMessage());
-        }
     }
 
     @Transactional(readOnly = true)
@@ -433,13 +348,6 @@ public class AuthService {
 
     @Transactional
     public RegisterResponse registerTechnician(UUID shopId, RegisterTechnicianRequest request) {
-        // Adding staff is a two-call flow: the shop app provisions the login
-        // here, then creates the technician row in ticket-service. Both ends
-        // check the seat allowance — if only the second one did, hitting the
-        // limit would leave a login behind with no employee attached to it.
-        subscriptionLimits.requireCapacity(shopId, SubscriptionFeature.EMPLOYEES,
-                subscriptionLimits.countActiveEmployees(shopId));
-
         Shop shop = shopRepository.findById(shopId).orElseGet(() -> {
             // Shop may exist in ticket-service but not in auth (e.g. after auth DB reset). Create stub so technician can be registered.
             String slug = "shop-" + shopId.toString().replace("-", "");
@@ -452,48 +360,14 @@ public class AuthService {
                     .isActive(true)
                     .build());
         });
-        String phone = trimToNull(request.getPhone());
-        String email = trimToNull(request.getEmail());
-
-        // A login needs an identifier. Staff are usually keyed by mobile, so when
-        // no email is supplied we synthesise a stable placeholder from the phone
-        // (users.email is NOT NULL + unique per shop). Login still resolves by the
-        // real phone via findUserByEmailOrPhone, so the placeholder is never typed.
-        if (email == null) {
-            if (phone == null)
-                throw new BadRequestException("Provide an email or a mobile number to create the login");
-            email = phone.replaceAll("[^0-9]", "") + "@staff.local";
-        }
-
-        // Idempotent: if a login already exists for this shop+identity, return it
-        // instead of 400. Lets a re-add — or an add whose technician step didn't
-        // finish the first time — succeed and hand the caller the existing userId.
-        java.util.Optional<User> existing = userRepository.findByShop_IdAndEmail(shop.getId(), email);
-        if (existing.isPresent()) {
-            User u = existing.get();
-            return RegisterResponse.builder()
-                    .userId(u.getId().toString())
-                    .shopId(shop.getId().toString())
-                    .shopSlug(shop.getSlug())
-                    .email(u.getEmail())
-                    .message("Employee login already existed")
-                    .build();
-        }
-
-        // Password is optional (OTP-only login). OTP defaults to 123456 — the same
-        // staff default used for shop-mobile login (see shops.mobile_otp_code and
-        // createShopOwner) — so a mobile-only employee can sign in immediately.
-        String rawPassword = trimToNull(request.getPassword());
-        String otp = trimToNull(request.getOtp());
-        if (otp == null) otp = "123456";
+        if (userRepository.existsByShop_IdAndEmail(shop.getId(), request.getEmail()))
+            throw new BadRequestException("Email already registered for this shop");
 
         User user = User.builder()
                 .shop(shop)
-                .email(email)
-                .phone(phone)
-                .passwordHash(rawPassword != null ? passwordEncoder.encode(rawPassword) : null)
-                .otpCode(otp)
-                .name(request.getName() != null ? request.getName() : email)
+                .email(request.getEmail())
+                .passwordHash(passwordEncoder.encode(request.getPassword()))
+                .name(request.getName() != null ? request.getName() : request.getEmail())
                 .role(canonicalEmployeeRole(request.getRoleLabel()))
                 .isActive(true)
                 .build();
@@ -504,39 +378,8 @@ public class AuthService {
                 .shopId(shop.getId().toString())
                 .shopSlug(shop.getSlug())
                 .email(user.getEmail())
-                .message("Employee login created")
+                .message("Technician added")
                 .build();
-    }
-
-    /**
-     * Best-effort: link an existing (not-yet-linked) technician row for this
-     * shop+phone to the given login's user_id so the employee app's
-     * /technicians/me (which resolves the technician by user_id) works.
-     *
-     * Called from the controller AFTER registerTechnician commits — so it runs
-     * in its OWN transaction on an already-persisted user (no FK ordering issue),
-     * and a link failure can never roll back the created login. In the normal
-     * owner-app add flow the technician row doesn't exist yet, so this updates 0
-     * rows (harmless) and the app links it itself with the returned userId.
-     */
-    @Transactional
-    public void linkTechnicianByPhone(UUID shopId, String userId, String phone) {
-        if (shopId == null || userId == null || phone == null || phone.trim().isEmpty()) return;
-        try {
-            int n = jdbc.update(
-                    "UPDATE technicians SET user_id = CAST(? AS uuid) "
-                            + "WHERE shop_id = CAST(? AS uuid) AND phone = ? AND user_id IS NULL",
-                    userId, shopId.toString(), phone.trim());
-            log.info("linkTechnicianByPhone: linked {} technician row(s) shop={} phone={}", n, shopId, phone);
-        } catch (Exception e) {
-            log.warn("linkTechnicianByPhone failed shop={} phone={}: {}", shopId, phone, e.getMessage());
-        }
-    }
-
-    private static String trimToNull(String s) {
-        if (s == null) return null;
-        String t = s.trim();
-        return t.isEmpty() ? null : t;
     }
 
     @Transactional
@@ -561,22 +404,8 @@ public class AuthService {
                 .build();
     }
 
-    /**
-     * Create a SHOP_OWNER plus its shops.
-     *
-     * The account is created INACTIVE regardless of who makes it — only an
-     * admin can activate it (see {@link #setShopOwnerActive}). Creator identity
-     * is taken from the authenticated caller, never from the request body, so
-     * a client cannot forge provenance.
-     *
-     * When a MARKET_PERSON creates the owner they also become its initial
-     * active person; an admin can reassign that later without disturbing the
-     * creator fields. An admin-created owner starts with no active person.
-     *
-     * @param creator the authenticated staff account performing the creation.
-     */
     @Transactional
-    public ShopOwnerResponse createShopOwner(CreateShopOwnerRequest req, User creator) {
+    public ShopOwnerResponse createShopOwner(CreateShopOwnerRequest req) {
         String email = req.getEmail().trim();
         // Shop owners are platform-level users; their owned shops are linked via
         // shops.owner_user_id, not via users.shop_id. No parent shop needed.
@@ -593,7 +422,6 @@ public class AuthService {
                 .secondaryMobile(req.getSecondaryMobile())
                 .avatarUrl(req.getAvatarUrl())
                 .idProofUrl(req.getIdProofUrl())
-                .kycDocument(newKyc(req.getAadharFrontUrl(), req.getAadharBackUrl(), req.getPanUrl()))
                 .personalAddress(req.getPersonalAddress())
                 .addrState(req.getAddrState())
                 .addrDistrict(req.getAddrDistrict())
@@ -601,28 +429,13 @@ public class AuthService {
                 .addrArea(req.getAddrArea())
                 .addrStreet(req.getAddrStreet())
                 .addrPincode(req.getAddrPincode())
-                .role(Roles.SHOP_OWNER)
-                // Created inactive by design: activation is an ADMIN-only act,
-                // so neither an admin nor a market person can create an account
-                // that is usable before an admin signs off on it.
-                .isActive(false)
-                .createdBy(creator == null ? null : Roles.canonical(creator.getRole()))
-                .createdPersonId(creator == null ? null : creator.getId())
-                .createdPersonName(creator == null ? null : displayName(creator))
+                .role("SHOP_OWNER")
+                .isActive(true)
                 .emailVerified(false)
                 .build();
-        // A market person who creates an owner is that owner's active person
-        // from the start. An admin-created owner waits for an explicit
-        // assignment, so activeRole stays null rather than reading "ADMIN".
-        if (creator != null && Roles.isMarketPerson(creator.getRole())) {
-            owner.setActiveRole(Roles.MARKET_PERSON);
-            owner.setActivePersonId(creator.getId());
-            owner.setActivePersonName(displayName(creator));
-        }
         owner = userRepository.save(owner);
 
         List<ShopOwnerResponse.ShopSummary> summaries = new java.util.ArrayList<>();
-        UUID primaryShopId = null;
         for (CreateShopOwnerRequest.ShopLocationDto loc : req.getLocations()) {
             String slug = loc.getSlug();
             if (slug == null || slug.isBlank())
@@ -661,14 +474,9 @@ public class AuthService {
                     .isActive(true)
                     .build();
             shop = shopRepository.save(shop);
-            if (primaryShopId == null) primaryShopId = shop.getId();
             summaries.add(ShopOwnerResponse.ShopSummary.builder()
                     .id(shop.getId()).name(shop.getName()).slug(shop.getSlug()).build());
         }
-
-        // Auto-start a 15-day FREE_TRIAL for the owner (first shop = primary),
-        // if none exists yet. Best-effort — never break owner creation.
-        createFreeTrial(owner.getId(), primaryShopId);
 
         return ShopOwnerResponse.builder()
                 .ownerId(owner.getId())
@@ -857,19 +665,18 @@ public class AuthService {
                 .pickupFromTime(s.getPickupFromTime())
                 .pickupToTime(s.getPickupToTime())
                 .pickupDistanceKm(s.getPickupDistanceKm())
-                .pickupEnabled(Boolean.TRUE.equals(s.getPickupEnabled()))
                 .distanceKm(Math.round(distanceKm * 10) / 10.0)
                 .build();
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public List<ShopOwnerView> listShopOwners() {
-        return userRepository.findByRoleOrderByCreatedAtDesc(Roles.SHOP_OWNER).stream()
+        return userRepository.findByRoleOrderByCreatedAtDesc("SHOP_OWNER").stream()
                 .map(u -> toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId())))
                 .toList();
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public ShopOwnerView getShopOwner(UUID id) {
         User u = userRepository.findById(id)
                 .orElseThrow(() -> new BadRequestException("Owner not found: " + id));
@@ -890,15 +697,8 @@ public class AuthService {
         if (notBlank(req.getPassword()))       u.setPasswordHash(passwordEncoder.encode(req.getPassword()));
         if (req.getPhone() != null)            u.setPhone(req.getPhone());
         if (req.getSecondaryMobile() != null)  u.setSecondaryMobile(req.getSecondaryMobile());
-        // Media URLs use notBlank, not a bare null check: a client that omits the
-        // field OR sends "" both mean "no new file" and must never wipe the
-        // stored image. Intentional removal is a separate action, not this one.
-        if (notBlank(req.getAvatarUrl()))      u.setAvatarUrl(req.getAvatarUrl());
-        if (notBlank(req.getIdProofUrl()))     u.setIdProofUrl(req.getIdProofUrl());
-        if (req.getAadharFrontUrl() != null || req.getAadharBackUrl() != null || req.getPanUrl() != null) {
-            u.setKycDocument(mergeKyc(u.getKycDocument(),
-                    req.getAadharFrontUrl(), req.getAadharBackUrl(), req.getPanUrl()));
-        }
+        if (req.getAvatarUrl() != null)        u.setAvatarUrl(req.getAvatarUrl());
+        if (req.getIdProofUrl() != null)       u.setIdProofUrl(req.getIdProofUrl());
         if (req.getPersonalAddress() != null)  u.setPersonalAddress(req.getPersonalAddress());
         if (req.getAddrState() != null)        u.setAddrState(req.getAddrState());
         if (req.getAddrDistrict() != null)     u.setAddrDistrict(req.getAddrDistrict());
@@ -908,98 +708,6 @@ public class AuthService {
         if (req.getAddrPincode() != null)      u.setAddrPincode(req.getAddrPincode());
         if (notBlank(req.getOtpCode()))        u.setOtpCode(req.getOtpCode().trim());
 
-        u = userRepository.save(u);
-        return toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()));
-    }
-
-    // ---- Owner KYC (users.kyc_document jsonb) ---------------------------------
-
-    private static final String KYC_PENDING  = "PENDING_REVIEW";
-    private static final String KYC_APPROVED = "APPROVED";
-    private static final String KYC_REJECTED = "REJECTED";
-
-    /** Build a fresh KycDocument from upload URLs; returns null when none supplied. */
-    private static KycDocument newKyc(String aadharFrontUrl, String aadharBackUrl, String panUrl) {
-        return mergeKyc(null, aadharFrontUrl, aadharBackUrl, panUrl);
-    }
-
-    /**
-     * Apply the supplied (non-null) URLs onto the existing KYC blob and mark the
-     * submission PENDING_REVIEW (a resubmit clears any prior rejection). Returns
-     * null only when there is no existing document and nothing was supplied.
-     */
-    private static KycDocument mergeKyc(KycDocument existing, String aadharFrontUrl, String aadharBackUrl, String panUrl) {
-        boolean anySupplied = aadharFrontUrl != null || aadharBackUrl != null || panUrl != null;
-        if (existing == null && !anySupplied) return null;
-        KycDocument kyc = existing != null ? existing : KycDocument.builder().build();
-        if (aadharFrontUrl != null) kyc.setAadharFrontUrl(blankToNull(aadharFrontUrl));
-        if (aadharBackUrl != null)  kyc.setAadharBackUrl(blankToNull(aadharBackUrl));
-        if (panUrl != null)         kyc.setPanUrl(blankToNull(panUrl));
-        if (anySupplied) {
-            kyc.setStatus(KYC_PENDING);
-            kyc.setRejectReason(null);
-            kyc.setReviewedAt(null);
-            kyc.setSubmittedAt(java.time.Instant.now());
-        }
-        return kyc;
-    }
-
-    private static String blankToNull(String s) {
-        return (s == null || s.isBlank()) ? null : s.trim();
-    }
-
-    /** Current owner's KYC (never null — returns an empty blob when nothing submitted). */
-    @Transactional(readOnly = true)
-    public KycDocument getOwnerKyc(UUID userId) {
-        User u = userRepository.findById(userId)
-                .orElseThrow(() -> new BadRequestException("User not found: " + userId));
-        return u.getKycDocument() != null ? u.getKycDocument() : KycDocument.builder().build();
-    }
-
-    /**
-     * Owner-scoped save of their own profile photo (from the web/mobile "My
-     * Profile" screen). Mirrors saveOwnerKyc's shape; unlike the admin-only
-     * PATCH /auth/shop-owners/{id} path, this always resolves the target
-     * user from the caller's own JWT, never a path param, so an owner can
-     * only ever overwrite their own avatar.
-     */
-    @Transactional
-    public ShopOwnerView saveOwnerAvatar(UUID userId, String avatarUrl) {
-        User u = userRepository.findById(userId)
-                .orElseThrow(() -> new BadRequestException("User not found: " + userId));
-        // notBlank, not a bare null check — same reasoning as updateShopOwner's
-        // avatar handling: omitted/blank means "no new file", never "clear it".
-        if (notBlank(avatarUrl)) u.setAvatarUrl(avatarUrl.trim());
-        userRepository.save(u);
-        return getShopOwner(userId);
-    }
-
-    /** Owner-scoped save/resubmit of KYC documents (from the mobile app). */
-    @Transactional
-    public KycDocument saveOwnerKyc(UUID userId, String aadharFrontUrl, String aadharBackUrl, String panUrl) {
-        User u = userRepository.findById(userId)
-                .orElseThrow(() -> new BadRequestException("User not found: " + userId));
-        KycDocument kyc = mergeKyc(u.getKycDocument(), aadharFrontUrl, aadharBackUrl, panUrl);
-        u.setKycDocument(kyc);
-        u = userRepository.save(u);
-        return u.getKycDocument() != null ? u.getKycDocument() : KycDocument.builder().build();
-    }
-
-    /** Admin review action — approve / reject / re-open the owner's KYC submission. */
-    @Transactional
-    public ShopOwnerView reviewOwnerKyc(UUID ownerId, String status, String rejectReason) {
-        User u = userRepository.findById(ownerId)
-                .orElseThrow(() -> new BadRequestException("Owner not found: " + ownerId));
-        String s = status == null ? "" : status.trim().toUpperCase();
-        if (!s.equals(KYC_APPROVED) && !s.equals(KYC_REJECTED) && !s.equals(KYC_PENDING))
-            throw new BadRequestException("status must be APPROVED, REJECTED or PENDING_REVIEW");
-        KycDocument kyc = u.getKycDocument();
-        if (kyc == null || !kyc.hasAnyDocument())
-            throw new BadRequestException("No KYC documents submitted for this owner");
-        kyc.setStatus(s);
-        kyc.setRejectReason(s.equals(KYC_REJECTED) ? rejectReason : null);
-        kyc.setReviewedAt(java.time.Instant.now());
-        u.setKycDocument(kyc);
         u = userRepository.save(u);
         return toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()));
     }
@@ -1046,79 +754,6 @@ public class AuthService {
         return toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()));
     }
 
-    // ---- Password reset (forgot password) / passwordless sign-in ---------------
-
-    /**
-     * Issue an OTP for a password reset (or email "sign in with OTP"). For an
-     * EMAIL identifier we generate a 6-digit OtpStore code and email it via
-     * Resend; for a MOBILE identifier the OTP is the default 123456 (no SMS
-     * gateway). The account must exist. In dev the code is surfaced as devOtp.
-     */
-    @Transactional(readOnly = true)
-    public java.util.Map<String, Object> sendPasswordResetOtp(String identifier) {
-        if (identifier == null || identifier.isBlank())
-            throw new BadRequestException("Email or mobile number is required");
-        String id = identifier.trim();
-        boolean isEmail = id.contains("@");
-        User user = (isEmail ? userRepository.findByEmail(id) : findUserByEmailOrPhone(id))
-                .orElseThrow(() -> new BadRequestException("No account found for that email or mobile number."));
-
-        java.util.Map<String, Object> res = new java.util.HashMap<>();
-        if (isEmail) {
-            String code = otpStore.issue(id);
-            boolean sent = emailService.sendOtpEmail(id, code, "reset your GGFIX password");
-            res.put("channel", "EMAIL");
-            res.put("sent", sent);
-            res.put("target", maskEmail(id));
-            res.put("ttlMinutes", 10);
-            res.put("devOtp", code); // dev convenience; production clients ignore this
-        } else {
-            res.put("channel", "MOBILE");
-            res.put("sent", true);
-            res.put("target", maskMobile(id));
-            res.put("defaultOtp", "123456");
-        }
-        res.put("email", isEmail ? id : user.getEmail());
-        return res;
-    }
-
-    /**
-     * Verify the reset OTP and set a new bcrypt password, then return a fresh
-     * login session (auto sign-in). Email OTPs are verified via OtpStore;
-     * mobile uses the default 123456.
-     */
-    @Transactional
-    public LoginResponse resetPasswordWithOtp(String identifier, String otp, String newPassword) {
-        if (identifier == null || identifier.isBlank())
-            throw new BadRequestException("Email or mobile number is required");
-        if (otp == null || otp.isBlank())
-            throw new BadRequestException("OTP is required");
-        if (newPassword == null || newPassword.trim().length() < 8)
-            throw new BadRequestException("Password must be at least 8 characters.");
-        String id = identifier.trim();
-        boolean isEmail = id.contains("@");
-        User user = (isEmail ? userRepository.findByEmail(id) : findUserByEmailOrPhone(id))
-                .orElseThrow(() -> new BadRequestException("No account found."));
-        boolean ok = isEmail ? otpStore.verify(id, otp.trim()) : "123456".equals(otp.trim());
-        if (!ok)
-            throw new UnauthorizedException("Invalid or expired OTP.");
-        user.setPasswordHash(passwordEncoder.encode(newPassword.trim()));
-        userRepository.save(user);
-        return buildLoginResponse(user, null);
-    }
-
-    private static String maskEmail(String email) {
-        int at = email.indexOf('@');
-        if (at <= 1) return "***" + (at >= 0 ? email.substring(at) : "");
-        return email.charAt(0) + "***" + email.substring(at - 1);
-    }
-
-    private static String maskMobile(String mobile) {
-        String d = mobile.replaceAll("\\D", "");
-        if (d.length() < 2) return "***";
-        return "***-***-" + d.substring(d.length() - 2);
-    }
-
     // ---- Per-location CRUD -----------------------------------------------------
 
     @Transactional
@@ -1129,13 +764,6 @@ public class AuthService {
             throw new BadRequestException("User is not a SHOP_OWNER");
         if (loc.getName() == null || loc.getName().isBlank())
             throw new BadRequestException("Shop name is required");
-
-        // Shop allowance is counted per OWNER, not per shop — a trial covers
-        // two shops for the account, not two per shop. requireOwnerCapacity
-        // takes the owner id directly rather than resolving one from a shopId,
-        // which is what the employee checks do.
-        subscriptionLimits.requireOwnerCapacity(ownerId, SubscriptionFeature.SHOPS,
-                subscriptionLimits.countActiveShops(ownerId));
 
         String slug = loc.getSlug();
         if (slug == null || slug.isBlank())
@@ -1165,15 +793,6 @@ public class AuthService {
                 .workingDays(loc.getWorkingDays())
                 .openingTime(loc.getOpeningTime())
                 .closingTime(loc.getClosingTime())
-                // Pickup settings are carried on the same DTO as createShopOwner
-                // uses; without these a location added after owner creation
-                // silently lost its pickup window and came up pickup-disabled.
-                // Absent pickupEnabled means off — a new shop must not appear in
-                // the customer pickup feed before its owner opts in.
-                .pickupFromTime(loc.getPickupFromTime())
-                .pickupToTime(loc.getPickupToTime())
-                .pickupDistanceKm(loc.getPickupDistanceKm())
-                .pickupEnabled(Boolean.TRUE.equals(loc.getPickupEnabled()))
                 .ownerUserId(owner.getId())
                 .mobileOtpCode("123456")
                 .isActive(true)
@@ -1205,10 +824,8 @@ public class AuthService {
         if (loc.getGstNumber() != null)            shop.setGstNumber(loc.getGstNumber());
         if (loc.getLatitude() != null)             shop.setLatitude(loc.getLatitude());
         if (loc.getLongitude() != null)            shop.setLongitude(loc.getLongitude());
-        // Media URLs: notBlank, not a bare null check — see updateShopOwner above.
-        // A location edit that doesn't touch documents must never blank them out.
-        if (notBlank(loc.getFrontImageUrl()))       shop.setFrontImageUrl(loc.getFrontImageUrl());
-        if (notBlank(loc.getBannerImageUrl()))      shop.setBannerImageUrl(loc.getBannerImageUrl());
+        if (loc.getFrontImageUrl() != null)        shop.setFrontImageUrl(loc.getFrontImageUrl());
+        if (loc.getBannerImageUrl() != null)       shop.setBannerImageUrl(loc.getBannerImageUrl());
         if (loc.getPickupFromTime() != null)       shop.setPickupFromTime(loc.getPickupFromTime());
         if (loc.getPickupToTime() != null)         shop.setPickupToTime(loc.getPickupToTime());
         if (loc.getPickupDistanceKm() != null)     shop.setPickupDistanceKm(loc.getPickupDistanceKm());
@@ -1216,8 +833,8 @@ public class AuthService {
         if (loc.getWorkingDays() != null)          shop.setWorkingDays(loc.getWorkingDays());
         if (loc.getOpeningTime() != null)          shop.setOpeningTime(loc.getOpeningTime());
         if (loc.getClosingTime() != null)          shop.setClosingTime(loc.getClosingTime());
-        if (notBlank(loc.getGstCertificateUrl()))   shop.setGstCertificateUrl(loc.getGstCertificateUrl());
-        if (notBlank(loc.getUdyamCertificateUrl())) shop.setUdyamCertificateUrl(loc.getUdyamCertificateUrl());
+        if (loc.getGstCertificateUrl() != null)    shop.setGstCertificateUrl(loc.getGstCertificateUrl());
+        if (loc.getUdyamCertificateUrl() != null)  shop.setUdyamCertificateUrl(loc.getUdyamCertificateUrl());
         if (loc.getServiceCategoriesJson() != null) shop.setServiceCategoriesJson(loc.getServiceCategoriesJson());
         shopRepository.save(shop);
 
@@ -1234,144 +851,13 @@ public class AuthService {
         shopRepository.delete(shop);
     }
 
-    /**
-     * Activate / deactivate a shop owner. ADMIN-only — the caller's role is
-     * verified in {@link com.repairshop.saas.auth.controller.AuthController}
-     * before this runs.
-     *
-     * isActive is the ONLY field written. createdBy, createdAt and role are
-     * deliberately untouched: the endpoint takes no values for them, so they
-     * cannot be edited through the account-status API even if a client sends
-     * them in the body.
-     */
     @Transactional
     public ShopOwnerView setShopOwnerActive(UUID id, boolean active) {
         User u = userRepository.findById(id)
                 .orElseThrow(() -> new BadRequestException("Owner not found: " + id));
-        // Shop owners and market persons are the accounts this screen governs.
-        // Admins are deliberately out of reach: allowing one admin to deactivate
-        // another (or themselves) is how a platform ends up with no way back in.
-        if (Roles.isAdmin(u.getRole()))
-            throw new BadRequestException("Administrator accounts cannot be deactivated here");
-        if (!Roles.isShopOwner(u.getRole()) && !Roles.isMarketPerson(u.getRole()))
-            throw new BadRequestException("User is not a shop owner or market person");
         u.setIsActive(active);
         u = userRepository.save(u);
         return toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()));
-    }
-
-    /**
-     * Look up the caller behind a JWT so controllers can enforce role rules.
-     * Throws 401 when the id doesn't resolve — a token for a deleted user is
-     * not a valid session.
-     */
-    @Transactional(readOnly = true)
-    public User requireUser(UUID userId) {
-        return userRepository.findById(userId)
-                .orElseThrow(() -> new UnauthorizedException("User not found"));
-    }
-
-    /** Name to record for a person, falling back to email when unnamed. */
-    private static String displayName(User u) {
-        if (u == null) return null;
-        return notBlank(u.getName()) ? u.getName().trim() : u.getEmail();
-    }
-
-    /**
-     * Create a MARKET_PERSON login. ADMIN-only — market persons cannot create
-     * more of themselves. Created active: the inactive-by-default rule exists
-     * so an admin vets shop owners, and an admin making this account IS that
-     * sign-off.
-     */
-    @Transactional
-    public ShopOwnerView createMarketPerson(String name, String email, String phone,
-                                            String password, User creator) {
-        if (!notBlank(email)) throw new BadRequestException("Email is required");
-        if (!notBlank(name))  throw new BadRequestException("Name is required");
-        String cleanEmail = email.trim();
-        if (userRepository.findByEmail(cleanEmail).isPresent())
-            throw new BadRequestException("A user with this email already exists");
-
-        User mp = User.builder()
-                .id(UUID.randomUUID())
-                .name(name.trim())
-                .email(cleanEmail)
-                .phone(notBlank(phone) ? phone.trim() : null)
-                .passwordHash(notBlank(password) ? passwordEncoder.encode(password) : null)
-                .otpCode("123456")
-                .role(Roles.MARKET_PERSON)
-                .isActive(true)
-                .createdBy(creator == null ? null : Roles.canonical(creator.getRole()))
-                .createdPersonId(creator == null ? null : creator.getId())
-                .createdPersonName(creator == null ? null : displayName(creator))
-                .emailVerified(false)
-                .build();
-        mp = userRepository.save(mp);
-        return toOwnerView(mp, List.of());
-    }
-
-    /**
-     * Assign (or clear) the market person currently responsible for a shop
-     * owner. ADMIN-only.
-     *
-     * The name and role are read off the target user row rather than taken from
-     * the request, so a client cannot label an arbitrary id with a name of its
-     * choosing. Passing a null id clears the assignment. Creator fields are
-     * never touched — reassignment does not rewrite history.
-     */
-    @Transactional
-    public ShopOwnerView assignActivePerson(UUID ownerId, UUID marketPersonId) {
-        User owner = userRepository.findById(ownerId)
-                .orElseThrow(() -> new BadRequestException("Owner not found: " + ownerId));
-        if (!Roles.isShopOwner(owner.getRole()))
-            throw new BadRequestException("User is not a SHOP_OWNER");
-
-        if (marketPersonId == null) {
-            owner.setActiveRole(null);
-            owner.setActivePersonId(null);
-            owner.setActivePersonName(null);
-        } else {
-            User mp = userRepository.findById(marketPersonId)
-                    .orElseThrow(() -> new BadRequestException("Market person not found: " + marketPersonId));
-            if (!Roles.isMarketPerson(mp.getRole()))
-                throw new BadRequestException("Assigned user is not a MARKET_PERSON");
-            owner.setActiveRole(Roles.MARKET_PERSON);
-            owner.setActivePersonId(mp.getId());
-            owner.setActivePersonName(displayName(mp));
-        }
-        owner = userRepository.save(owner);
-        return toOwnerView(owner, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(owner.getId()));
-    }
-
-    /** Every market person, for the admin's assignment picker. */
-    @Transactional(readOnly = true)
-    public List<ShopOwnerView> listMarketPersons() {
-        return userRepository.findByRoleOrderByCreatedAtDesc(Roles.MARKET_PERSON).stream()
-                .map(u -> toOwnerView(u, List.of()))
-                .toList();
-    }
-
-    /**
-     * Every account the User Management screen manages — shop owners and market
-     * persons, newest first. Admins are excluded: they are not administered
-     * through this screen and showing a deactivate control against them invites
-     * an admin locking themselves out.
-     */
-    @Transactional(readOnly = true)
-    public List<ShopOwnerView> listManagedUsers() {
-        return userRepository.findAll().stream()
-                .filter(u -> Roles.isShopOwner(u.getRole()) || Roles.isMarketPerson(u.getRole()))
-                .sorted((a, b) -> {
-                    Instant x = a.getCreatedAt(), y = b.getCreatedAt();
-                    if (x == null && y == null) return 0;
-                    if (x == null) return 1;
-                    if (y == null) return -1;
-                    return y.compareTo(x);
-                })
-                .map(u -> toOwnerView(u, Roles.isShopOwner(u.getRole())
-                        ? shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId())
-                        : List.of()))
-                .toList();
     }
 
     private ShopOwnerView toOwnerView(User u, List<Shop> shops) {
@@ -1389,22 +875,6 @@ public class AuthService {
         int percent = (int) Math.round((sections * 100.0) / total);
 
         boolean emailVerified = Boolean.TRUE.equals(u.getEmailVerified());
-
-        // Subscription window for the admin owner views (null if no row).
-        Instant subActiveDate = null;
-        Instant subInactiveDate = null;
-        Subscription sub = subscriptionRepository.findByOwnerUserId(u.getId()).orElse(null);
-        if (sub == null && "SHOP_OWNER".equals(u.getRole()) && shops != null && !shops.isEmpty()) {
-            // Auto-heal: owners created before the subscription feature have no row.
-            // Give them a fresh 15-day free trial on first admin read so active/
-            // inactive dates populate (guarded + swallows errors — needs a writable tx).
-            createFreeTrial(u.getId(), shops.get(0).getId());
-            sub = subscriptionRepository.findByOwnerUserId(u.getId()).orElse(null);
-        }
-        if (sub != null) {
-            subActiveDate = sub.getActiveDate();
-            subInactiveDate = sub.getInactiveDate();
-        }
 
         List<ShopOwnerView.ShopLocationView> locs = shops.stream().map(s -> ShopOwnerView.ShopLocationView.builder()
                 .id(s.getId())
@@ -1446,7 +916,6 @@ public class AuthService {
                 .secondaryMobile(u.getSecondaryMobile())
                 .avatarUrl(u.getAvatarUrl())
                 .idProofUrl(u.getIdProofUrl())
-                .kycDocument(u.getKycDocument())
                 .personalAddress(u.getPersonalAddress())
                 .addrState(u.getAddrState())
                 .addrDistrict(u.getAddrDistrict())
@@ -1456,19 +925,11 @@ public class AuthService {
                 .addrPincode(u.getAddrPincode())
                 .role(u.getRole())
                 .isActive(u.getIsActive())
-                .createdBy(u.getCreatedBy())
-                .createdPersonId(u.getCreatedPersonId())
-                .createdPersonName(u.getCreatedPersonName())
-                .activeRole(u.getActiveRole())
-                .activePersonId(u.getActivePersonId())
-                .activePersonName(u.getActivePersonName())
                 .emailVerified(emailVerified)
                 .profileCompletePercent(percent)
                 .sectionsComplete(sections)
                 .sectionsTotal(total)
                 .createdAt(u.getCreatedAt())
-                .activeDate(subActiveDate)
-                .inactiveDate(subInactiveDate)
                 .locations(locs)
                 .build();
     }

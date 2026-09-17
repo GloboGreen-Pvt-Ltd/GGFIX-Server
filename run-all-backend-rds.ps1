@@ -1,59 +1,71 @@
-# Run ALL backend services against the AWS RDS PostgreSQL database (ggfixservice).
+# Run ALL backend services against the AWS RDS database (`ggfix_server`).
 #
-# This points every service at the cloud RDS instance instead of local Postgres.
-# Services use ddl-auto: validate, so the RDS schema must already match the
-# entities (it currently has the full 70-table schema).
+# Sibling of run-all-backend-pg.ps1 (local Postgres) and run-all-backend-dev.ps1
+# (H2 `dev` profile). This one uses the default profile - so application.yml,
+# Postgres, ddl-auto: validate - but points DB_* at RDS instead of localhost.
 #
-# SSL: RDS accepts TLS. We override the JDBC URL via SPRING_DATASOURCE_URL so we
-# can append ?sslmode=require (encrypt in transit, no client-side cert file needed).
+# Credentials live in .env.rds (gitignored). Copy .env.rds and edit if the
+# instance or password changes; nothing is hardcoded here.
+#
+# Requires Maven + Java 21+ on PATH and network access to the RDS endpoint
+# (the instance security group must allow 5432 from this machine's IP).
 #
 # Run from the backend root:
 #     .\run-all-backend-rds.ps1
+#     .\run-all-backend-rds.ps1 -Only auth-service,order-service
+#     .\run-all-backend-rds.ps1 -SkipPreflight
+
+param(
+    [string[]] $Only,
+    [switch] $SkipPreflight
+)
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $svc = "$root\services"
+$envFile = Join-Path $root ".env.rds"
 
 if (-not (Get-Command mvn -ErrorAction SilentlyContinue)) {
     Write-Host "Maven (mvn) not found on PATH." -ForegroundColor Yellow
     exit 1
 }
 
-# ---- RDS connection settings ----
-$RdsHost = "ggfixservice.cdaiqaog82ho.ap-south-1.rds.amazonaws.com"
-$RdsPort = "5432"
-$RdsDb   = "ggfixservice"
-$RdsUser = "postgres"
-# NEVER hardcode the password here (this file is committed to a public repo).
-# Set it in your shell before running:  $env:DB_PASSWORD = '<rds password>'
-$RdsPass = $env:DB_PASSWORD
-if ([string]::IsNullOrWhiteSpace($RdsPass)) {
-    Write-Host "DB_PASSWORD is not set. Run:  `$env:DB_PASSWORD = '<rds password>'" -ForegroundColor Yellow
+if (-not (Test-Path $envFile)) {
+    Write-Host "Missing $envFile - create it with DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD." -ForegroundColor Yellow
     exit 1
 }
-$JdbcUrl = "jdbc:postgresql://${RdsHost}:${RdsPort}/${RdsDb}?sslmode=require"
 
-# ---- Optional IMEI.info lookup (master-data-service /master/imei-lookup) ----
-# Enables the "scan/enter IMEI -> auto-detect brand & model" step in the shop
-# app's new-booking flow. Left blank => endpoint returns NOT_CONFIGURED and the
-# app falls back to manual device selection. NEVER hardcode the token here (this
-# file is committed) — set these in your shell before running the script:
-#     $env:IMEI_API_TOKEN     = '71ddea7c-...your token...'
-#     $env:IMEI_API_SERVICE_ID = '<numeric service id from your IMEI.info dashboard>'
-$ImeiToken     = $env:IMEI_API_TOKEN
-$ImeiServiceId = $env:IMEI_API_SERVICE_ID
+# --- load .env.rds (KEY=VALUE, # comments and blank lines ignored) ---------
+$envVars = [ordered]@{}
+foreach ($line in Get-Content $envFile) {
+    $trimmed = $line.Trim()
+    if ($trimmed -eq "" -or $trimmed.StartsWith("#")) { continue }
+    $idx = $trimmed.IndexOf("=")
+    if ($idx -lt 1) { continue }
+    $key = $trimmed.Substring(0, $idx).Trim()
+    $value = $trimmed.Substring($idx + 1).Trim().Trim('"')
+    $envVars[$key] = $value
+}
 
-# ---- Cloudinary image hosting (master-data-service /media/upload) ----
-# WITHOUT these, every admin image upload (brand/model/category logos) falls back
-# to a base64 data URI stored in image_url (bloats the DB and breaks AVIF/alpha
-# rendering on some Android devices). WITH them, uploads go to Cloudinary and
-# image_url is a proper https URL. Cloud name is public (it's in every image URL,
-# account "dg6c0g4gi"); the api-key/secret are secret — set them in your shell:
-#     $env:CLOUDINARY_API_KEY    = '...'
-#     $env:CLOUDINARY_API_SECRET = '...'
-$CloudinaryCloud  = if ($env:CLOUDINARY_CLOUD_NAME) { $env:CLOUDINARY_CLOUD_NAME } else { 'dg6c0g4gi' }
-$CloudinaryKey    = $env:CLOUDINARY_API_KEY
-$CloudinarySecret = $env:CLOUDINARY_API_SECRET
+foreach ($required in @("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")) {
+    if (-not $envVars.Contains($required)) {
+        Write-Host "$envFile is missing $required." -ForegroundColor Yellow
+        exit 1
+    }
+}
+
+Write-Host "RDS target: $($envVars.DB_USER)@$($envVars.DB_HOST):$($envVars.DB_PORT)/$($envVars.DB_NAME)" -ForegroundColor Cyan
+
+# --- preflight: fail fast on a bad endpoint instead of 12 crashed windows --
+if (-not $SkipPreflight) {
+    $reachable = Test-NetConnection -ComputerName $envVars.DB_HOST -Port ([int]$envVars.DB_PORT) -InformationLevel Quiet -WarningAction SilentlyContinue
+    if (-not $reachable) {
+        Write-Host "Cannot reach $($envVars.DB_HOST):$($envVars.DB_PORT)." -ForegroundColor Yellow
+        Write-Host "Check the RDS security group allows 5432 from your current public IP." -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host "Endpoint reachable." -ForegroundColor Green
+}
 
 $services = @(
     @{ Name = "Auth";         Dir = "auth-service";         Port = 8081 },
@@ -70,24 +82,36 @@ $services = @(
     @{ Name = "Order";        Dir = "order-service";        Port = 8092 }
 )
 
+if ($Only) { $services = $services | Where-Object { $Only -contains $_.Dir } }
+if (-not $services) { Write-Host "No services matched -Only." -ForegroundColor Yellow; exit 1 }
+
+# Build the `$env:KEY='value'` prefix once; single quotes are doubled so a
+# password containing ' cannot break out of the string.
+$envPrefix = ""
+foreach ($k in $envVars.Keys) {
+    $escaped = $envVars[$k].Replace("'", "''")
+    $envPrefix += "`$env:$k='$escaped'; "
+}
+
 foreach ($s in $services) {
     $dir = Join-Path $svc $s.Dir
     if (-not (Test-Path $dir)) { Write-Host "Skip $($s.Name) (not found: $dir)" -ForegroundColor Yellow; continue }
     Write-Host "Starting $($s.Name) (port $($s.Port)) on RDS..."
-    $cmd = "`$Host.UI.RawUI.WindowTitle = 'ggfix-$($s.Name)-$($s.Port)-RDS';" +
-           "`$env:SPRING_DATASOURCE_URL='$JdbcUrl';" +
-           "`$env:DB_USER='$RdsUser';" +
-           "`$env:DB_PASSWORD='$RdsPass';" +
-           "`$env:IMEI_API_TOKEN='$ImeiToken';" +
-           "`$env:IMEI_API_SERVICE_ID='$ImeiServiceId';" +
-           "`$env:CLOUDINARY_CLOUD_NAME='$CloudinaryCloud';" +
-           "`$env:CLOUDINARY_API_KEY='$CloudinaryKey';" +
-           "`$env:CLOUDINARY_API_SECRET='$CloudinarySecret';" +
-           "cd '$dir'; mvn -q -DskipTests spring-boot:run"
-    Start-Process powershell -ArgumentList @("-NoExit","-Command",$cmd) | Out-Null
+    # NOTE: no -Dspring-boot.run.profiles=dev - the dev profile would swap in H2
+    # and silently ignore RDS entirely (list endpoints then look empty).
+    $cmd = "`$Host.UI.RawUI.WindowTitle = 'ggfix-$($s.Name)-$($s.Port)-RDS'; $envPrefix cd '$dir'; mvn -q -DskipTests spring-boot:run"
+    Start-Process powershell -ArgumentList @("-NoExit", "-Command", $cmd) | Out-Null
     Start-Sleep -Seconds 2
 }
 
 Write-Host ""
-Write-Host "All services starting against RDS ($RdsHost / db=$RdsDb)." -ForegroundColor Green
-Write-Host "Wait until each window prints 'Started ...Application'." -ForegroundColor Green
+Write-Host "All services starting in separate windows. Wait until each prints 'Started ...Application'." -ForegroundColor Green
+Write-Host "A window that dies on 'Schema-validation: missing column' means RDS is behind the entities - add the next migration." -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "Ports:" -ForegroundColor Cyan
+Write-Host "  Auth:         http://localhost:8081  |  Master Data: http://localhost:8091  |  Ticket: http://localhost:8082"
+Write-Host "  User:         http://localhost:8083  |  Shop:         http://localhost:8084  |  Technician: http://localhost:8085"
+Write-Host "  Inventory:    http://localhost:8086  |  Marketplace:  http://localhost:8087  |  Pickup: http://localhost:8088"
+Write-Host "  Notification: http://localhost:8089  |  Subscription: http://localhost:8090  |  Order: http://localhost:8092"
+Write-Host ""
+Write-Host "Smoke test: Invoke-RestMethod http://localhost:8081/auth/login -Method POST -ContentType application/json -Body '{\"email\":\"barani\",\"password\":\"barani\"}'"

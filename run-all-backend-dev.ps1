@@ -1,5 +1,5 @@
 # Run ALL backend services with in-memory H2 for end-to-end testing.
-# Requires Maven and Java 25+ on PATH. Run from repo root: .\run-all-backend-dev.ps1
+# Requires Maven and Java 17+ on PATH. Run from repo root: .\run-all-backend-dev.ps1
 # Starts 12 services in separate PowerShell windows. Wait until each shows "Started ...Application".
 
 $ErrorActionPreference = "Stop"
@@ -7,7 +7,7 @@ $root = $PSScriptRoot
 $svc = "$root\services"
 
 if (-not (Get-Command mvn -ErrorAction SilentlyContinue)) {
-    Write-Host "Maven (mvn) not found on PATH. Add Maven and Java 25+ to PATH, or run each service from IDE with -Dspring.profiles.active=dev" -ForegroundColor Yellow
+    Write-Host "Maven (mvn) not found on PATH. Add Maven and Java 17+ to PATH, or run each service from IDE with -Dspring.profiles.active=dev" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Ports: auth 8081, ticket 8082, user 8083, shop 8084, technician 8085, inventory 8086, marketplace 8087, pickup 8088, notification 8089, subscription 8090, master-data 8091, order 8092"
     exit 1

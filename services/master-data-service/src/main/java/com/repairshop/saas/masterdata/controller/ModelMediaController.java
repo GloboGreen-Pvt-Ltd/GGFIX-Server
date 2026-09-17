@@ -2,9 +2,7 @@ package com.repairshop.saas.masterdata.controller;
 
 import com.repairshop.saas.masterdata.dto.ModelCreateForm;
 import com.repairshop.saas.masterdata.dto.ModelImageResponse;
-import com.repairshop.saas.masterdata.dto.TaxonomyImageResponse;
 import com.repairshop.saas.masterdata.service.ModelMediaService;
-import com.repairshop.saas.masterdata.service.TaxonomyMediaService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -24,7 +22,7 @@ import java.util.UUID;
  *
  * The client posts IDs and a file; the S3 key is derived server-side from the names
  * those IDs resolve to. There is deliberately no way for a caller to supply a path,
- * a folder or a filename — see {@link com.repairshop.saas.common.media.MediaKeys}.
+ * a folder or a filename — see {@link com.repairshop.saas.masterdata.media.MediaKeys}.
  *
  * Both endpoints are POST. Replacement is semantically a PUT, but Tomcat only parses
  * multipart bodies on POST unless casual multipart parsing is switched on, and
@@ -35,11 +33,9 @@ import java.util.UUID;
 public class ModelMediaController {
 
     private final ModelMediaService service;
-    private final TaxonomyMediaService taxonomyService;
 
-    public ModelMediaController(ModelMediaService service, TaxonomyMediaService taxonomyService) {
+    public ModelMediaController(ModelMediaService service) {
         this.service = service;
-        this.taxonomyService = taxonomyService;
     }
 
     /**
@@ -90,72 +86,5 @@ public class ModelMediaController {
     public ResponseEntity<Map<String, String>> previewPath(@org.springframework.web.bind.annotation.RequestBody
                                                            ModelCreateForm form) {
         return ResponseEntity.ok(service.previewFolder(form));
-    }
-
-    /**
-     * Upload or replace a category tile.
-     *
-     * <pre>
-     * POST /master/device-categories/{id}/image   (multipart/form-data)
-     *   image  file  (jpeg | png | webp)
-     * </pre>
-     *
-     * Replaces the legacy path where the admin inlined the file as a base64 data URI
-     * into image_url when Cloudinary was unconfigured — the row now stores a key and
-     * the bytes live in S3.
-     */
-    @PostMapping(value = "/device-categories/{id}/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<TaxonomyImageResponse> uploadCategoryImage(@PathVariable UUID id,
-                                                                     @RequestParam("image") MultipartFile image) {
-        return ResponseEntity.ok(taxonomyService.uploadCategoryImage(id, image));
-    }
-
-    /**
-     * Upload or replace a brand logo.
-     *
-     * <pre>
-     * POST /master/brands/{id}/image   (multipart/form-data)
-     *   image  file  (jpeg | png | webp)
-     * </pre>
-     */
-    @PostMapping(value = "/brands/{id}/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<TaxonomyImageResponse> uploadBrandImage(@PathVariable UUID id,
-                                                                  @RequestParam("image") MultipartFile image) {
-        return ResponseEntity.ok(taxonomyService.uploadBrandImage(id, image));
-    }
-
-    /**
-     * Upload or replace a home-screen banner image.
-     *
-     * <pre>
-     * POST /master/banners/{id}/image   (multipart/form-data)
-     *   image  file  (jpeg | png | webp)
-     * </pre>
-     *
-     * Lands at {@code banner/slider-1-8ab31f04.jpg} — keyed on the banner's title.
-     */
-    @PostMapping(value = "/banners/{id}/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<TaxonomyImageResponse> uploadBannerImage(@PathVariable UUID id,
-                                                                   @RequestParam("image") MultipartFile image) {
-        return ResponseEntity.ok(taxonomyService.uploadBannerImage(id, image));
-    }
-
-    /**
-     * Upload or replace the reference photo on a Model Compatibility box.
-     *
-     * <pre>
-     * POST /master/model-compatibility/{id}/image   (multipart/form-data)
-     *   image  file  (jpeg | png | webp)
-     * </pre>
-     *
-     * Lands at {@code master/model-compatibility/a-12-9d3f7b10.jpg} — keyed on the
-     * box number. The rest of the box's CRUD lives on
-     * {@link ModelCompatibilityController}; only the multipart upload is here, with
-     * the other S3-backed uploads.
-     */
-    @PostMapping(value = "/model-compatibility/{id}/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<TaxonomyImageResponse> uploadCompatibilityImage(@PathVariable UUID id,
-                                                                          @RequestParam("image") MultipartFile image) {
-        return ResponseEntity.ok(taxonomyService.uploadCompatibilityImage(id, image));
     }
 }

@@ -2,8 +2,6 @@ package com.repairshop.saas.auth.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -69,54 +67,14 @@ public class User {
     @Column(name = "id_proof_url", length = 1000)
     private String idProofUrl;
 
-    /**
-     * Owner KYC documents (Aadhar front/back + PAN) as a jsonb blob. NULL until
-     * the owner or an admin uploads their first document. columnDefinition is
-     * intentionally omitted so the H2 dev profile doesn't choke on "jsonb"
-     * (mirrors MasterModel's jsonb columns).
-     */
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "kyc_document")
-    private KycDocument kycDocument;
-
     @Column(name = "personal_address", columnDefinition = "TEXT")
     private String personalAddress;
 
     @Column(nullable = false, length = 50)
-    private String role; // SHOP_OWNER, TECHNICIAN, SUPER_ADMIN, MARKET_PERSON
+    private String role; // SHOP_OWNER, TECHNICIAN, SUPER_ADMIN
 
     @Column(name = "is_active", nullable = false)
     private Boolean isActive = true;
-
-    // ---- Creator: immutable history of who made this account (migration 92) --
-    // All three are updatable = false. They are stamped once, server-side, from
-    // the authenticated creator, and no API accepts them from a client.
-
-    /** ROLE of the creator — ADMIN or MARKET_PERSON. NULL for self-registered/legacy rows. */
-    @Column(name = "created_by", length = 50, updatable = false)
-    private String createdBy;
-
-    /** users.id of the creator. NULL for self-registered/legacy rows. */
-    @Column(name = "created_person_id", updatable = false)
-    private UUID createdPersonId;
-
-    /** Creator's name as it read at creation time. */
-    @Column(name = "created_person_name", updatable = false)
-    private String createdPersonName;
-
-    // ---- Active person: who currently owns this account's relationship -------
-    // Reassignable by an admin, unlike the creator trio. Set only from a real
-    // user row looked up server-side.
-
-    /** Role of the currently assigned person — MARKET_PERSON in practice. */
-    @Column(name = "active_role", length = 50)
-    private String activeRole;
-
-    @Column(name = "active_person_id")
-    private UUID activePersonId;
-
-    @Column(name = "active_person_name")
-    private String activePersonName;
 
     @Column(name = "email_verified", nullable = false)
     private Boolean emailVerified = false;

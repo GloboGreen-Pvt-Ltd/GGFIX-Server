@@ -60,9 +60,6 @@ public class TicketResponse {
     @Schema(description = "Color")
     private String color;
 
-    @Schema(description = "Device IMEI. Falls back to the linked repair_booking's imei when the ticket's own column is blank — the pickup person captures it on the booking row.")
-    private String imei;
-
     @Schema(description = "Status")
     private String status;
 
@@ -72,25 +69,10 @@ public class TicketResponse {
     @Schema(description = "Final price")
     private BigDecimal finalPrice;
 
-    @Schema(description = "Payment mode: ADVANCE, FULL, or null when nothing was collected")
-    private String paymentType;
-
-    @Schema(description = "Amount collected; null when nothing was collected")
-    private BigDecimal paymentAmount;
-
-    @Schema(description = "Still owed: applicable total minus amount collected, never negative")
-    private BigDecimal balanceAmount;
-
-    @Schema(description = "PAID once an amount is recorded, PENDING while nothing has been collected")
-    private String paymentStatus;
-
-    @Schema(description = "When the payment was recorded (server-stamped); null when nothing was collected")
-    private Instant paymentPaidAt;
-
     @Schema(description = "Issue description")
     private String issueDescription;
 
-    @Schema(description = "Voice-note recording of the issue (Cloudinary URL). Null when none.")
+    @Schema(description = "Voice-note recording of the issue (hosted URL). Null when none.")
     private String issueAudioUrl;
 
     @Schema(description = "Created at")
@@ -147,25 +129,10 @@ public class TicketResponse {
     // screens render these on the "Technician Issue Verified & Updated"
     // card so the verification is visible without a second API call.
 
-    // ---- Invoice (invoices table, one row per ticket) ----
-    // Carried on the ticket so a list row can answer "has this booking been
-    // invoiced?" without a per-row GET /tickets/{id}/invoice. The bookings
-    // list uses it for the card's Invoice action and the Invoice counter;
-    // both therefore count real invoice rows, not a proxy status.
-
-    @Schema(description = "Id of the invoice raised against this ticket; null when none has been generated")
-    private UUID invoiceId;
-
-    @Schema(description = "Invoice number of the invoice raised against this ticket; null when none has been generated")
-    private String invoiceNo;
-
-    @Schema(description = "When the invoice was generated; null when none has been generated")
-    private Instant invoiceGeneratedAt;
-
     @Schema(description = "Latest customer-visible compliance note text from repair_notes; null when none has been submitted")
     private String complianceNote;
 
-    @Schema(description = "Cloudinary URL of the voice note attached to the latest compliance note; null when none")
+    @Schema(description = "Hosted URL of the voice note attached to the latest compliance note; null when none")
     private String complianceAudioUrl;
 
     @Schema(description = "Image URLs attached to the latest compliance note; empty list when none")
