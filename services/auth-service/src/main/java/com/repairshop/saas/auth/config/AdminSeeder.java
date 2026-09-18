@@ -26,7 +26,7 @@ public class AdminSeeder implements CommandLineRunner {
     private static final String SUPER_ADMIN_1_PASSWORD = "Dhar@1254";
     private static final String SUPER_ADMIN_1_OTP = "5642";
     private static final String SUPER_ADMIN_1_PHONE = "8012345280";
-    private static final String SUPER_ADMIN_2_EMAIL = "snandhadeveloper592000@gmail.com";
+    private static final String SUPER_ADMIN_2_EMAIL = "admin@globogreen.in";
     private static final String SUPER_ADMIN_2_PASSWORD = "nandha56@";
     private static final String SUPER_ADMIN_2_OTP = "5914";
     private static final String SUPER_ADMIN_2_PHONE = "8939615914";
@@ -38,7 +38,7 @@ public class AdminSeeder implements CommandLineRunner {
     @Transactional
     public void run(String... args) {
         upsertSuperAdmin(SUPER_ADMIN_1_EMAIL, SUPER_ADMIN_1_PASSWORD, SUPER_ADMIN_1_OTP, SUPER_ADMIN_1_PHONE, "Globo Green Mobile");
-        upsertSuperAdmin(SUPER_ADMIN_2_EMAIL, SUPER_ADMIN_2_PASSWORD, SUPER_ADMIN_2_OTP, SUPER_ADMIN_2_PHONE, "Nandha Developer");
+        upsertSuperAdmin(SUPER_ADMIN_2_EMAIL, SUPER_ADMIN_2_PASSWORD, SUPER_ADMIN_2_OTP, SUPER_ADMIN_2_PHONE, "Globo Green System & Technology Private Limited");
     }
 
     /** Idempotent upsert by email; super-admins are platform-level (shop=null). */
