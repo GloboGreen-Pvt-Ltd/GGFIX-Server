@@ -8,10 +8,12 @@ import com.repairshop.saas.common.media.S3StorageService;
 import com.repairshop.saas.masterdata.dto.TaxonomyImageResponse;
 import com.repairshop.saas.masterdata.entity.MasterBanner;
 import com.repairshop.saas.masterdata.entity.MasterBrand;
+import com.repairshop.saas.masterdata.entity.MasterCategoryMenu;
 import com.repairshop.saas.masterdata.entity.MasterDeviceCategory;
 import com.repairshop.saas.masterdata.entity.ModelCompatibility;
 import com.repairshop.saas.masterdata.repository.MasterBannerRepository;
 import com.repairshop.saas.masterdata.repository.MasterBrandRepository;
+import com.repairshop.saas.masterdata.repository.MasterCategoryMenuRepository;
 import com.repairshop.saas.masterdata.repository.MasterDeviceCategoryRepository;
 import com.repairshop.saas.masterdata.repository.ModelCompatibilityRepository;
 import org.slf4j.Logger;
@@ -52,6 +54,7 @@ public class TaxonomyMediaService {
     private final MasterBrandRepository brandRepo;
     private final MasterBannerRepository bannerRepo;
     private final ModelCompatibilityRepository compatibilityRepo;
+    private final MasterCategoryMenuRepository categoryMenuRepo;
     private final MediaUploadValidator validator;
     private final S3StorageService storage;
     /** Only for {@link MediaProperties#keyForPublicUrl} — resolving a stored URL back to its key. */
@@ -62,6 +65,7 @@ public class TaxonomyMediaService {
                                 MasterBrandRepository brandRepo,
                                 MasterBannerRepository bannerRepo,
                                 ModelCompatibilityRepository compatibilityRepo,
+                                MasterCategoryMenuRepository categoryMenuRepo,
                                 MediaUploadValidator validator,
                                 S3StorageService storage,
                                 MediaProperties props,
@@ -70,6 +74,7 @@ public class TaxonomyMediaService {
         this.brandRepo = brandRepo;
         this.bannerRepo = bannerRepo;
         this.compatibilityRepo = compatibilityRepo;
+        this.categoryMenuRepo = categoryMenuRepo;
         this.validator = validator;
         this.storage = storage;
         this.props = props;
@@ -229,6 +234,50 @@ public class TaxonomyMediaService {
         boolean previousRemoved = removeSuperseded(previousUrl, key, MediaKeys.MASTER_COMPATIBILITY_ROOT,
                 () -> compatibilityRepo.countByReferenceImageUrl(previousUrl));
         return new TaxonomyImageResponse(saved.getId(), saved.getBoxNo(), key, saved.getReferenceImageUrl(),
+                upload.originalName(), upload.contentType(), upload.size(), previousUrl, previousRemoved);
+    }
+
+    /**
+     * Upload or replace a Repair/Sell/Buy category-menu tile image.
+     *
+     * Keyed on BOTH the tile's category type and its name —
+     * {@code master/category-menu/repair/mobile-8ab31f04.jpg} — because the same
+     * menu name (e.g. "Mobile") can exist under more than one menu, and keying on
+     * the name alone (as banners do on title) would let one overwrite the
+     * other's folder. A tile with no name cannot be keyed, and is rejected
+     * rather than filed under something invented.
+     */
+    public TaxonomyImageResponse uploadCategoryMenuImage(UUID id, MultipartFile file) {
+        MasterCategoryMenu menu = categoryMenuRepo.findById(id)
+                .orElseThrow(() -> new MediaValidationException("No category menu item with id " + id + "."));
+        if (menu.getMenuName() == null || menu.getMenuName().isBlank()) {
+            throw new MediaValidationException(
+                    "This category menu item has no name, so its image cannot be named. Set a name first.");
+        }
+
+        MediaUploadValidator.ValidatedUpload upload = validator.validateImage(file);
+        String key = MediaKeys.categoryMenuImageKey(menu.getCategoryType().name(), menu.getMenuName(), upload.extension());
+        String previousUrl = menu.getImageUrl();
+        String url = storage.put(key, upload.bytes(), upload.contentType());
+
+        MasterCategoryMenu saved;
+        try {
+            saved = tx.execute(status -> {
+                MasterCategoryMenu row = categoryMenuRepo.findById(id).orElseThrow();
+                row.setImageUrl(url);
+                MasterCategoryMenu updated = categoryMenuRepo.save(row);
+                log.info("Category menu {} image -> {}", id, key);
+                return updated;
+            });
+        } catch (RuntimeException e) {
+            log.error("Category menu {} update failed after upload; removing orphaned object {}", id, key, e);
+            storage.deleteQuietly(key);
+            throw e;
+        }
+
+        boolean previousRemoved = removeSuperseded(previousUrl, key, MediaKeys.MASTER_CATEGORY_MENU_ROOT,
+                () -> categoryMenuRepo.countByImageUrl(previousUrl));
+        return new TaxonomyImageResponse(saved.getId(), saved.getMenuName(), key, saved.getImageUrl(),
                 upload.originalName(), upload.contentType(), upload.size(), previousUrl, previousRemoved);
     }
 
