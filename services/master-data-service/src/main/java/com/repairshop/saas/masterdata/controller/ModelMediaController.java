@@ -158,4 +158,21 @@ public class ModelMediaController {
                                                                           @RequestParam("image") MultipartFile image) {
         return ResponseEntity.ok(taxonomyService.uploadCompatibilityImage(id, image));
     }
+
+    /**
+     * Upload or replace a Repair/Sell/Buy category-menu tile image.
+     *
+     * <pre>
+     * POST /master/category-menu/{id}/image   (multipart/form-data)
+     *   image  file  (jpeg | png | webp)
+     * </pre>
+     *
+     * Lands at {@code master/category-menu/repair/mobile-8ab31f04.jpg} — keyed on
+     * both the tile's category type and its name.
+     */
+    @PostMapping(value = "/category-menu/{id}/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<TaxonomyImageResponse> uploadCategoryMenuImage(@PathVariable UUID id,
+                                                                         @RequestParam("image") MultipartFile image) {
+        return ResponseEntity.ok(taxonomyService.uploadCategoryMenuImage(id, image));
+    }
 }

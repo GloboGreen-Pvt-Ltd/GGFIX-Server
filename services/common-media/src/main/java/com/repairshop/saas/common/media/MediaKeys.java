@@ -27,6 +27,9 @@ import java.util.UUID;
  *
  * Part-box photo    master/model-compatibility/{box-no}-{id}.{ext}
  *                    master/model-compatibility/a-12-9d3f7b10.jpg
+ *
+ * Category menu      master/category-menu/{type-slug}/{name-slug}-{id}.{ext}
+ *                    master/category-menu/repair/mobile-1f0ab993.jpg
  * </pre>
  *
  * The catalogue layout is the reason this is folder-shaped rather than a flat
@@ -49,6 +52,8 @@ public final class MediaKeys {
     public static final String MASTER_BRANDS_ROOT = "master/brands";
     /** Reference photos of the spare part held in each compatibility box. */
     public static final String MASTER_COMPATIBILITY_ROOT = "master/model-compatibility";
+    /** Repair / Sell / Buy category-menu tiles on the customer site. */
+    public static final String MASTER_CATEGORY_MENU_ROOT = "master/category-menu";
 
     /**
      * Hex characters of randomness in each filename. Uniqueness is what stops
@@ -135,6 +140,20 @@ public final class MediaKeys {
     public static String modelCompatibilityImageKey(String boxNo, String extension) {
         return MASTER_COMPATIBILITY_ROOT + "/"
                 + uniqueName(Slugify.requireSlug(boxNo, "box no"), extension);
+    }
+
+    /**
+     * Category-menu tile artwork: {@code master/category-menu/repair/mobile-1f0ab993.png}.
+     *
+     * Keyed on BOTH the menu's category type and its name, unlike the other
+     * master/ keys — the same tile name (e.g. "Mobile") can legitimately exist
+     * under Repair and under Sell as two different rows, and keying on the name
+     * alone would let one overwrite the other's folder.
+     */
+    public static String categoryMenuImageKey(String categoryType, String menuName, String extension) {
+        return MASTER_CATEGORY_MENU_ROOT + "/"
+                + Slugify.requireSlug(categoryType, "category type") + "/"
+                + uniqueName(Slugify.requireSlug(menuName, "menu name"), extension);
     }
 
     /**
