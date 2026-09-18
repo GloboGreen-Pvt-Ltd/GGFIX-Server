@@ -27,7 +27,10 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.security.SecureRandom;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -39,6 +42,9 @@ public class AuthService {
     private final JwtService jwtService;
     private final PasswordEncoder passwordEncoder;
     private final OtpStore otpStore;
+    private final EmailService emailService;
+
+    private static final SecureRandom OTP_RANDOM = new SecureRandom();
 
     /**
      * Unified login. The identifier in {@code request.email} may be either an
@@ -752,6 +758,36 @@ public class AuthService {
         u.setEmailVerified(true);
         u = userRepository.save(u);
         return toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()));
+    }
+
+    /**
+     * Sends a management-login OTP: generates a 6-digit code and stores it on
+     * {@code users.otp_code} — the same column {@link #login} checks for its otp
+     * branch — rather than the in-memory {@link OtpStore} the email-verify flow
+     * above uses, since login has no way to consult that store.
+     */
+    @Transactional
+    public Map<String, Object> sendManagementLoginOtp(String email) {
+        if (email == null || email.isBlank())
+            throw new BadRequestException("Email is required");
+        User user = userRepository.findByEmail(email.trim())
+                .orElseThrow(() -> new BadRequestException("No management account was found for this email."));
+
+        String code = String.format("%06d", OTP_RANDOM.nextInt(1_000_000));
+        user.setOtpCode(code);
+        userRepository.save(user);
+
+        boolean sent = emailService.sendOtpEmail(user.getEmail(), code, "sign in to the GGFIX Management Portal");
+
+        Map<String, Object> res = new HashMap<>();
+        res.put("sent", sent);
+        res.put("target", user.getEmail());
+        res.put("ttlMinutes", 10);
+        // Resend not configured, or the call failed — surface the code so the
+        // portal stays usable without a working mail provider, same convenience
+        // sendEmailVerifyOtp's caller already relies on.
+        if (!sent) res.put("devOtp", code);
+        return res;
     }
 
     // ---- Per-location CRUD -----------------------------------------------------

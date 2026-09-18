@@ -228,6 +228,22 @@ public class AuthController {
         return authService.confirmEmailVerifyOtp(email, otp);
     }
 
+    // ---- Management-portal OTP login (writes users.otp_code, unlike the
+    // in-memory email-verify OTP above, because that's the column POST /auth/login
+    // already checks for its otp branch) ---------------------------------------
+
+    @PostMapping("/otp/send")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Send a management-login OTP",
+            description = "Generates a 6-digit code, stores it on the user's users.otp_code (the same "
+                    + "column POST /auth/login verifies), and emails it via Resend when configured. "
+                    + "Response includes devOtp when email sending is skipped or fails, so the portal "
+                    + "stays usable without a working mail provider.")
+    public Map<String, Object> sendOtp(@RequestBody Map<String, String> body) {
+        String email = body == null ? null : body.get("email");
+        return authService.sendManagementLoginOtp(email);
+    }
+
     // ---- Per-location CRUD ----------------------------------------------------
 
     @PostMapping("/shop-owners/{ownerId}/locations")
