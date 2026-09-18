@@ -36,6 +36,7 @@ public class MasterExtensionController {
     private final MasterCategoryBrandMappingRepository categoryBrandRepo;
     private final MasterModelRepository modelRepo;
     private final MasterBrandRepository brandRepo;
+    private final MasterCategoryMenuRepository categoryMenuRepo;
 
     public MasterExtensionController(MasterDeviceCategoryRepository deviceCategoryRepo,
                                      MasterDeviceSeriesRepository deviceSeriesRepo,
@@ -52,7 +53,8 @@ public class MasterExtensionController {
                                      MasterSupportContactRepository supportContactRepo,
                                      MasterCategoryBrandMappingRepository categoryBrandRepo,
                                      MasterModelRepository modelRepo,
-                                     MasterBrandRepository brandRepo) {
+                                     MasterBrandRepository brandRepo,
+                                     MasterCategoryMenuRepository categoryMenuRepo) {
         this.deviceCategoryRepo = deviceCategoryRepo;
         this.deviceSeriesRepo = deviceSeriesRepo;
         this.colorRepo = colorRepo;
@@ -69,6 +71,7 @@ public class MasterExtensionController {
         this.categoryBrandRepo = categoryBrandRepo;
         this.modelRepo = modelRepo;
         this.brandRepo = brandRepo;
+        this.categoryMenuRepo = categoryMenuRepo;
     }
 
     private static int nz(Integer v) { return v == null ? 0 : v; }
@@ -729,6 +732,102 @@ public class MasterExtensionController {
     public ResponseEntity<Void> deleteBanner(@PathVariable UUID id) {
         if (!bannerRepo.existsById(id)) return ResponseEntity.notFound().build();
         bannerRepo.deleteById(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    // ---- Category Menu (Repair / Sell / Buy tiles on the customer site) ----
+
+    /**
+     * Parses the client's "REPAIR" / "SELL" / "BUY" string against
+     * {@link CategoryMenuType}. Kept separate from the entity's own enum column
+     * so a bad value surfaces as a controller-level 400 with the offending
+     * value named, rather than a Jackson deserialization failure.
+     */
+    private static CategoryMenuType parseCategoryType(String raw) {
+        return CategoryMenuType.valueOf(raw.trim().toUpperCase());
+    }
+
+    @GetMapping("/category-menu")
+    public ResponseEntity<List<MasterCategoryMenu>> getCategoryMenu(
+            @RequestParam(value = "categoryType", required = false) String categoryType) {
+        if (categoryType == null || categoryType.isBlank()) {
+            return ResponseEntity.ok(categoryMenuRepo.findAllByOrderBySortOrderAsc());
+        }
+        CategoryMenuType type;
+        try {
+            type = parseCategoryType(categoryType);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.ok(categoryMenuRepo.findAllByCategoryTypeOrderBySortOrderAsc(type));
+    }
+
+    @GetMapping("/category-menu/{id}")
+    public ResponseEntity<MasterCategoryMenu> getCategoryMenuItem(@PathVariable UUID id) {
+        return categoryMenuRepo.findById(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    @PostMapping("/category-menu")
+    public ResponseEntity<MasterCategoryMenu> createCategoryMenuItem(@RequestBody CategoryMenuRequest req) {
+        CategoryMenuType type;
+        try {
+            type = parseCategoryType(req.getCategoryType());
+        } catch (IllegalArgumentException | NullPointerException e) {
+            return ResponseEntity.badRequest().build();
+        }
+        MasterCategoryMenu e = MasterCategoryMenu.builder()
+                .categoryType(type)
+                .menuName(req.getMenuName())
+                .slug(req.getSlug())
+                .description(req.getDescription())
+                .imageUrl(req.getImageUrl())
+                .sortOrder(nz(req.getSortOrder()))
+                .isActive(nzb(req.getIsActive()))
+                .build();
+        return ResponseEntity.ok(categoryMenuRepo.save(e));
+    }
+
+    @PutMapping("/category-menu/{id}")
+    public ResponseEntity<MasterCategoryMenu> updateCategoryMenuItem(@PathVariable UUID id,
+                                                                     @RequestBody CategoryMenuRequest req) {
+        CategoryMenuType type;
+        try {
+            type = parseCategoryType(req.getCategoryType());
+        } catch (IllegalArgumentException | NullPointerException e) {
+            return ResponseEntity.badRequest().build();
+        }
+        return categoryMenuRepo.findById(id)
+                .map(e -> {
+                    e.setCategoryType(type);
+                    e.setMenuName(req.getMenuName());
+                    e.setSlug(req.getSlug());
+                    e.setDescription(req.getDescription());
+                    e.setImageUrl(req.getImageUrl());
+                    if (req.getSortOrder() != null) e.setSortOrder(req.getSortOrder());
+                    if (req.getIsActive() != null) e.setIsActive(req.getIsActive());
+                    return ResponseEntity.ok(categoryMenuRepo.save(e));
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    @PatchMapping("/category-menu/{id}/status")
+    public ResponseEntity<MasterCategoryMenu> updateCategoryMenuStatus(@PathVariable UUID id,
+                                                                       @RequestBody CategoryMenuStatusRequest req) {
+        if (req.isActive() == null) return ResponseEntity.badRequest().build();
+        return categoryMenuRepo.findById(id)
+                .map(e -> {
+                    e.setIsActive(req.isActive());
+                    return ResponseEntity.ok(categoryMenuRepo.save(e));
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    @DeleteMapping("/category-menu/{id}")
+    public ResponseEntity<Void> deleteCategoryMenuItem(@PathVariable UUID id) {
+        if (!categoryMenuRepo.existsById(id)) return ResponseEntity.notFound().build();
+        categoryMenuRepo.deleteById(id);
         return ResponseEntity.noContent().build();
     }
 
