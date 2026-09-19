@@ -120,9 +120,13 @@ else
   exit 1
 fi
 
-# The edge is up, so services should answer quickly. Shorten per-service retries
-# to keep a fully-broken service from burning the whole budget.
-SERVICE_RETRIES="${SERVICE_RETRIES:-12}"
+# The edge is up, so most services should answer quickly. auth-service in
+# particular has been observed taking 140-190s+ to finish Spring Boot startup
+# on the preview/production instance sizes (confirmed via journalctl on both,
+# 2026-09-18/19 — the process was healthy, just still starting when the old
+# 120s budget ran out), so this needs real headroom above that, not just
+# enough to catch a hung/broken service quickly.
+SERVICE_RETRIES="${SERVICE_RETRIES:-24}"
 RETRIES="$SERVICE_RETRIES"
 
 # ---- 2. Each service -------------------------------------------------------
