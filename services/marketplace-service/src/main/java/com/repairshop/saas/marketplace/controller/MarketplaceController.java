@@ -1,5 +1,8 @@
 package com.repairshop.saas.marketplace.controller;
 
+import com.repairshop.saas.common.devicespecs.DeviceSpecCategory;
+import com.repairshop.saas.common.devicespecs.DeviceSpecService;
+import com.repairshop.saas.common.devicespecs.DeviceSpecs;
 import com.repairshop.saas.marketplace.dto.ProductRequest;
 import com.repairshop.saas.marketplace.dto.ProductResponse;
 import com.repairshop.saas.marketplace.entity.MarketplaceProduct;
@@ -20,6 +23,7 @@ import java.util.UUID;
 public class MarketplaceController {
 
     private final MarketplaceProductRepository productRepo;
+    private final DeviceSpecService deviceSpecService;
 
     @GetMapping("/products")
     public ResponseEntity<List<ProductResponse>> listProducts(
@@ -77,6 +81,7 @@ public class MarketplaceController {
             throw new IllegalArgumentException(
                     "A shop is required to create a listing. Please re-open the app so your shop loads, then try again.");
         }
+        DeviceSpecs specs = resolveDeviceSpecs(req, req.getModelId());
         MarketplaceProduct p = MarketplaceProduct.builder()
                 .shopId(shopId)
                 .sellerUserId(sellerUserId)
@@ -101,6 +106,7 @@ public class MarketplaceController {
                 .extraImageUrls(ProductMapper.serializeExtraImages(req.getExtraImageUrls()))
                 .assessmentJson(req.getAssessmentJson())
                 .build();
+        applyDeviceSpecs(p, specs);
         return ResponseEntity.ok(ProductMapper.toResponse(productRepo.save(p)));
     }
 
@@ -108,6 +114,7 @@ public class MarketplaceController {
     public ResponseEntity<ProductResponse> updateProduct(@PathVariable UUID id, @RequestBody ProductRequest req) {
         MarketplaceProduct p = productRepo.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + id));
+        DeviceSpecs specs = resolveDeviceSpecs(req, req.getModelId() != null ? req.getModelId() : p.getModelId());
         if (req.getShopId() != null) p.setShopId(req.getShopId());
         if (req.getBrandId() != null) p.setBrandId(req.getBrandId());
         if (req.getModelId() != null) p.setModelId(req.getModelId());
@@ -129,7 +136,42 @@ public class MarketplaceController {
         if (req.getImageUrl() != null) p.setImageUrl(req.getImageUrl());
         if (req.getExtraImageUrls() != null) p.setExtraImageUrls(ProductMapper.serializeExtraImages(req.getExtraImageUrls()));
         if (req.getAssessmentJson() != null) p.setAssessmentJson(req.getAssessmentJson());
+        // Unlike the null-skip fields above, the specs move as one group: a PUT
+        // that names a deviceCategory replaces all seven, so a listing switched
+        // from LAPTOP to SMARTWATCH doesn't keep the laptop's RAM. A PUT without
+        // one (e.g. the status-only update) leaves them alone.
+        applyDeviceSpecs(p, specs);
         return ResponseEntity.ok(ProductMapper.toResponse(productRepo.save(p)));
+    }
+
+    /**
+     * Validate + normalize the request's category-specific device attributes
+     * (common-device-specs, shared with ticket-service). Null when the request
+     * carries neither a deviceCategory nor any attribute.
+     */
+    private DeviceSpecs resolveDeviceSpecs(ProductRequest req, UUID modelId) {
+        return deviceSpecService.resolve(
+                new DeviceSpecs(req.getDeviceCategory(), req.getRam(), req.getStorageCapacity(),
+                        req.getStorageType(), req.getCaseSize(), req.getConnectivity(), req.getDeviceType()),
+                modelId, req.getRamOptionId(), req.getStorageOptionId());
+    }
+
+    private static void applyDeviceSpecs(MarketplaceProduct p, DeviceSpecs specs) {
+        if (specs == null) return;
+        p.setDeviceCategory(specs.deviceCategory());
+        p.setRam(specs.ram());
+        p.setStorageCapacity(specs.storageCapacity());
+        p.setStorageType(specs.storageType());
+        p.setCaseSize(specs.caseSize());
+        p.setConnectivity(specs.connectivity());
+        p.setDeviceType(specs.deviceType());
+        // Laptop / watch / audio specs live in the columns above; a master
+        // option id left over from before would be a second, stale answer.
+        DeviceSpecCategory category = DeviceSpecCategory.fromCode(specs.deviceCategory()).orElse(null);
+        if (category != null && !category.usesMasterOptionIds()) {
+            p.setRamOptionId(null);
+            p.setStorageOptionId(null);
+        }
     }
 
     @DeleteMapping("/products/{id}")

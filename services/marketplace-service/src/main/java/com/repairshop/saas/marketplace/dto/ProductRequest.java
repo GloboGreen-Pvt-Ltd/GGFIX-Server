@@ -34,6 +34,16 @@ public class ProductRequest {
     private String color;
     private String ramLabel;
     private String storageLabel;
+
+    // Category-specific device specifications. Sending any attribute requires
+    // deviceCategory; one that doesn't belong to the category is a 400.
+    private String deviceCategory;   // MOBILE | TABLET | LAPTOP | SMARTWATCH | AUDIO_DEVICE
+    private String ram;
+    private String storageCapacity;
+    private String storageType;      // HDD | SATA_SSD | NVME_SSD
+    private String caseSize;
+    private String connectivity;
+    private String deviceType;
     private String network;
     private String imei;
     private String workingCondition;

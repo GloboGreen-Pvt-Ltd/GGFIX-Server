@@ -29,6 +29,13 @@ public class ProductResponse {
     private String color;
     private String ramLabel;
     private String storageLabel;
+    private String deviceCategory;
+    private String ram;
+    private String storageCapacity;
+    private String storageType;
+    private String caseSize;
+    private String connectivity;
+    private String deviceType;
     private String network;
     private String imei;
     private String workingCondition;

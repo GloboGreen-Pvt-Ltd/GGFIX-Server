@@ -65,6 +65,33 @@ public class MarketplaceProduct {
     @Column(name = "storage_label", length = 50)
     private String storageLabel;
 
+    // ---- Category-specific device specifications (migration 98) -----------
+    // Same columns and stored forms as tickets: normalized by
+    // common-device-specs ("16GB", "NVME_SSD", "44MM", "GPS_CELLULAR").
+    // MOBILE / TABLET keep ram_option_id / storage_option_id and leave these
+    // NULL. ram_label / storage_label stay as the display copy older screens read.
+
+    @Column(name = "device_category", length = 30)
+    private String deviceCategory;   // MOBILE | TABLET | LAPTOP | SMARTWATCH | AUDIO_DEVICE
+
+    @Column(name = "ram", length = 20)
+    private String ram;              // LAPTOP, e.g. 16GB
+
+    @Column(name = "storage_capacity", length = 20)
+    private String storageCapacity;  // LAPTOP, e.g. 512GB
+
+    @Column(name = "storage_type", length = 20)
+    private String storageType;      // LAPTOP: HDD | SATA_SSD | NVME_SSD
+
+    @Column(name = "case_size", length = 20)
+    private String caseSize;         // SMARTWATCH, e.g. 44MM
+
+    @Column(name = "connectivity", length = 40)
+    private String connectivity;     // SMARTWATCH / AUDIO_DEVICE, e.g. GPS_CELLULAR
+
+    @Column(name = "device_type", length = 40)
+    private String deviceType;       // AUDIO_DEVICE, e.g. TWS_EARBUDS
+
     @Column(length = 50)
     private String network;
 

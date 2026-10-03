@@ -43,6 +43,33 @@ public class TicketRequest {
     @Schema(description = "Device color")
     private String color;
 
+    // ---- Category-specific device specifications ---------------------------
+    // Validated + normalized by common-device-specs. Sending any attribute
+    // requires deviceCategory; an attribute that doesn't belong to the category
+    // (e.g. storageType on a SMARTWATCH) is rejected with 400. A request with no
+    // deviceCategory leaves the stored values untouched (older app builds).
+
+    @Schema(description = "Device category: MOBILE, TABLET, LAPTOP, SMARTWATCH (SMARTWATCHES accepted) or AUDIO_DEVICE")
+    private String deviceCategory;
+
+    @Schema(description = "LAPTOP: RAM, e.g. 16GB")
+    private String ram;
+
+    @Schema(description = "LAPTOP: storage capacity, e.g. 512GB or 1TB")
+    private String storageCapacity;
+
+    @Schema(description = "LAPTOP: storage type, one of HDD, SATA_SSD, NVME_SSD")
+    private String storageType;
+
+    @Schema(description = "SMARTWATCH: case size, e.g. 44MM")
+    private String caseSize;
+
+    @Schema(description = "SMARTWATCH / AUDIO_DEVICE: connectivity code, e.g. GPS_CELLULAR, BLUETOOTH")
+    private String connectivity;
+
+    @Schema(description = "AUDIO_DEVICE: device type code, e.g. TWS_EARBUDS")
+    private String deviceType;
+
     @Schema(description = "IMEI")
     private String imei;
 

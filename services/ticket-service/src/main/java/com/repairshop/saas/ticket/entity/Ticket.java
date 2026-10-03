@@ -72,6 +72,40 @@ public class Ticket {
     @Column(length = 100)
     private String color;
 
+    // ---- Category-specific device specifications (migration 98) -----------
+    // Laptop / Smartwatch / Audio Device attributes, stored normalized by
+    // common-device-specs ("16GB", "NVME_SSD", "44MM", "GPS_CELLULAR").
+    // MOBILE / TABLET keep using ram_option_id / storage_option_id above and
+    // leave these NULL. All NULL on tickets booked before migration 98.
+
+    /** MOBILE | TABLET | LAPTOP | SMARTWATCH | AUDIO_DEVICE: which of the columns below apply. */
+    @Column(name = "device_category", length = 30)
+    private String deviceCategory;
+
+    /** Laptop RAM, e.g. 16GB. */
+    @Column(name = "ram", length = 20)
+    private String ram;
+
+    /** Laptop storage capacity, e.g. 512GB / 1TB. */
+    @Column(name = "storage_capacity", length = 20)
+    private String storageCapacity;
+
+    /** Laptop storage type: HDD | SATA_SSD | NVME_SSD. */
+    @Column(name = "storage_type", length = 20)
+    private String storageType;
+
+    /** Smartwatch case size, e.g. 44MM. */
+    @Column(name = "case_size", length = 20)
+    private String caseSize;
+
+    /** Smartwatch / audio connectivity code, e.g. GPS_CELLULAR, BLUETOOTH. */
+    @Column(name = "connectivity", length = 40)
+    private String connectivity;
+
+    /** Audio device type code, e.g. TWS_EARBUDS, BLUETOOTH_SPEAKER. */
+    @Column(name = "device_type", length = 40)
+    private String deviceType;
+
     @Column(length = 50)
     private String imei;
 
