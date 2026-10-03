@@ -112,6 +112,51 @@ class DeviceMatcherTest {
         assertNull(r.brandId());
     }
 
+    /** Google's actual answer for the catalogue's Galaxy S8 Plus product photo (3 Oct 2026). */
+    @Test
+    void realGoogleAnswerForAnS8PlusPhotoPutsS8PlusFirst() {
+        Map<String, Double> entities = new LinkedHashMap<>();
+        entities.put("Samsung Galaxy S8+ 64GB", 1.278);
+        entities.put("Galaxy S8", 0.894);
+        entities.put("Samsung", 0.723);
+        entities.put("Samsung Electronics", 0.712);
+        entities.put("Mobile Phone", 0.707);
+        entities.put("Coral Blue", 0.704);
+        entities.put("Arctic Silver", 0.704);
+        entities.put("EDGE", 0.702);
+        entities.put("Smartphone", 0.702);
+        DeviceMatcher.Result r = DeviceMatcher.match(CATALOG, BRANDS,
+                signals(List.of("le samsung galaxy s8"), entities, List.of("Samsung", "Samsung"), ""), 8);
+        List<String> n = names(r);
+        assertEquals("Galaxy S8 Plus", n.get(0), n.toString());
+        assertEquals("Galaxy S8", n.get(1), n.toString());
+        assertFalse(n.contains("Galaxy Tab S8 Plus"), n.toString());
+        assertEquals("Samsung Galaxy S8+ 64GB", r.recognisedAs());
+    }
+
+    /** A real S8 photo: Google's top entity is the S8 itself, so no refinement to S8+. */
+    @Test
+    void weakerS8PlusEntityDoesNotOverrideAnS8Answer() {
+        Map<String, Double> entities = new LinkedHashMap<>();
+        entities.put("Samsung Galaxy S8", 1.3);
+        entities.put("Samsung Galaxy S8+", 0.6);
+        DeviceMatcher.Result r = DeviceMatcher.match(CATALOG, BRANDS,
+                signals(List.of("samsung galaxy s8"), entities, List.of("Samsung"), ""), 8);
+        assertEquals("Galaxy S8", r.matches().get(0).model().name());
+        assertTrue(names(r).contains("Galaxy S8 Plus"));
+    }
+
+    /** Google's actual answer for a screenshot of the scanner: nothing but "smartphone". */
+    @Test
+    void realGoogleAnswerForAScreenshotFallsBackToTheBrandReadOffThePhone() {
+        DeviceMatcher.Result r = DeviceMatcher.match(CATALOG, BRANDS,
+                signals(List.of("smartphone"), Map.of("Smartphone", 0.407, "Screenshot", 0.338), List.of(),
+                        "5:58\nVisual Device Scanner\nSAMSUNG\nDUOS\nDESIGNED & ENGINE\n1354359/0"), 8);
+        assertEquals("low", r.confidence());
+        assertEquals(SAMSUNG, r.brandId());
+        assertTrue(r.matches().stream().allMatch(m -> "brand".equals(m.matchedBy())));
+    }
+
     @Test
     void plusSignAndWordPlusTokeniseTheSame() {
         assertEquals(DeviceMatcher.tokens("Galaxy S8 Plus"), DeviceMatcher.tokens("Galaxy S8+").subList(0, 3));

@@ -41,7 +41,10 @@ public final class DeviceMatcher {
      * @param brandId    brand of the top match, or the brand Google saw when
      *                   nothing narrower matched; null when neither
      */
-    public record Result(List<Match> matches, String confidence, UUID brandId) {}
+    public record Result(List<Match> matches, String confidence, UUID brandId, String recognisedAs) {}
+
+    /** One Google label, kept as Google wrote it for display. */
+    private record Phrase(String text, List<String> tokens, double weight) {}
 
     /** Words in web labels that say nothing about which model it is. */
     private static final Set<String> GENERIC = Set.of(
@@ -49,7 +52,22 @@ public final class DeviceMatcher {
             "device", "devices", "android", "ios", "gadget", "gadgets", "electronics", "electronic",
             "product", "communication", "communications", "portable", "feature", "case", "cover",
             "screen", "display", "series", "handset", "unlocked", "refurbished", "new", "used",
-            "price", "review", "specs", "specifications", "the", "and", "for", "with", "of");
+            "price", "review", "specs", "specifications", "the", "and", "for", "with", "of",
+            // Google's best-guess label is sometimes not in English
+            // ("le samsung galaxy s8").
+            "le", "la", "les", "el", "der", "die", "das", "de", "del", "di", "du");
+
+    /** A storage size inside a label ("Samsung Galaxy S8+ 64GB") names a variant, not a model. */
+    private static boolean isCapacity(String token) {
+        return token.matches("\\d+(gb|tb|mb)");
+    }
+
+    /**
+     * When the model a strong label names exactly refines a less specific one
+     * ("Galaxy S8+" vs the best guess "galaxy s8"), the refinement leads. A web
+     * entity at or above this weight counts as strong (0.9 = Google's top entity).
+     */
+    private static final double REFINE_MIN_WEIGHT = 0.85;
 
     /** Words a catalogue name may carry that a web label usually leaves out. */
     private static final Set<String> OPTIONAL = Set.of(
@@ -81,7 +99,7 @@ public final class DeviceMatcher {
 
     public static Result match(List<CatalogModel> catalog, Map<UUID, String> brandNames,
                                VisionSignals signals, int limit) {
-        if (catalog == null || catalog.isEmpty() || signals == null) return new Result(List.of(), "low", null);
+        if (catalog == null || catalog.isEmpty() || signals == null) return new Result(List.of(), "low", null, null);
 
         // ── brands ──────────────────────────────────────────────────────────
         Map<UUID, List<String>> brandTokens = new HashMap<>();
@@ -94,15 +112,15 @@ public final class DeviceMatcher {
                 .forEach(b -> seenBrands.merge(b, 1.0, Math::max)));
 
         // ── labels: best guesses (1.0) + web entities (≤ 0.9) ───────────────
-        List<Map.Entry<List<String>, Double>> phrases = new ArrayList<>();
-        signals.bestGuessLabels().forEach(l -> phrases.add(Map.entry(tokens(l), 1.0)));
+        List<Phrase> phrases = new ArrayList<>();
+        signals.bestGuessLabels().forEach(l -> phrases.add(new Phrase(l, tokens(l), 1.0)));
         double maxEntity = signals.webEntities().stream().mapToDouble(VisionSignals.WebEntity::score).max().orElse(0);
         for (VisionSignals.WebEntity e : signals.webEntities()) {
             if (e.description() == null || maxEntity <= 0) continue;
-            phrases.add(Map.entry(tokens(e.description()), 0.9 * Math.min(1.0, e.score() / maxEntity)));
+            phrases.add(new Phrase(e.description(), tokens(e.description()), 0.9 * Math.min(1.0, e.score() / maxEntity)));
         }
-        for (Map.Entry<List<String>, Double> p : phrases) {
-            mentionedBrands(p.getKey(), brandTokens).forEach(b -> seenBrands.merge(b, p.getValue(), Math::max));
+        for (Phrase p : phrases) {
+            mentionedBrands(p.tokens(), brandTokens).forEach(b -> seenBrands.merge(b, p.weight(), Math::max));
         }
         mentionedBrands(tokens(signals.text()), brandTokens).forEach(b -> seenBrands.merge(b, 0.6, Math::max));
 
@@ -118,14 +136,18 @@ public final class DeviceMatcher {
         Map<UUID, Double> best = new HashMap<>();
         Map<UUID, Integer> support = new HashMap<>();
         Map<UUID, String> how = new HashMap<>();
+        // Weight (and text) of the strongest label each model matched exactly.
+        Map<UUID, Double> exactWeight = new HashMap<>();
+        Map<UUID, String> exactText = new HashMap<>();
 
-        for (Map.Entry<List<String>, Double> p : phrases) {
-            List<String> pt = p.getKey();
-            double weight = p.getValue();
+        for (Phrase p : phrases) {
+            List<String> pt = p.tokens();
+            double weight = p.weight();
             Set<UUID> mentioned = mentionedBrands(pt, brandTokens);
             Set<String> core = new LinkedHashSet<>(pt);
             core.removeAll(GENERIC);
             core.removeAll(OPTIONAL);
+            core.removeIf(DeviceMatcher::isCapacity);
             mentioned.forEach(b -> core.removeAll(brandTokens.get(b)));
             if (core.isEmpty()) continue; // a bare brand / generic label
 
@@ -142,7 +164,13 @@ public final class DeviceMatcher {
                     best.put(m.id(), s);
                     how.put(m.id(), "label");
                 }
-                if (specificity >= 0.999) support.merge(m.id(), 1, Integer::sum);
+                if (specificity >= 0.999) {
+                    support.merge(m.id(), 1, Integer::sum);
+                    if (weight > exactWeight.getOrDefault(m.id(), 0.0)) {
+                        exactWeight.put(m.id(), weight);
+                        exactText.put(m.id(), p.text());
+                    }
+                }
             }
         }
 
@@ -169,12 +197,29 @@ public final class DeviceMatcher {
 
         Map<UUID, CatalogModel> byId = new HashMap<>();
         catalog.forEach(m -> byId.put(m.id(), m));
-        List<Match> ranked = new ArrayList<>();
+        Map<UUID, Double> scored = new HashMap<>();
         best.forEach((id, s) -> {
             if (s < MIN_SCORE && !"modelNumber".equals(how.get(id))) return;
-            double boosted = s + 0.05 * Math.max(0, support.getOrDefault(id, 0) - 1);
-            ranked.add(new Match(byId.get(id), Math.min(1.25, boosted), how.get(id)));
+            scored.put(id, s + 0.05 * Math.max(0, support.getOrDefault(id, 0) - 1));
         });
+        // Refinement: a model a strong label names exactly, whose name extends
+        // another scored model of the same brand (S8+ ⊃ S8), ranks just above it.
+        // Google often captions an S8+ photo "galaxy s8" while its top web entity
+        // says "Galaxy S8+"; the more specific answer is the useful one, and the
+        // less specific stays right below it.
+        for (UUID a : new ArrayList<>(scored.keySet())) {
+            if (exactWeight.getOrDefault(a, 0.0) < REFINE_MIN_WEIGHT || "modelNumber".equals(how.get(a))) continue;
+            Set<String> ac = cores.get(a);
+            for (UUID b : scored.keySet()) {
+                if (a.equals(b) || "modelNumber".equals(how.get(b))) continue;
+                if (!Objects.equals(byId.get(a).brandId(), byId.get(b).brandId())) continue;
+                Set<String> bc = cores.get(b);
+                if (bc.isEmpty() || ac.size() <= bc.size() || !ac.containsAll(bc)) continue;
+                if (scored.get(a) <= scored.get(b)) scored.put(a, scored.get(b) + 0.01);
+            }
+        }
+        List<Match> ranked = new ArrayList<>();
+        scored.forEach((id, s) -> ranked.add(new Match(byId.get(id), Math.min(1.25, s), how.get(id))));
         ranked.sort(Comparator.comparingDouble(Match::score).reversed()
                 .thenComparing(m -> m.model().name(), String.CASE_INSENSITIVE_ORDER));
 
@@ -182,7 +227,7 @@ public final class DeviceMatcher {
         if (ranked.isEmpty()) {
             UUID brand = seenBrands.entrySet().stream()
                     .max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse(null);
-            if (brand == null) return new Result(List.of(), "low", null);
+            if (brand == null) return new Result(List.of(), "low", null, null);
             List<Match> brandModels = catalog.stream()
                     .filter(m -> brand.equals(m.brandId()))
                     // Skip junk rows ("0") that would head an alphabetical list.
@@ -191,7 +236,7 @@ public final class DeviceMatcher {
                     .limit(limit)
                     .map(m -> new Match(m, 0.0, "brand"))
                     .toList();
-            return new Result(brandModels, "low", brand);
+            return new Result(brandModels, "low", brand, null);
         }
 
         // ── the top model's close siblings (S8 ↔ S8+ ↔ S8 Active) ────────────
@@ -220,7 +265,10 @@ public final class DeviceMatcher {
         double second = out.size() > 1 ? out.get(1).score() : 0;
         String confidence = top.score() >= 0.9 && second <= top.score() - 0.2 ? "high"
                 : top.score() >= 0.5 ? "medium" : "low";
-        return new Result(List.copyOf(out), confidence, top.model().brandId());
+        // What Google called it, in its own words — the label behind the top
+        // match ("Samsung Galaxy S8+ 64GB"), not necessarily the best guess.
+        String recognisedAs = exactText.get(top.model().id());
+        return new Result(List.copyOf(out), confidence, top.model().brandId(), recognisedAs);
     }
 
     /** Brands whose name appears in the tokens as consecutive words. */

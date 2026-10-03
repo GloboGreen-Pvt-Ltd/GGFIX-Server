@@ -92,6 +92,7 @@ public class DeviceIdentifyController {
                 .toList();
         out.put("confidence", result.confidence());
         out.put("labels", signals.bestGuessLabels());
+        out.put("recognisedAs", result.recognisedAs());
         out.put("brand", result.brandId() == null ? null : snap.brandNames().get(result.brandId()));
         out.put("matches", matches);
         out.put("bestMatch", !matches.isEmpty() && result.matches().get(0).score() > 0 ? matches.get(0) : null);
