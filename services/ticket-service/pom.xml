@@ -75,11 +75,6 @@
             <artifactId>common-subscription</artifactId>
             <version>${project.version}</version>
         </dependency>
-        <dependency>
-            <groupId>com.repairshop.saas</groupId>
-            <artifactId>common-device-specs</artifactId>
-            <version>${project.version}</version>
-        </dependency>
     </dependencies>
 
     <build>

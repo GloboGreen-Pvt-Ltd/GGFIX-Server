@@ -9,16 +9,6 @@ spring:
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
-  sql:
-    init:
-      # Adds the category device-spec columns before Hibernate's validate runs
-      # (db/device-specs-columns.sql), so this service starts even if migration
-      # 98 hasn't been applied yet. continue-on-error: a failed ALTER is logged
-      # and validate then decides, exactly as without this step.
-      mode: always
-      schema-locations: classpath:db/device-specs-columns.sql
-      data-locations: optional:classpath:db/no-seed-data.sql
-      continue-on-error: true
   jpa:
     hibernate:
       ddl-auto: validate

@@ -60,27 +60,6 @@ public class TicketResponse {
     @Schema(description = "Color")
     private String color;
 
-    @Schema(description = "Device category: MOBILE, TABLET, LAPTOP, SMARTWATCH or AUDIO_DEVICE; null on tickets booked before category specs")
-    private String deviceCategory;
-
-    @Schema(description = "LAPTOP: RAM, e.g. 16GB")
-    private String ram;
-
-    @Schema(description = "LAPTOP: storage capacity, e.g. 512GB")
-    private String storageCapacity;
-
-    @Schema(description = "LAPTOP: storage type, one of HDD, SATA_SSD, NVME_SSD")
-    private String storageType;
-
-    @Schema(description = "SMARTWATCH: case size, e.g. 44MM")
-    private String caseSize;
-
-    @Schema(description = "SMARTWATCH / AUDIO_DEVICE: connectivity code")
-    private String connectivity;
-
-    @Schema(description = "AUDIO_DEVICE: device type code")
-    private String deviceType;
-
     @Schema(description = "Device IMEI. Falls back to the linked repair_booking's imei when the ticket's own column is blank — the pickup person captures it on the booking row.")
     private String imei;
 

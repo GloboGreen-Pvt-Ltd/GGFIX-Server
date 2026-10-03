@@ -3,13 +3,11 @@ package com.repairshop.saas.ticket;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
-// common.subscription carries the shared plan catalogue and limit engine, and
-// common.devicespecs the per-category device specification rules; both are
-// plain jars with no auto-configuration, so they have to be named here to be found.
+// common.subscription carries the shared plan catalogue and limit engine; it is
+// a plain jar with no auto-configuration, so it has to be named here to be found.
 @SpringBootApplication(scanBasePackages = {
         "com.repairshop.saas.ticket",
-        "com.repairshop.saas.common.subscription",
-        "com.repairshop.saas.common.devicespecs"
+        "com.repairshop.saas.common.subscription"
 })
 public class TicketServiceApplication {
 

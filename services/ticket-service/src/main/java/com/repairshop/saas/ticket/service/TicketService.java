@@ -1,7 +1,5 @@
 package com.repairshop.saas.ticket.service;
 
-import com.repairshop.saas.common.devicespecs.DeviceSpecService;
-import com.repairshop.saas.common.devicespecs.DeviceSpecs;
 import com.repairshop.saas.ticket.dto.CreateRepairNoteRequest;
 import com.repairshop.saas.ticket.dto.CreateSolutionPackRequest;
 import com.repairshop.saas.ticket.dto.RepairNoteResponse;
@@ -64,7 +62,6 @@ public class TicketService {
     private final MasterTechnicianWorkStatusViewRepository masterWorkStatusRepository;
     private final InvoiceRepository invoiceRepository;
     private final CustomerOrderMirrorService customerOrderMirrorService;
-    private final DeviceSpecService deviceSpecService;
 
     private static final String TRACKING_PREFIX = "CSPEN";
 
@@ -270,9 +267,6 @@ public class TicketService {
 
     @Transactional
     public TicketResponse create(UUID shopId, TicketRequest request) {
-        // Before anything is minted: a request whose specs don't fit its
-        // category is a 400, not a ticket with a tracking id and no device.
-        DeviceSpecs specs = resolveDeviceSpecs(request);
         String trackingId = generateTrackingId(shopId);
         Ticket ticket = Ticket.builder()
                 .shopId(shopId)
@@ -306,7 +300,6 @@ public class TicketService {
         // the prices set above (balance, and the guard that refuses an amount
         // over the bill), so it needs the ticket assembled first.
         applyPayment(ticket, request.getPaymentType(), request.getPaymentAmount());
-        applyDeviceSpecs(ticket, specs);
         // saveAndFlush + mirrorOnUpsertInline (REQUIRED propagation, not
         // REQUIRES_NEW) — the booking mirror writes repair_bookings.ticket_id
         // with a FK to tickets.id, and PlatformRepairBooking has only a plain
@@ -322,7 +315,6 @@ public class TicketService {
     public TicketResponse update(UUID shopId, UUID id, TicketRequest request) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
-        DeviceSpecs specs = resolveDeviceSpecs(request);
         // Snapshot the prior approval + estimate state. A re-edit can change
         // priceItemsJson / estimatedPrice (= service re-estimated) or flip
         // customerApproval; both feed the Service History timeline.
@@ -337,8 +329,6 @@ public class TicketService {
         ticket.setRamOptionId(request.getRamOptionId());
         ticket.setStorageOptionId(request.getStorageOptionId());
         ticket.setColor(request.getColor());
-        // null = an older client that sends no deviceCategory: keep what's stored.
-        applyDeviceSpecs(ticket, specs);
         ticket.setImei(request.getImei());
         ticket.setIssueDescription(request.getIssueDescription());
         ticket.setEstimatedPrice(request.getEstimatedPrice());
@@ -405,34 +395,6 @@ public class TicketService {
             onCustomerApproved(ticket, "SHOP");
         }
         return toResponse(ticket);
-    }
-
-    /**
-     * Validate + normalize the request's category-specific device attributes.
-     * Null when the request carries neither a deviceCategory nor any attribute.
-     */
-    private DeviceSpecs resolveDeviceSpecs(TicketRequest request) {
-        return deviceSpecService.resolve(
-                new DeviceSpecs(request.getDeviceCategory(), request.getRam(), request.getStorageCapacity(),
-                        request.getStorageType(), request.getCaseSize(), request.getConnectivity(),
-                        request.getDeviceType()),
-                request.getModelId(), request.getRamOptionId(), request.getStorageOptionId());
-    }
-
-    /**
-     * Writes all seven columns together, so switching a ticket from LAPTOP to
-     * SMARTWATCH clears the laptop's RAM/storage instead of leaving them behind.
-     * No-op for null (a request without deviceCategory).
-     */
-    private static void applyDeviceSpecs(Ticket ticket, DeviceSpecs specs) {
-        if (specs == null) return;
-        ticket.setDeviceCategory(specs.deviceCategory());
-        ticket.setRam(specs.ram());
-        ticket.setStorageCapacity(specs.storageCapacity());
-        ticket.setStorageType(specs.storageType());
-        ticket.setCaseSize(specs.caseSize());
-        ticket.setConnectivity(specs.connectivity());
-        ticket.setDeviceType(specs.deviceType());
     }
 
     @Transactional
@@ -1262,13 +1224,6 @@ public class TicketService {
                 .ramOptionId(t.getRamOptionId())
                 .storageOptionId(t.getStorageOptionId())
                 .color(t.getColor())
-                .deviceCategory(t.getDeviceCategory())
-                .ram(t.getRam())
-                .storageCapacity(t.getStorageCapacity())
-                .storageType(t.getStorageType())
-                .caseSize(t.getCaseSize())
-                .connectivity(t.getConnectivity())
-                .deviceType(t.getDeviceType())
                 .imei(fallback.imei)
                 .status(t.getStatus())
                 .estimatedPrice(t.getEstimatedPrice())
