@@ -47,7 +47,7 @@ read_env_value() {
 # Always (re)write the env file so the DB connection points at RDS, while
 # preserving any secrets that were generated/set on a previous deploy.
 ensure_env_file() {
-  local jwt_secret cloud_name cloud_key cloud_secret cloud_folder
+  local jwt_secret cloud_name cloud_key cloud_secret cloud_folder google_vision_key
 
   jwt_secret="$(read_env_value JWT_SECRET)"
   if [[ -z "$jwt_secret" ]]; then
@@ -84,6 +84,14 @@ ensure_env_file() {
   aws_base_url="$(read_env_value AWS_S3_BASE_URL)"
   aws_base_url="${aws_base_url:-https://media.ggfix.in}"
 
+  # Google Cloud Vision (master-data /master/device-identify). From the
+  # GOOGLE_VISION_API_KEY secret when the workflow passes one, else the value
+  # already on the box — this heredoc rewrites .env, so it must be carried.
+  google_vision_key="${GOOGLE_VISION_API_KEY:-}"
+  if [[ -z "$google_vision_key" ]]; then
+    google_vision_key="$(read_env_value GOOGLE_VISION_API_KEY)"
+  fi
+
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
 DB_HOST=$RDS_DB_HOST
 DB_PORT=$RDS_DB_PORT
@@ -99,6 +107,7 @@ CLOUDINARY_FOLDER=$cloud_folder
 AWS_REGION=$aws_region
 AWS_S3_BUCKET=$aws_bucket
 AWS_S3_BASE_URL=$aws_base_url
+GOOGLE_VISION_API_KEY=$google_vision_key
 JAVA_OPTS="-Xms64m -Xmx160m"
 SERVICES="$SERVICES_DEFAULT"
 EOF

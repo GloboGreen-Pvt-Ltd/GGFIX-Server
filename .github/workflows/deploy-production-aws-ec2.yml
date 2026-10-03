@@ -68,6 +68,10 @@ jobs:
       # deploy rewrites the copy in the EC2 .env too. A separate secret means the
       # switch is undone by deleting it, with the original still intact.
       DB_PASSWORD: ${{ secrets.DB_PASSWORD_OVERRIDE || secrets.DB_PASSWORD }}
+      # Google Cloud Vision key for master-data's POST /master/device-identify
+      # (Partner App Visual Device Scanner). Written into the EC2 .env by
+      # deploy-from-artifact.sh; empty keeps the value a previous deploy wrote.
+      GOOGLE_VISION_API_KEY: ${{ secrets.GOOGLE_VISION_API_KEY }}
 
     steps:
       - name: Verify branch (main only)
@@ -341,7 +345,7 @@ jobs:
             -p "$EC2_PORT" \
             -o StrictHostKeyChecking=yes \
             "$EC2_USER@$EC2_HOST" \
-            "API_DOMAIN='$API_DOMAIN' CERTBOT_EMAIL='${CERTBOT_EMAIL:-}' SKIP_TLS='$SKIP_TLS' DB_HOST='${DB_HOST:-}' DB_NAME='${DB_NAME:-}' DB_USER='${DB_USER:-}' DB_PASSWORD='${DB_PASSWORD:-}' bash -s" <<'REMOTE_SCRIPT'
+            "API_DOMAIN='$API_DOMAIN' CERTBOT_EMAIL='${CERTBOT_EMAIL:-}' SKIP_TLS='$SKIP_TLS' DB_HOST='${DB_HOST:-}' DB_NAME='${DB_NAME:-}' DB_USER='${DB_USER:-}' DB_PASSWORD='${DB_PASSWORD:-}' GOOGLE_VISION_API_KEY='${GOOGLE_VISION_API_KEY:-}' bash -s" <<'REMOTE_SCRIPT'
           set -euo pipefail
 
           DEPLOY_DIR="$HOME/ggfix-deploy"

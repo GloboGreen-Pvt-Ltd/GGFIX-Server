@@ -36,6 +36,13 @@ app:
     api-key: ${CLOUDINARY_API_KEY:}
     api-secret: ${CLOUDINARY_API_SECRET:}
     folder: ${CLOUDINARY_FOLDER:ggfix/master}
+  vision:
+    # Google Cloud Vision for POST /master/device-identify — the Partner App's
+    # Visual Device Scanner ("what phone is this?"). Key from env so no secret
+    # is committed; blank → the endpoint answers configured=false and the app
+    # falls back to reading the text on the device.
+    api-key: ${GOOGLE_VISION_API_KEY:}
+    endpoint: ${GOOGLE_VISION_ENDPOINT:https://vision.googleapis.com/v1/images:annotate}
   imei:
     # IMEI.info device-lookup proxy (GET /master/imei-lookup). The token + the
     # numeric service id come from env so no secret is committed. When either is
