@@ -2,6 +2,7 @@ package com.repairshop.saas.ticket.controller;
 
 import com.repairshop.saas.ticket.entity.Technician;
 import com.repairshop.saas.ticket.repository.TechnicianRepository;
+import com.repairshop.saas.ticket.service.TicketNumberService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -50,6 +51,7 @@ public class PickupBookingController {
 
     private final TechnicianRepository technicianRepository;
     private final JdbcTemplate jdbc;
+    private final TicketNumberService ticketNumberService;
 
     // Diagnostic ping — hit this in the browser to confirm the new controller
     // is loaded into the JVM. If this 200s but /me/pickup-bookings 500s, the
@@ -1261,7 +1263,9 @@ public class PickupBookingController {
         }
         String customerId = customerUserId;
 
-        String trackingId = "CSPEN" + (System.currentTimeMillis() % 10_000_000L);
+        // Same partner sequence as a counter booking (GTS-001…) — TicketNumberService.
+        TicketNumberService.Assigned number = ticketNumberService.next(shopId);
+        String trackingId = number.trackingId();
         String deviceDisplayName = buildDeviceDisplayName(
                 stringFrom(bk, "brand_name"), stringFrom(bk, "model_name"));
         String repairServicesSummary = buildServicesSummary(bookingId);
@@ -1309,11 +1313,11 @@ public class PickupBookingController {
                             "    device_display_name, device_image_url, repair_services_summary, " +
                             "    price_items_json, device_photos_json, missing_parts_json, " +
                             "    device_security_value, customer_approval, " +
-                            "    estimated_ready_at, estimated_delivery_at, " +
+                            "    estimated_ready_at, estimated_delivery_at, partner_id, " +
                             "    created_at, updated_at) " +
                             "VALUES (CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), ?, ?, ?, " +
                             "    ?, CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), " +
-                            "    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())",
+                            "    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS UUID), now(), now())",
                     ticketId.toString(), shopId.toString(), customerId, customerName, customerPhone, customerAddress,
                     trackingId,
                     stringFrom(bk, "brand_id"),
@@ -1334,7 +1338,8 @@ public class PickupBookingController {
                     stringFrom(bk, "device_pin"),
                     customerApproval,
                     bk.get("estimated_ready_at"),
-                    bk.get("estimated_delivery_at"));
+                    bk.get("estimated_delivery_at"),
+                    number.partnerId().toString());
         } catch (Exception e) {
             log.error("mintTicketFromBooking: ticket INSERT failed for booking={}: {}", bookingId, e.getMessage(), e);
             return null;

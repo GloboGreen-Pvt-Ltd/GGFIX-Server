@@ -57,6 +57,10 @@ public class Ticket {
     @Column(name = "tracking_id", nullable = false, length = 50)
     private String trackingId;
 
+    /** Owner whose sequence numbered this ticket (GTS-001…); null on legacy CSPEN tickets. */
+    @Column(name = "partner_id")
+    private UUID partnerId;
+
     @Column(name = "brand_id")
     private UUID brandId;
 

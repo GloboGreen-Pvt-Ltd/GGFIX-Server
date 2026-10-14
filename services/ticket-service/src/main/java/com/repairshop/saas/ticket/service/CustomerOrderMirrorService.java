@@ -285,7 +285,7 @@ public class CustomerOrderMirrorService {
             if (shopId == null) return; // no shop has taken the job on yet
             if (shopNotificationRepo.existsByBookingIdAndStatusKey(bookingId, key)) return;
             String bookingNumber = booking.getBookingNumber() != null
-                    ? booking.getBookingNumber()
+                    ? shopFacingNumber(booking.getBookingNumber())
                     : "";
             shopNotificationRepo.save(PlatformShopNotification.builder()
                     .shopId(shopId)
@@ -688,7 +688,19 @@ public class CustomerOrderMirrorService {
 
     private String makeBookingNumber(Ticket t) {
         String tracking = t.getTrackingId() != null ? t.getTrackingId() : t.getId().toString();
+        // Partner-scoped numbers (GTS-001) repeat across partners, but
+        // repair_bookings.booking_number and customer_orders.order_number are
+        // globally UNIQUE and order-service joins them by value — so tag the
+        // ticket's own id on. Legacy CSPEN tickets keep "#CSPEN…" as before.
+        if (t.getPartnerId() != null) {
+            return "#" + tracking + "-" + t.getId().toString().substring(0, 8).toUpperCase();
+        }
         return "#" + tracking;
+    }
+
+    /** The shop knows the ticket as "#GTS-001" — drop the uniqueness tag makeBookingNumber adds. */
+    private static String shopFacingNumber(String bookingNumber) {
+        return bookingNumber.replaceFirst("^(#[A-Z0-9]TS-\\d{3,})-[0-9A-F]{8}$", "$1");
     }
 
     private static String upper(String s) {

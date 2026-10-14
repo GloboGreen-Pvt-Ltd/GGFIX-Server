@@ -62,8 +62,7 @@ public class TicketService {
     private final MasterTechnicianWorkStatusViewRepository masterWorkStatusRepository;
     private final InvoiceRepository invoiceRepository;
     private final CustomerOrderMirrorService customerOrderMirrorService;
-
-    private static final String TRACKING_PREFIX = "CSPEN";
+    private final TicketNumberService ticketNumberService;
 
     @Transactional
     public TicketResponse getById(UUID shopId, UUID id) {
@@ -267,7 +266,7 @@ public class TicketService {
 
     @Transactional
     public TicketResponse create(UUID shopId, TicketRequest request) {
-        String trackingId = generateTrackingId(shopId);
+        TicketNumberService.Assigned number = ticketNumberService.next(shopId);
         Ticket ticket = Ticket.builder()
                 .shopId(shopId)
                 .customerId(request.getCustomerId())
@@ -293,7 +292,8 @@ public class TicketService {
                 .customerApproval(request.getCustomerApproval())
                 .estimatedReadyAt(request.getEstimatedReadyAt())
                 .estimatedDeliveryAt(request.getEstimatedDeliveryAt())
-                .trackingId(trackingId)
+                .trackingId(number.trackingId())
+                .partnerId(number.partnerId())
                 .status("CREATED")
                 .build();
         // After the builder, not inside it: the payment block is derived from
@@ -1144,11 +1144,6 @@ public class TicketService {
             // whichever door the status came through.
             emitBookingEvent(ticketId, s, defaultProgressLabel(s), "SHOP");
         }
-    }
-
-    private String generateTrackingId(UUID shopId) {
-        String suffix = String.valueOf(System.currentTimeMillis() % 10000000);
-        return TRACKING_PREFIX + suffix;
     }
 
     /** Customer-facing read: masks PIN/pattern value, joins technician name+code. */
