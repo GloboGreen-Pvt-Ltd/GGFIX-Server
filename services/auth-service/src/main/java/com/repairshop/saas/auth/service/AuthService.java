@@ -1061,6 +1061,11 @@ public class AuthService {
             res.put("defaultOtp", "123456");
         }
         res.put("email", isEmail ? id : user.getEmail());
+        // The account type the login would produce (same mapping as the login
+        // response), so an app can turn a number away before the OTP step —
+        // the Partner app accepts only SHOP_OWNER (and shop logins, which use
+        // /auth/shop-login/request-otp), never an EMPLOYEE.
+        res.put("loginType", loginTypeForRole(user.getRole()));
         return res;
     }
 
