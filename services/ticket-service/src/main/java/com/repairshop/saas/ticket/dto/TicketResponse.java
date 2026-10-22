@@ -135,6 +135,9 @@ public class TicketResponse {
     @Schema(description = "Estimated delivery at")
     private Instant estimatedDeliveryAt;
 
+    @Schema(description = "The booking's first estimated delivery, kept once a re-estimate revises estimatedDeliveryAt; null when never re-estimated")
+    private Instant originalEstimatedDeliveryAt;
+
     @Schema(description = "Assigned technician name (denormalized for customer-side render)")
     private String assignedTechnicianName;
 

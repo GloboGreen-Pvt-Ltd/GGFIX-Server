@@ -210,6 +210,10 @@ public class Ticket {
     @Column(name = "estimated_delivery_at")
     private Instant estimatedDeliveryAt;
 
+    /** First delivery promise, kept when a re-estimate revises estimatedDeliveryAt (migration 103). */
+    @Column(name = "original_estimated_delivery_at")
+    private Instant originalEstimatedDeliveryAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
