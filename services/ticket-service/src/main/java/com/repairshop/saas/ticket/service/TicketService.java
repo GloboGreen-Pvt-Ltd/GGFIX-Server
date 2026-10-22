@@ -321,6 +321,7 @@ public class TicketService {
         boolean wasApproved = Boolean.TRUE.equals(ticket.getCustomerApproval());
         String oldPriceItemsJson = ticket.getPriceItemsJson();
         BigDecimal oldEstimatedPrice = ticket.getEstimatedPrice();
+        Instant oldEstimatedDeliveryAt = ticket.getEstimatedDeliveryAt();
         ticket.setCustomerId(request.getCustomerId());
         if (request.getCustomerName() != null) ticket.setCustomerName(request.getCustomerName());
         if (request.getCustomerPhone() != null) ticket.setCustomerPhone(request.getCustomerPhone());
@@ -368,16 +369,23 @@ public class TicketService {
         // existing booking. Light up the "Service Re-estimated" rail row so the
         // customer + owner timelines reflect the change. emitOrUpdate refreshes
         // the timestamp so multiple re-edits surface as "latest re-estimate".
-        boolean priceItemsChanged = !java.util.Objects.equals(oldPriceItemsJson, ticket.getPriceItemsJson());
-        boolean estimateChanged = (oldEstimatedPrice == null)
-                ? ticket.getEstimatedPrice() != null
-                : (ticket.getEstimatedPrice() == null
-                        || oldEstimatedPrice.compareTo(ticket.getEstimatedPrice()) != 0);
+        // Compared by meaning, not as raw text: a plain edit (customer, colour,
+        // IMEI) re-sends the same services in a freshly serialised string, and
+        // a byte-level compare flagged that as a re-estimate (GTS-025).
+        boolean priceItemsChanged = !samePriceItems(oldPriceItemsJson, ticket.getPriceItemsJson());
+        boolean estimateChanged = (oldEstimatedPrice == null ? BigDecimal.ZERO : oldEstimatedPrice)
+                .compareTo(ticket.getEstimatedPrice() == null ? BigDecimal.ZERO : ticket.getEstimatedPrice()) != 0;
         if (priceItemsChanged || estimateChanged) {
             emitOrUpdateBookingEvent(ticket.getId(),
                     "RE_ESTIMATED_CONFIRMED",
                     NOTE_RE_ESTIMATED,
                     "SHOP");
+            // Keep the booking's first delivery promise (Service Schedule);
+            // estimatedDeliveryAt now carries the revised one.
+            if (ticket.getOriginalEstimatedDeliveryAt() == null && oldEstimatedDeliveryAt != null) {
+                ticket.setOriginalEstimatedDeliveryAt(oldEstimatedDeliveryAt);
+                ticket = ticketRepository.save(ticket);
+            }
             // The event alone only feeds the Service History rail. The owner's
             // Re-Estimated list and the card badge both read ticket.status, so
             // without this the booking stayed "Service Accepted" (= CREATED) and
@@ -969,6 +977,58 @@ public class TicketService {
         customerOrderMirrorService.mirrorOnUpsert(t);
     }
 
+    private static final com.fasterxml.jackson.databind.ObjectMapper PRICE_ITEMS_MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /**
+     * Same services at the same amounts? priceItemsJson is
+     * [{id, code, label, amount, warranty}]; each item is reduced to its
+     * identity (id, else code, else label) + amount, order ignored. Unparseable
+     * JSON falls back to a trimmed text compare; null, blank and [] are equal.
+     */
+    static boolean samePriceItems(String a, String b) {
+        java.util.List<String> ka = priceItemKeys(a);
+        java.util.List<String> kb = priceItemKeys(b);
+        if (ka == null || kb == null) {
+            return java.util.Objects.equals(a == null ? "" : a.trim(), b == null ? "" : b.trim());
+        }
+        return ka.equals(kb);
+    }
+
+    private static java.util.List<String> priceItemKeys(String json) {
+        if (json == null || json.isBlank()) return java.util.List.of();
+        try {
+            com.fasterxml.jackson.databind.JsonNode root = PRICE_ITEMS_MAPPER.readTree(json);
+            if (root == null || root.isNull()) return java.util.List.of();
+            if (!root.isArray()) return null;
+            java.util.List<String> keys = new java.util.ArrayList<>();
+            for (com.fasterxml.jackson.databind.JsonNode it : root) {
+                String id = firstText(it, "id", "serviceId", "code", "serviceCode", "label", "serviceName");
+                com.fasterxml.jackson.databind.JsonNode amt = it.has("amount") ? it.get("amount") : it.get("price");
+                BigDecimal amount;
+                try {
+                    amount = (amt == null || amt.isNull() || amt.asText().isBlank())
+                            ? BigDecimal.ZERO : new BigDecimal(amt.asText().trim());
+                } catch (NumberFormatException e) {
+                    return null;
+                }
+                keys.add(id.toLowerCase() + "|" + amount.stripTrailingZeros().toPlainString());
+            }
+            java.util.Collections.sort(keys);
+            return keys;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String firstText(com.fasterxml.jackson.databind.JsonNode node, String... fields) {
+        for (String f : fields) {
+            com.fasterxml.jackson.databind.JsonNode v = node.get(f);
+            if (v != null && !v.isNull() && !v.asText().isBlank()) return v.asText().trim();
+        }
+        return "";
+    }
+
     /**
      * Move a re-estimated ticket to QUOTED.
      *
@@ -1253,6 +1313,7 @@ public class TicketService {
                 .customerApproval(fallback.customerApproval)
                 .estimatedReadyAt(fallback.estimatedReadyAt)
                 .estimatedDeliveryAt(fallback.estimatedDeliveryAt)
+                .originalEstimatedDeliveryAt(t.getOriginalEstimatedDeliveryAt())
                 .invoiceId(invoice != null ? invoice.getId() : null)
                 .invoiceNo(invoice != null ? invoice.getInvoiceNo() : null)
                 .invoiceGeneratedAt(invoice != null ? invoice.getGeneratedAt() : null)
