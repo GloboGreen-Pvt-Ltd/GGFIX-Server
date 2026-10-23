@@ -90,7 +90,7 @@ public class TicketResponse {
     @Schema(description = "Issue description")
     private String issueDescription;
 
-    @Schema(description = "Voice-note recording of the issue (Cloudinary URL). Null when none.")
+    @Schema(description = "Voice-note recording of the issue (hosted URL). Null when none.")
     private String issueAudioUrl;
 
     @Schema(description = "Created at")
@@ -168,7 +168,7 @@ public class TicketResponse {
     @Schema(description = "Latest customer-visible compliance note text from repair_notes; null when none has been submitted")
     private String complianceNote;
 
-    @Schema(description = "Cloudinary URL of the voice note attached to the latest compliance note; null when none")
+    @Schema(description = "Hosted URL of the voice note attached to the latest compliance note; null when none")
     private String complianceAudioUrl;
 
     @Schema(description = "Image URLs attached to the latest compliance note; empty list when none")
