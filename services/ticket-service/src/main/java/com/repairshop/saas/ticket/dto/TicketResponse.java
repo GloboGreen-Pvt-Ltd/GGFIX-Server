@@ -45,6 +45,13 @@ public class TicketResponse {
     @Schema(description = "Tracking ID")
     private String trackingId;
 
+    @Schema(description = "Parent booking number shared by every device of the booking (GTS-001); " +
+            "falls back to trackingId on older tickets")
+    private String bookingNumber;
+
+    @Schema(description = "Device suffix within a multi-device booking (A, B, C …); null for a single device")
+    private String deviceSuffix;
+
     @Schema(description = "Brand ID")
     private UUID brandId;
 
