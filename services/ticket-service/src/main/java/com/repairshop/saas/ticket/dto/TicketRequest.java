@@ -101,4 +101,14 @@ public class TicketRequest {
 
     @Schema(description = "Estimated delivery at (when device will be ready)")
     private Instant estimatedDeliveryAt;
+
+    // Create-only. Neither is read by update — a device's ticket id never changes.
+
+    @Schema(description = "Create only: first device of a multi-device booking. A new booking number " +
+            "is drawn and this device gets suffix A (GTS-001-A). Ignored when bookingNumber is set.")
+    private Boolean multiDevice;
+
+    @Schema(description = "Create only: add this device to an existing booking (e.g. GTS-001). It gets " +
+            "the next free suffix (GTS-001-B …) without consuming a new booking number.")
+    private String bookingNumber;
 }

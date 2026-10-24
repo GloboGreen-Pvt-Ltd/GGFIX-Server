@@ -266,7 +266,11 @@ public class TicketService {
 
     @Transactional
     public TicketResponse create(UUID shopId, TicketRequest request) {
-        TicketNumberService.Assigned number = ticketNumberService.next(shopId);
+        // Single device -> GTS-001; first of several -> GTS-001-A; a device
+        // added to an existing booking -> that booking's next suffix.
+        TicketNumberService.Assigned number = request.getBookingNumber() != null && !request.getBookingNumber().isBlank()
+                ? ticketNumberService.nextInBooking(shopId, request.getBookingNumber(), request.getCustomerId())
+                : ticketNumberService.next(shopId, Boolean.TRUE.equals(request.getMultiDevice()));
         Ticket ticket = Ticket.builder()
                 .shopId(shopId)
                 .customerId(request.getCustomerId())
@@ -294,6 +298,8 @@ public class TicketService {
                 .estimatedDeliveryAt(request.getEstimatedDeliveryAt())
                 .trackingId(number.trackingId())
                 .partnerId(number.partnerId())
+                .bookingNumber(number.bookingNumber())
+                .deviceSuffix(number.deviceSuffix())
                 .status("CREATED")
                 .build();
         // After the builder, not inside it: the payment block is derived from
@@ -1274,6 +1280,8 @@ public class TicketService {
                 .assignedTechnicianId(t.getAssignedTechnicianId())
                 .technicianAcceptedAt(t.getTechnicianAcceptedAt())
                 .trackingId(t.getTrackingId())
+                .bookingNumber(t.getBookingNumber() != null ? t.getBookingNumber() : t.getTrackingId())
+                .deviceSuffix(t.getDeviceSuffix())
                 .brandId(t.getBrandId())
                 .modelId(t.getModelId())
                 .ramOptionId(t.getRamOptionId())

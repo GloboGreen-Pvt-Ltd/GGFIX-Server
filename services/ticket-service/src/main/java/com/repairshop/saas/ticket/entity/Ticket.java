@@ -61,6 +61,14 @@ public class Ticket {
     @Column(name = "partner_id")
     private UUID partnerId;
 
+    /** Parent booking number shared by every device of one booking (GTS-001); null on older tickets. */
+    @Column(name = "booking_number", length = 50)
+    private String bookingNumber;
+
+    /** A, B, C … when the booking has more than one device; null for a single-device booking. */
+    @Column(name = "device_suffix", length = 4)
+    private String deviceSuffix;
+
     @Column(name = "brand_id")
     private UUID brandId;
 
