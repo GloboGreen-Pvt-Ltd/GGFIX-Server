@@ -887,7 +887,11 @@ public class TicketService {
             // signal — surfaced on the customer / shop history rail with the
             // canonical "Your repair is not completed" note. Does NOT advance
             // ticket.status; the row is for visibility only.
-            "REPAIR_NOT_COMPLETED");
+            "REPAIR_NOT_COMPLETED",
+            // BOOKING_EDITED is the shop's "booking details changed" marker
+            // (Edit Booking). History only — not a lifecycle or master work
+            // code, so ticket.status is left as it was.
+            "BOOKING_EDITED");
 
     // Who may be recorded as having performed a step. The endpoint is shop-scoped
     // rather than role-gated, so an owner token and an employee token can both
@@ -1080,6 +1084,7 @@ public class TicketService {
             case "QUALITY_CHECK_COMPLETED":return "Quality Check Completed";
             case "REPAIR_COMPLETED":       return "Repair Completed";
             case "REPAIR_NOT_COMPLETED":   return "Your repair is not completed";
+            case "BOOKING_EDITED":         return "Booking Edited";
             case "CUSTOMER_REJECTED":      return "Customer Rejected";
             case "RETURN_DELIVERY":        return "Return Delivery";
             case "INVOICE_GENERATED":      return "Invoice Generated";
