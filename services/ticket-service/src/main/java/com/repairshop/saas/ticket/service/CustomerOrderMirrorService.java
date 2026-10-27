@@ -494,7 +494,7 @@ public class CustomerOrderMirrorService {
 
         if (newTechId != null) {
             List<PlatformRepairBookingEvent> existing =
-                    bookingEventRepo.findByBookingIdOrderByCreatedAtAsc(bookingId);
+                    bookingEventRepo.findCurrentCycle(bookingId);
             boolean hadAssignBefore = existing.stream().anyMatch(
                     e -> "ASSIGNED_TO_TECHNICIAN".equalsIgnoreCase(e.getStatus())
                             || "REASSIGNED_TO_TECHNICIAN".equalsIgnoreCase(e.getStatus()));
@@ -528,7 +528,7 @@ public class CustomerOrderMirrorService {
         // the technician's queue show the task as already-accepted.
         if (newTechId != null && technicianAccepted) {
             List<PlatformRepairBookingEvent> existing =
-                    bookingEventRepo.findByBookingIdOrderByCreatedAtAsc(bookingId);
+                    bookingEventRepo.findCurrentCycle(bookingId);
             boolean hasAccepted = existing.stream().anyMatch(
                     e -> "TECHNICIAN_ACCEPTED_SERVICE".equalsIgnoreCase(e.getStatus()));
             boolean hasWorkStarted = existing.stream().anyMatch(

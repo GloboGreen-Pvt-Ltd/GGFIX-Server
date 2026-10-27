@@ -2,6 +2,7 @@ package com.repairshop.saas.ticket.dto;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -45,6 +46,14 @@ public class TicketRequest {
 
     @Schema(description = "IMEI")
     private String imei;
+
+    @Schema(description = "Serial number — non-mobile devices (laptop, tablet, smartwatch, audio); optional")
+    @Size(max = 64)
+    private String serialNumber;
+
+    @Schema(description = "Accessories handed over with the device (charger, case, SIM tray …); optional")
+    @Size(max = 500)
+    private String accessories;
 
     @Schema(description = "Issue description")
     private String issueDescription;
@@ -95,6 +104,12 @@ public class TicketRequest {
 
     @Schema(description = "Customer repair approval flag")
     private Boolean customerApproval;
+
+    @Schema(description = "Update only: which action saved this edit. true = Re-Estimate (a service / price "
+            + "change re-quotes the booking: status QUOTED, \"Service Re-estimated\" step). false = Edit Booking / "
+            + "Price Revised / Re-Service: the ticket status and approval are left exactly as they are. "
+            + "Omitted (older apps) = a service / price change is treated as a re-estimate.")
+    private Boolean reEstimate;
 
     @Schema(description = "Estimated ready at (start of repair window)")
     private Instant estimatedReadyAt;

@@ -70,6 +70,12 @@ public class TicketResponse {
     @Schema(description = "Device IMEI. Falls back to the linked repair_booking's imei when the ticket's own column is blank — the pickup person captures it on the booking row.")
     private String imei;
 
+    @Schema(description = "Serial number — non-mobile devices; null when not captured")
+    private String serialNumber;
+
+    @Schema(description = "Accessories handed over with the device (charger, case, SIM tray …); optional")
+    private String accessories;
+
     @Schema(description = "Status")
     private String status;
 
@@ -171,6 +177,9 @@ public class TicketResponse {
 
     @Schema(description = "When the invoice was generated; null when none has been generated")
     private Instant invoiceGeneratedAt;
+
+    @Schema(description = "Invoice final payable amount (incl. GST); null when none has been generated")
+    private BigDecimal invoiceAmount;
 
     @Schema(description = "Latest customer-visible compliance note text from repair_notes; null when none has been submitted")
     private String complianceNote;

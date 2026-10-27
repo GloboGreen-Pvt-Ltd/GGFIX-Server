@@ -106,7 +106,7 @@ public class TicketService {
         catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", ticketId, e); }
         return platformRepairBookingRepository.findByTicketId(t.getId())
                 .map(b -> platformRepairBookingEventRepository
-                        .findByBookingIdOrderByCreatedAtAsc(b.getId())
+                        .findCurrentCycle(b.getId())
                         .stream()
                         .map(e -> TicketEventResponse.builder()
                                 .id(e.getId())
@@ -186,11 +186,20 @@ public class TicketService {
         // invoice's own generatedAt, not now(), so the healed row reads as the
         // moment the bill was actually raised. Written only when missing: this
         // runs on every ticket read, and re-writing it each time would churn.
+        //
+        // After a Re-Service reopen the ticket keeps its one invoice row: the
+        // first (delivered) repair's invoice is not this repair's step, and a
+        // re-raised one keeps the first generatedAt, so it is stamped with its
+        // last write instead — a stamp before the RE_SERVICE marker would fall
+        // outside the current cycle and be re-inserted on every read.
         if (!hasBookingEvent(t.getId(), "INVOICE_GENERATED")) {
-            invoiceRepository.findByTicketId(t.getId()).ifPresent(inv ->
-                    emitOrUpdateBookingEvent(t.getId(), "INVOICE_GENERATED",
-                            InvoiceService.invoiceGeneratedNote(inv), "OWNER",
-                            null, null, inv.getGeneratedAt()));
+            invoiceRepository.findByTicketId(t.getId()).ifPresent(inv -> {
+                Instant cycleStart = reServiceStartedAt(t.getId());
+                if (isEarlierRepairInvoice(inv, cycleStart)) return;
+                emitOrUpdateBookingEvent(t.getId(), "INVOICE_GENERATED",
+                        InvoiceService.invoiceGeneratedNote(inv), "OWNER",
+                        null, null, cycleStart != null ? lastWrite(inv) : inv.getGeneratedAt());
+            });
         }
     }
 
@@ -282,6 +291,8 @@ public class TicketService {
                 .storageOptionId(request.getStorageOptionId())
                 .color(request.getColor())
                 .imei(request.getImei())
+                .serialNumber(request.getSerialNumber())
+                .accessories(request.getAccessories())
                 .issueDescription(request.getIssueDescription())
                 .issueAudioUrl(request.getIssueAudioUrl())
                 .estimatedPrice(request.getEstimatedPrice())
@@ -337,6 +348,9 @@ public class TicketService {
         ticket.setStorageOptionId(request.getStorageOptionId());
         ticket.setColor(request.getColor());
         ticket.setImei(request.getImei());
+        // Older app builds omit serialNumber — keep what is stored rather than wipe it.
+        if (request.getSerialNumber() != null) ticket.setSerialNumber(request.getSerialNumber());
+        if (request.getAccessories() != null) ticket.setAccessories(request.getAccessories());
         ticket.setIssueDescription(request.getIssueDescription());
         ticket.setEstimatedPrice(request.getEstimatedPrice());
         ticket.setDeviceDisplayName(request.getDeviceDisplayName());
@@ -347,7 +361,14 @@ public class TicketService {
         ticket.setDevicePhotosJson(request.getDevicePhotosJson());
         ticket.setDeviceSecurityType(request.getDeviceSecurityType());
         ticket.setDeviceSecurityValue(request.getDeviceSecurityValue());
-        ticket.setCustomerApproval(request.getCustomerApproval());
+        // The app says which action saved this (TicketRequest.reEstimate). A plain
+        // edit (false) must never move the workflow: no re-quote, no status change,
+        // and an approval it doesn't mention stays as it was.
+        Boolean reEstimateFlag = request.getReEstimate();
+        boolean plainEdit = Boolean.FALSE.equals(reEstimateFlag);
+        if (!(plainEdit && request.getCustomerApproval() == null)) {
+            ticket.setCustomerApproval(request.getCustomerApproval());
+        }
         ticket.setEstimatedReadyAt(request.getEstimatedReadyAt());
         ticket.setEstimatedDeliveryAt(request.getEstimatedDeliveryAt());
         // Last, after setEstimatedPrice: a re-estimate changes what the payment
@@ -358,7 +379,7 @@ public class TicketService {
         // already approved AND the edit didn't carry a fresh approval, treat
         // it as a re-booking — clear the prior approval and refresh the
         // Waiting-for-Approval timeline row so the customer is re-prompted.
-        boolean reEditAfterApproval = wasApproved
+        boolean reEditAfterApproval = !plainEdit && wasApproved
                 && !Boolean.TRUE.equals(request.getCustomerApproval());
         if (reEditAfterApproval) {
             ticket.setCustomerApproval(null);
@@ -381,7 +402,10 @@ public class TicketService {
         boolean priceItemsChanged = !samePriceItems(oldPriceItemsJson, ticket.getPriceItemsJson());
         boolean estimateChanged = (oldEstimatedPrice == null ? BigDecimal.ZERO : oldEstimatedPrice)
                 .compareTo(ticket.getEstimatedPrice() == null ? BigDecimal.ZERO : ticket.getEstimatedPrice()) != 0;
-        if (priceItemsChanged || estimateChanged) {
+        // Only the Re-Estimate action re-quotes. Before this flag the change alone
+        // decided, so an Edit that touched the device, services or amount walked
+        // an IN_REPAIR / APPROVED booking back to QUOTED ("Re-Estimated").
+        if (isReEstimate(reEstimateFlag, priceItemsChanged || estimateChanged)) {
             emitOrUpdateBookingEvent(ticket.getId(),
                     "RE_ESTIMATED_CONFIRMED",
                     NOTE_RE_ESTIMATED,
@@ -411,6 +435,250 @@ public class TicketService {
         return toResponse(ticket);
     }
 
+    /**
+     * Re-Estimate: ADDITIONAL issues found during repair, priced on top of the
+     * current estimate. The original line items and their prices are kept as
+     * they are (new items are appended; one already in the estimate is skipped,
+     * so a repeated submit adds nothing twice). Saves the reason (+ photos) as
+     * the "Service Re-estimated" history step and as its own repair note, moves
+     * the ticket to QUOTED through markReEstimated's existing rules, and either
+     * records the customer's approval (given at the counter) or leaves the
+     * revised estimate awaiting approval. Payment records are not touched (only
+     * the balance follows the new total). Technician is not touched.
+     */
+    @Transactional
+    public TicketResponse reEstimate(UUID shopId, UUID id, com.repairshop.saas.ticket.dto.ReEstimateRequest req) {
+        Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        if (hasCurrentInvoice(ticket.getId())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Invoice already generated — delete the invoice before re-estimating");
+        }
+        String reason = req == null || req.getReason() == null ? "" : req.getReason().trim();
+        if (reason.length() < 3) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Add the reason for the extra work");
+        }
+        java.util.List<java.util.Map<String, Object>> items = parsePriceItemList(ticket.getPriceItemsJson());
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        for (java.util.Map<String, Object> it : items) keys.add(priceItemIdentity(it));
+
+        java.util.List<java.util.Map<String, Object>> added = new ArrayList<>();
+        BigDecimal extra = BigDecimal.ZERO;
+        for (com.repairshop.saas.ticket.dto.ReEstimateRequest.Item in : req.getItems() == null ? java.util.List.<com.repairshop.saas.ticket.dto.ReEstimateRequest.Item>of() : req.getItems()) {
+            if (in == null || in.getLabel() == null || in.getLabel().isBlank()) continue;
+            if (in.getAmount() == null || in.getAmount().signum() < 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Enter a price (0 or more) for " + in.getLabel().trim());
+            }
+            java.util.Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("id", in.getId() == null || in.getId().isBlank() ? null : in.getId().trim());
+            row.put("code", in.getCode());
+            row.put("label", in.getLabel().trim());
+            row.put("amount", in.getAmount());
+            row.put("warranty", in.getWarranty());
+            if (!keys.add(priceItemIdentity(row))) continue; // already in the estimate
+            added.add(row);
+            extra = extra.add(in.getAmount());
+        }
+        if (added.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "These issues are already in the estimate");
+        }
+
+        BigDecimal oldTotal = ticket.getEstimatedPrice() != null ? ticket.getEstimatedPrice()
+                : items.stream().map(m -> {
+                    try { return new BigDecimal(String.valueOf(m.getOrDefault("amount", "0"))); }
+                    catch (NumberFormatException e) { return BigDecimal.ZERO; }
+                }).reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal newTotal = oldTotal.add(extra);
+        items.addAll(added);
+        try {
+            ticket.setPriceItemsJson(PRICE_ITEMS_MAPPER.writeValueAsString(items));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("Could not save the re-estimate", e);
+        }
+        ticket.setEstimatedPrice(newTotal);
+        String addedLabels = added.stream().map(m -> String.valueOf(m.get("label"))).collect(java.util.stream.Collectors.joining(", "));
+        String summary = ticket.getRepairServicesSummary();
+        ticket.setRepairServicesSummary(summary == null || summary.isBlank() ? addedLabels : summary + ", " + addedLabels);
+
+        // Keep the first delivery promise; the proposed one becomes the estimate.
+        Instant oldDelivery = ticket.getEstimatedDeliveryAt();
+        if (ticket.getOriginalEstimatedDeliveryAt() == null && oldDelivery != null) {
+            ticket.setOriginalEstimatedDeliveryAt(oldDelivery);
+        }
+        if (req.getEstimatedDeliveryAt() != null) ticket.setEstimatedDeliveryAt(req.getEstimatedDeliveryAt());
+
+        boolean wasApproved = Boolean.TRUE.equals(ticket.getCustomerApproval());
+        boolean approvedNow = Boolean.TRUE.equals(req.getCustomerApproved());
+        // A revised price needs a fresh approval: either given now, or awaited.
+        ticket.setCustomerApproval(approvedNow ? Boolean.TRUE : null);
+        recomputeBalance(ticket);
+        ticket = ticketRepository.save(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket);
+
+        String note = "Re-estimated: ₹" + oldTotal.stripTrailingZeros().toPlainString()
+                + " + ₹" + extra.stripTrailingZeros().toPlainString()
+                + " = ₹" + newTotal.stripTrailingZeros().toPlainString()
+                + " · " + addedLabels + " · Reason: " + reason
+                + (approvedNow ? " · Approved by customer" : " · Awaiting customer approval");
+        String images = req.getImagesJson() == null || req.getImagesJson().isBlank() ? null : req.getImagesJson();
+        emitOrUpdateBookingEvent(ticket.getId(), KEY_RE_ESTIMATED, note, "SHOP", null, images);
+        // Permanent per-re-estimate record (the history step above shows the latest one).
+        repairNoteRepository.save(RepairNote.builder()
+                .ticketId(ticket.getId())
+                .note(note)
+                .isInternal(true)
+                .imagesJson(images)
+                .build());
+        markReEstimated(ticket);
+        if (approvedNow) {
+            onCustomerApproved(ticket, "SHOP");
+        } else if (wasApproved) {
+            emitOrUpdateBookingEvent(ticket.getId(), "WAITING_FOR_CUSTOMER_APPROVAL",
+                    "Re-estimate — waiting for customer approval", "SHOP");
+        }
+        return toResponse(ticket);
+    }
+
+    private java.util.List<java.util.Map<String, Object>> parsePriceItemList(String json) {
+        if (json == null || json.isBlank()) return new ArrayList<>();
+        try {
+            java.util.List<java.util.Map<String, Object>> list = PRICE_ITEMS_MAPPER.readValue(json,
+                    new com.fasterxml.jackson.core.type.TypeReference<java.util.List<java.util.Map<String, Object>>>() {});
+            return list == null ? new ArrayList<>() : new ArrayList<>(list);
+        } catch (Exception e) {
+            return new ArrayList<>();
+        }
+    }
+
+    // Same identity samePriceItems uses: id, else code, else label (lower-case).
+    private static String priceItemIdentity(java.util.Map<String, Object> m) {
+        for (String k : new String[] { "id", "serviceId", "code", "serviceCode", "label", "serviceName" }) {
+            Object v = m.get(k);
+            if (v != null && !String.valueOf(v).isBlank() && !"OTHER".equalsIgnoreCase(String.valueOf(v))) {
+                return String.valueOf(v).trim().toLowerCase();
+            }
+        }
+        return "";
+    }
+
+    /**
+     * Price Revised: change the price of, or cancel, line items ALREADY on the
+     * ticket. Each change carries the item's identity and price as loaded; if
+     * either no longer matches, nothing is saved (409) — so a concurrent edit is
+     * never overwritten and a repeated submit can't apply twice. Not allowed
+     * once an invoice exists. Status and technician are never touched (no
+     * Re-Estimated). A price increase or a cancellation needs fresh customer
+     * approval (given at the counter, or awaited); a pure reduction keeps the
+     * current approval. Audit: a "Booking Edited" history step + a permanent
+     * repair note with old → new per service, the difference and the reason.
+     */
+    @Transactional
+    public TicketResponse revisePrices(UUID shopId, UUID id, com.repairshop.saas.ticket.dto.PriceRevisionRequest req) {
+        Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        if (hasCurrentInvoice(ticket.getId())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Invoice already generated — revise the price on the invoice");
+        }
+        String reason = req == null || req.getReason() == null ? "" : req.getReason().trim();
+        String notes = req == null || req.getNotes() == null ? "" : req.getNotes().trim();
+        if (reason.isEmpty()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Select the reason for the revision");
+        if ("other".equalsIgnoreCase(reason) && notes.length() < 3) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Add a note for the revision");
+        }
+        java.util.List<com.repairshop.saas.ticket.dto.PriceRevisionRequest.Change> changes =
+                req.getChanges() == null ? java.util.List.of() : req.getChanges();
+        if (changes.isEmpty()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Nothing to revise");
+
+        java.util.List<java.util.Map<String, Object>> items = parsePriceItemList(ticket.getPriceItemsJson());
+        java.util.Set<Integer> cancelled = new java.util.HashSet<>();
+        java.util.List<String> lines = new ArrayList<>();
+        BigDecimal delta = BigDecimal.ZERO;
+        boolean increase = false;
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        for (com.repairshop.saas.ticket.dto.PriceRevisionRequest.Change c : changes) {
+            Integer i = c == null ? null : c.getIndex();
+            if (i == null || i < 0 || i >= items.size() || !seen.add(i)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The services changed — reload and try again");
+            }
+            java.util.Map<String, Object> item = items.get(i);
+            BigDecimal current = amountOf(item);
+            String identity = c.getIdentity() == null ? "" : c.getIdentity().trim().toLowerCase();
+            if (!identity.equals(priceItemIdentity(item))
+                    || c.getOldAmount() == null || c.getOldAmount().compareTo(current) != 0) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The prices changed — reload and try again");
+            }
+            String label = String.valueOf(item.getOrDefault("label", item.getOrDefault("serviceName", "Service")));
+            if (Boolean.TRUE.equals(c.getCancel())) {
+                cancelled.add(i);
+                delta = delta.subtract(current);
+                lines.add(label + " cancelled (₹" + plain(current) + ")");
+                continue;
+            }
+            if (c.getNewAmount() == null || c.getNewAmount().signum() < 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Enter a new price (0 or more) for " + label);
+            }
+            if (c.getNewAmount().compareTo(current) == 0) continue;
+            if (c.getNewAmount().compareTo(current) > 0) increase = true;
+            delta = delta.add(c.getNewAmount().subtract(current));
+            item.put("amount", c.getNewAmount());
+            lines.add(label + " ₹" + plain(current) + " → ₹" + plain(c.getNewAmount()));
+        }
+        if (lines.isEmpty()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No price was changed");
+        if (cancelled.size() >= items.size()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At least one service must stay on the booking");
+        }
+
+        BigDecimal oldTotal = ticket.getEstimatedPrice() != null ? ticket.getEstimatedPrice()
+                : items.stream().map(TicketService::amountOf).reduce(BigDecimal.ZERO, BigDecimal::add);
+        java.util.List<java.util.Map<String, Object>> active = new ArrayList<>();
+        for (int i = 0; i < items.size(); i++) if (!cancelled.contains(i)) active.add(items.get(i));
+        BigDecimal newTotal = oldTotal.add(delta);
+        if (newTotal.signum() < 0) newTotal = BigDecimal.ZERO;
+        try {
+            ticket.setPriceItemsJson(PRICE_ITEMS_MAPPER.writeValueAsString(active));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("Could not save the revision", e);
+        }
+        ticket.setEstimatedPrice(newTotal);
+        ticket.setRepairServicesSummary(active.stream()
+                .map(m -> String.valueOf(m.getOrDefault("label", m.getOrDefault("serviceName", ""))))
+                .filter(s -> !s.isBlank()).collect(java.util.stream.Collectors.joining(", ")));
+
+        boolean wasApproved = Boolean.TRUE.equals(ticket.getCustomerApproval());
+        boolean approvedNow = Boolean.TRUE.equals(req.getCustomerApproved());
+        boolean needsApproval = increase || !cancelled.isEmpty();
+        if (needsApproval) ticket.setCustomerApproval(approvedNow ? Boolean.TRUE : null);
+        recomputeBalance(ticket);
+        ticket = ticketRepository.save(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket);
+
+        String sign = delta.signum() < 0 ? "−₹" + plain(delta.abs()) : "+₹" + plain(delta);
+        String note = "Price Revised: " + String.join(" · ", lines)
+                + " · Total ₹" + plain(oldTotal) + " → ₹" + plain(newTotal) + " (" + sign + ")"
+                + " · Reason: " + reason + (notes.isEmpty() ? "" : " — " + notes)
+                + (needsApproval ? (approvedNow ? " · Approved by customer" : " · Awaiting customer approval") : "");
+        emitOrUpdateBookingEvent(ticket.getId(), "BOOKING_EDITED", note, "SHOP");
+        repairNoteRepository.save(RepairNote.builder().ticketId(ticket.getId()).note(note).isInternal(true).build());
+        if (needsApproval) {
+            if (approvedNow) onCustomerApproved(ticket, "SHOP");
+            else if (wasApproved) emitOrUpdateBookingEvent(ticket.getId(), "WAITING_FOR_CUSTOMER_APPROVAL",
+                    "Price revised — waiting for customer approval", "SHOP");
+        }
+        return toResponse(ticket);
+    }
+
+    private static BigDecimal amountOf(java.util.Map<String, Object> m) {
+        Object v = m.containsKey("amount") ? m.get("amount") : m.get("price");
+        try {
+            return v == null || String.valueOf(v).isBlank() ? BigDecimal.ZERO : new BigDecimal(String.valueOf(v).trim());
+        } catch (NumberFormatException e) {
+            return BigDecimal.ZERO;
+        }
+    }
+
+    private static String plain(BigDecimal n) {
+        return n.stripTrailingZeros().toPlainString();
+    }
+
     @Transactional
     public void updateStatus(UUID shopId, UUID id, String status) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
@@ -419,6 +687,42 @@ public class TicketService {
         ticket = ticketRepository.save(ticket);
         customerOrderMirrorService.mirrorOnUpsert(ticket);
         emitStepEventsForTicketStatus(ticket.getId(), status);
+    }
+
+    /**
+     * Re-Service: a delivered device is back, so the SAME ticket reopens for a
+     * new repair. Status returns to CREATED and the per-repair state (technician,
+     * acceptance, final price, approval) is cleared; the app's re-service wizard
+     * then PUTs the new issue / services / payment. A RE_SERVICE marker row
+     * starts a fresh step cycle: the first repair's rows stay in the table but
+     * the shop's timeline and step checks only see the new cycle
+     * (findCurrentCycle).
+     */
+    @Transactional
+    public TicketResponse reopen(UUID shopId, UUID id) {
+        Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        if (!"DELIVERED".equalsIgnoreCase(ticket.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Only a delivered booking can be re-serviced.");
+        }
+        ticket.setStatus("CREATED");
+        ticket.setAssignedTechnicianId(null);
+        ticket.setTechnicianAcceptedAt(null);
+        ticket.setFinalPrice(null);
+        ticket.setCustomerApproval(null);
+        // The new repair records its own first delivery promise (re-estimate keeps it).
+        ticket.setOriginalEstimatedDeliveryAt(null);
+        ticket = ticketRepository.save(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket);
+        platformRepairBookingRepository.findByTicketId(ticket.getId()).ifPresent(booking ->
+                platformRepairBookingEventRepository.save(PlatformRepairBookingEvent.builder()
+                        .bookingId(booking.getId())
+                        .status(PlatformRepairBookingEventRepository.RE_SERVICE)
+                        .note("Re-Service — booking reopened")
+                        .actor("SHOP")
+                        .build()));
+        return toResponse(ticket);
     }
 
     /**
@@ -449,6 +753,22 @@ public class TicketService {
             Object raw = body.get("issueDescription");
             ticket.setIssueDescription(raw == null ? null : String.valueOf(raw));
         }
+        // Edit Booking (booking details only). Status, prices, technician and the
+        // delivery schedule are NOT in this list — those have their own actions.
+        patchText(body, "customerName", ticket::setCustomerName);
+        patchText(body, "customerPhone", ticket::setCustomerPhone);
+        patchUuid(body, "brandId", ticket::setBrandId);
+        patchUuid(body, "modelId", ticket::setModelId);
+        patchUuid(body, "ramOptionId", ticket::setRamOptionId);
+        patchUuid(body, "storageOptionId", ticket::setStorageOptionId);
+        patchText(body, "color", ticket::setColor);
+        patchText(body, "deviceDisplayName", ticket::setDeviceDisplayName);
+        patchText(body, "deviceImageUrl", ticket::setDeviceImageUrl);
+        patchText(body, "issueAudioUrl", ticket::setIssueAudioUrl);
+        patchText(body, "devicePhotosJson", ticket::setDevicePhotosJson);
+        patchText(body, "missingPartsJson", ticket::setMissingPartsJson);
+        patchText(body, "deviceSecurityType", ticket::setDeviceSecurityType);
+        patchText(body, "deviceSecurityValue", ticket::setDeviceSecurityValue);
         if (body.containsKey("estimatedDeliveryAt")) {
             Object raw = body.get("estimatedDeliveryAt");
             ticket.setEstimatedDeliveryAt(parseInstantOrNull(raw));
@@ -601,6 +921,21 @@ public class TicketService {
         try { return java.time.Instant.parse(s); } catch (Exception ignored) {}
         try { return java.time.OffsetDateTime.parse(s).toInstant(); } catch (Exception ignored) {}
         return null;
+    }
+
+    /** PATCH a text column when the key is present; blank clears it. */
+    private static void patchText(Map<String, Object> body, String key, java.util.function.Consumer<String> set) {
+        if (!body.containsKey(key)) return;
+        Object raw = body.get(key);
+        String v = raw == null ? null : String.valueOf(raw).trim();
+        set.accept(v == null || v.isEmpty() ? null : v);
+    }
+
+    /** PATCH a UUID column when the key is present; blank clears it. */
+    private static void patchUuid(Map<String, Object> body, String key, java.util.function.Consumer<UUID> set) {
+        if (!body.containsKey(key)) return;
+        Object raw = body.get(key);
+        set.accept(raw == null || String.valueOf(raw).isBlank() ? null : UUID.fromString(String.valueOf(raw)));
     }
 
     private static Boolean parseBooleanOrNull(Object raw) {
@@ -815,7 +1150,7 @@ public class TicketService {
     private boolean hasBookingEvent(UUID ticketId, String statusKey) {
         return platformRepairBookingRepository.findByTicketId(ticketId)
                 .map(booking -> platformRepairBookingEventRepository
-                        .findByBookingIdOrderByCreatedAtAsc(booking.getId())
+                        .findCurrentCycle(booking.getId())
                         .stream()
                         .anyMatch(e -> statusKey.equalsIgnoreCase(e.getStatus())))
                 .orElse(false);
@@ -827,7 +1162,7 @@ public class TicketService {
     private void emitBookingEvent(UUID ticketId, String statusKey, String note, String actor) {
         platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
             boolean alreadyEmitted = platformRepairBookingEventRepository
-                    .findByBookingIdOrderByCreatedAtAsc(booking.getId())
+                    .findCurrentCycle(booking.getId())
                     .stream()
                     .anyMatch(e -> statusKey.equalsIgnoreCase(e.getStatus()));
             if (alreadyEmitted) return;
@@ -955,7 +1290,108 @@ public class TicketService {
             "DELIVERED");
 
     private void advanceTicketStatusForWorkCode(Ticket t, String code) {
-        if (code == null || code.isBlank()) return;
+        String target = lifecycleTargetFor(code);
+        if (target == null) return;
+
+        String current = t.getStatus() == null ? "" : t.getStatus().trim().toUpperCase();
+        if (target.equals(current)) return;
+        // CANCELLED / RETURNED are terminal — don't overwrite them.
+        if ("CANCELLED".equals(current) || "RETURNED".equals(current)) return;
+        int currentIdx = LIFECYCLE_ORDER.indexOf(current);
+        int targetIdx = LIFECYCLE_ORDER.indexOf(target);
+        // Both inside the linear ladder → only move forward.
+        if (currentIdx >= 0 && targetIdx >= 0 && targetIdx < currentIdx) return;
+        t.setStatus(target);
+        ticketRepository.save(t);
+        customerOrderMirrorService.mirrorOnUpsert(t);
+    }
+
+    // Steps that mean the invoice has already gone out with the device. Once one
+    // is on the rail the invoice is part of the handover and can't be deleted.
+    private static final Set<String> AFTER_INVOICE_KEYS = Set.of(
+            "DELIVERED_PROCESSING", "DELIVERED", "DELIVERED_TO_CUSTOMER", "CANCELLED", "RETURNED");
+
+    /**
+     * Undo the "Invoice Generated" step when its invoice is deleted. Refused with
+     * a 409 once Out for Delivery / Delivered is recorded or the booking is
+     * closed. Drops the INVOICE_GENERATED / INVOICE_READY rows from the Service
+     * History and walks ticket.status back to where the remaining steps leave it
+     * (READY when none of them map below the invoice), so a fresh invoice can be
+     * raised. The one deliberate demotion past the forward-only rule above.
+     */
+    @Transactional
+    public void retractInvoiceStep(UUID shopId, UUID ticketId) {
+        Ticket t = ticketRepository.findByShopIdAndId(shopId, ticketId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
+        String current = t.getStatus() == null ? "" : t.getStatus().trim().toUpperCase();
+        // Current repair only (Re-Service): the first repair's Delivered row must
+        // not block the new one, but its invoice — still the ticket's one invoice
+        // row until re-raised — was handed over and stays.
+        List<PlatformRepairBookingEvent> events = platformRepairBookingRepository.findByTicketId(ticketId)
+                .map(b -> platformRepairBookingEventRepository.findCurrentCycle(b.getId()))
+                .orElse(List.of());
+        Instant cycleStart = reServiceStartedAt(ticketId);
+        boolean handedOver = AFTER_INVOICE_KEYS.contains(current) || events.stream()
+                .anyMatch(e -> e.getStatus() != null && AFTER_INVOICE_KEYS.contains(e.getStatus().trim().toUpperCase()))
+                || invoiceRepository.findByTicketId(ticketId).filter(inv -> isEarlierRepairInvoice(inv, cycleStart)).isPresent();
+        if (handedOver) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "The invoice can't be deleted once Out for Delivery or Delivered is recorded.");
+        }
+
+        Set<String> invoiceKeys = Set.of("INVOICE_GENERATED", "INVOICE_READY");
+        List<PlatformRepairBookingEvent> invoiceSteps = new ArrayList<>();
+        int invoiceIdx = LIFECYCLE_ORDER.indexOf("INVOICE_GENERATED");
+        int restoredIdx = -1;
+        for (PlatformRepairBookingEvent e : events) {
+            String key = e.getStatus() == null ? "" : e.getStatus().trim().toUpperCase();
+            if (invoiceKeys.contains(key)) {
+                invoiceSteps.add(e);
+                continue;
+            }
+            String target = lifecycleTargetFor(key);
+            int idx = target == null ? -1 : LIFECYCLE_ORDER.indexOf(target);
+            if (idx >= 0 && idx < invoiceIdx) restoredIdx = Math.max(restoredIdx, idx);
+        }
+        platformRepairBookingEventRepository.deleteAll(invoiceSteps);
+
+        if (invoiceKeys.contains(current)) {
+            t.setStatus(restoredIdx >= 0 ? LIFECYCLE_ORDER.get(restoredIdx) : "READY");
+            ticketRepository.save(t);
+            customerOrderMirrorService.mirrorOnUpsert(t);
+        }
+    }
+
+    /** When the booking was last reopened for Re-Service (its RE_SERVICE marker), or null if never. */
+    private Instant reServiceStartedAt(UUID ticketId) {
+        return platformRepairBookingRepository.findByTicketId(ticketId)
+                .map(b -> platformRepairBookingEventRepository.findCurrentCycle(b.getId()))
+                .filter(c -> !c.isEmpty()
+                        && PlatformRepairBookingEventRepository.RE_SERVICE.equalsIgnoreCase(c.get(0).getStatus()))
+                .map(c -> c.get(0).getCreatedAt())
+                .orElse(null);
+    }
+
+    private static Instant lastWrite(Invoice inv) {
+        return inv.getUpdatedAt() != null ? inv.getUpdatedAt() : inv.getGeneratedAt();
+    }
+
+    /** Re-Service keeps the ticket's one invoice row: one last written before the reopen is the delivered first repair's. */
+    private static boolean isEarlierRepairInvoice(Invoice inv, Instant cycleStart) {
+        Instant written = lastWrite(inv);
+        return cycleStart != null && written != null && written.isBefore(cycleStart);
+    }
+
+    /** An invoice raised for the repair in progress (not the delivered first repair's after a Re-Service). */
+    private boolean hasCurrentInvoice(UUID ticketId) {
+        return invoiceRepository.findByTicketId(ticketId)
+                .filter(inv -> !isEarlierRepairInvoice(inv, reServiceStartedAt(ticketId)))
+                .isPresent();
+    }
+
+    // The ticket.status a work-status code maps to, or null when it maps to none.
+    private String lifecycleTargetFor(String code) {
+        if (code == null || code.isBlank()) return null;
         String normalized = code.trim().toUpperCase();
 
         // Primary: look up the admin-managed master row.
@@ -972,19 +1408,17 @@ public class TicketService {
         if (target == null && (LIFECYCLE_ORDER.contains(normalized) || "CANCELLED".equals(normalized))) {
             target = normalized;
         }
-        if (target == null || target.isBlank()) return;
+        return target == null || target.isBlank() ? null : target;
+    }
 
-        String current = t.getStatus() == null ? "" : t.getStatus().trim().toUpperCase();
-        if (target.equals(current)) return;
-        // CANCELLED / RETURNED are terminal — don't overwrite them.
-        if ("CANCELLED".equals(current) || "RETURNED".equals(current)) return;
-        int currentIdx = LIFECYCLE_ORDER.indexOf(current);
-        int targetIdx = LIFECYCLE_ORDER.indexOf(target);
-        // Both inside the linear ladder → only move forward.
-        if (currentIdx >= 0 && targetIdx >= 0 && targetIdx < currentIdx) return;
-        t.setStatus(target);
-        ticketRepository.save(t);
-        customerOrderMirrorService.mirrorOnUpsert(t);
+    /**
+     * Does this update re-estimate the booking? Only when the services / amount
+     * really changed AND the caller didn't mark it a plain edit. reEstimateFlag
+     * null = an older app that doesn't send TicketRequest.reEstimate: keep
+     * inferring from the change, as before.
+     */
+    static boolean isReEstimate(Boolean reEstimateFlag, boolean priceChanged) {
+        return priceChanged && !Boolean.FALSE.equals(reEstimateFlag);
     }
 
     private static final com.fasterxml.jackson.databind.ObjectMapper PRICE_ITEMS_MAPPER =
@@ -1120,7 +1554,7 @@ public class TicketService {
         java.time.Instant stamp = at != null ? at : java.time.Instant.now();
         platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
             var existing = platformRepairBookingEventRepository
-                    .findByBookingIdOrderByCreatedAtAsc(booking.getId())
+                    .findCurrentCycle(booking.getId())
                     .stream()
                     .filter(e -> statusKey.equalsIgnoreCase(e.getStatus()))
                     .findFirst();
@@ -1293,6 +1727,8 @@ public class TicketService {
                 .storageOptionId(t.getStorageOptionId())
                 .color(t.getColor())
                 .imei(fallback.imei)
+                .serialNumber(t.getSerialNumber())
+                .accessories(t.getAccessories())
                 .status(t.getStatus())
                 .estimatedPrice(t.getEstimatedPrice())
                 .finalPrice(t.getFinalPrice())
@@ -1330,6 +1766,7 @@ public class TicketService {
                 .invoiceId(invoice != null ? invoice.getId() : null)
                 .invoiceNo(invoice != null ? invoice.getInvoiceNo() : null)
                 .invoiceGeneratedAt(invoice != null ? invoice.getGeneratedAt() : null)
+                .invoiceAmount(invoice != null ? invoice.getFinalPayableAmount() : null)
                 .complianceNote(complianceNote != null ? complianceNote.getNote() : null)
                 .complianceAudioUrl(complianceNote != null ? complianceNote.getAudioUrl() : null)
                 .complianceImageUrls(complianceImages)
@@ -1709,7 +2146,7 @@ public class TicketService {
                                                    java.time.Instant fallback) {
         return platformRepairBookingRepository.findByTicketId(ticketId)
                 .flatMap(b -> platformRepairBookingEventRepository
-                        .findByBookingIdOrderByCreatedAtAsc(b.getId())
+                        .findCurrentCycle(b.getId())
                         .stream()
                         .filter(e -> statusKey.equalsIgnoreCase(e.getStatus()))
                         .findFirst()

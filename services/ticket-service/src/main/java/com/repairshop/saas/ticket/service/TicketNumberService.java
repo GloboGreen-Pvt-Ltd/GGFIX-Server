@@ -21,10 +21,13 @@ import java.util.UUID;
  *
  * The partner is the shop's owner (shops.owner_user_id, or the shop itself when
  * it has none), so every shop of one owner draws from one counter and a new
- * partner starts at 001. The counter row is bumped with a single upsert that
- * row-locks it until the caller's transaction commits — concurrent bookings for
- * the same partner queue on that lock instead of reading the same value, and a
- * rolled-back booking hands its number back. See 98_partner_ticket_numbers.sql.
+ * partner starts at 001. The next number is the highest one still on a ticket
+ * + 1, so deleting the latest booking (GTS-003) hands its number to the next
+ * booking instead of skipping to GTS-004; a gap in the middle stays a gap.
+ * The partner's counter row is row-locked until the caller's transaction
+ * commits — concurrent bookings for the same partner queue on that lock
+ * instead of reading the same value, and a rolled-back booking hands its
+ * number back. See 98_partner_ticket_numbers.sql.
  */
 @Service
 @RequiredArgsConstructor
@@ -53,12 +56,19 @@ public class TicketNumberService {
     public Assigned next(UUID shopId, boolean multiDevice) {
         Map<String, Object> shop = partnerOf(shopId);
         UUID partnerId = (UUID) shop.get("partner_id");
+        // Take the partner's lock first (row lock held until commit) ...
+        jdbc.update(
+                "INSERT INTO partner_ticket_sequences (partner_id, last_value) VALUES (?, 0) " +
+                        "ON CONFLICT (partner_id) DO UPDATE SET updated_at = now()",
+                partnerId);
+        // ... then read the highest number in use. A new statement under READ
+        // COMMITTED, so it sees the ticket the previous lock holder committed.
         Long seq = jdbc.queryForObject(
-                "INSERT INTO partner_ticket_sequences (partner_id, last_value) VALUES (?, 1) " +
-                        "ON CONFLICT (partner_id) DO UPDATE " +
-                        "SET last_value = partner_ticket_sequences.last_value + 1, updated_at = now() " +
-                        "RETURNING last_value",
-                Long.class, partnerId);
+                "UPDATE partner_ticket_sequences SET last_value = COALESCE((" +
+                        "SELECT MAX(CAST(substring(tracking_id FROM 'TS-([0-9]+)(?:-[A-Z]+)?$') AS BIGINT)) " +
+                        "FROM tickets WHERE partner_id = ?), 0) + 1, updated_at = now() " +
+                        "WHERE partner_id = ? RETURNING last_value",
+                Long.class, partnerId, partnerId);
         String booking = initial((String) shop.get("name")) + "TS-" + String.format("%03d", seq);
         return multiDevice
                 ? new Assigned(partnerId, booking + "-A", booking, "A")
