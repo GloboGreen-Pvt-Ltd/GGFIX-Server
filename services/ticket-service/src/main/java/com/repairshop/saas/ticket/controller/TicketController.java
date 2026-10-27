@@ -137,6 +137,28 @@ public class TicketController {
         return ticketService.patch(shopId, id, body);
     }
 
+    @PostMapping("/{id}/re-estimate")
+    @Operation(summary = "Re-estimate: add issues + charges found during repair (originals unchanged); awaits customer approval unless approved now")
+    public TicketResponse reEstimate(
+            @PathVariable UUID id,
+            @RequestBody com.repairshop.saas.ticket.dto.ReEstimateRequest body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.reEstimate(shopId, id, body);
+    }
+
+    @PostMapping("/{id}/price-revision")
+    @Operation(summary = "Price Revised: change or cancel existing services (no new services, no status change)")
+    public TicketResponse revisePrices(
+            @PathVariable UUID id,
+            @RequestBody com.repairshop.saas.ticket.dto.PriceRevisionRequest body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.revisePrices(shopId, id, body);
+    }
+
     @PatchMapping("/{id}/status")
     @Operation(summary = "Update ticket status")
     public void updateStatus(
@@ -146,6 +168,16 @@ public class TicketController {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         ticketService.updateStatus(shopId, id, status);
+    }
+
+    @PostMapping("/{id}/reopen")
+    @Operation(summary = "Re-Service: reopen a delivered ticket for a new repair")
+    public TicketResponse reopen(
+            @PathVariable UUID id,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.reopen(shopId, id);
     }
 
     @PostMapping("/{id}/accept")

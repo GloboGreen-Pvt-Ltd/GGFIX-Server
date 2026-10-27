@@ -87,6 +87,14 @@ public class Ticket {
     @Column(length = 50)
     private String imei;
 
+    /** Serial number for non-mobile devices (laptop, tablet, smartwatch, audio) — phones use imei. */
+    @Column(name = "serial_number", length = 64)
+    private String serialNumber;
+
+    /** Accessories handed over with the device (charger, case, SIM tray …); free text, optional. */
+    @Column(name = "accessories", length = 500)
+    private String accessories;
+
     @Column(nullable = false, length = 50)
     private String status;
 

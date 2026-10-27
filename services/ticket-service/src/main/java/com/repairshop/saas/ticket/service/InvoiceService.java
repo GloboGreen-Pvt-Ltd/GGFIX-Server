@@ -129,6 +129,30 @@ public class InvoiceService {
         return "Invoice #" + inv.getInvoiceNo() + " generated";
     }
 
+    /**
+     * Delete a ticket's invoice while it is still the booking's latest step.
+     * The "Invoice Generated" step is retracted first — that is where the
+     * refusal lives (409 once Out for Delivery / Delivered is recorded), and the
+     * shared transaction rolls everything back if it throws. The Cash Book
+     * credit the invoice posted goes with it, so the customer no longer owes it.
+     */
+    @Transactional
+    public void delete(UUID ticketId, UUID callerShopId) {
+        Ticket ticket = ticketRepository.findById(ticketId)
+                .filter(t -> callerShopId != null && callerShopId.equals(t.getShopId()))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Ticket not found"));
+        Invoice inv = invoiceRepository.findByTicketId(ticketId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Invoice not found"));
+
+        ticketService.retractInvoiceStep(ticket.getShopId(), ticketId);
+
+        if (inv.getCreditLedgerEntryId() != null && ticket.getShopId() != null) {
+            ledgerEntryRepository.findByIdAndShopId(inv.getCreditLedgerEntryId(), ticket.getShopId())
+                    .ifPresent(ledgerEntryRepository::delete);
+        }
+        invoiceRepository.delete(inv);
+    }
+
     @Transactional(readOnly = true)
     public Optional<InvoiceResponse> findByTicket(UUID ticketId) {
         return invoiceRepository.findByTicketId(ticketId).map(InvoiceResponse::from);

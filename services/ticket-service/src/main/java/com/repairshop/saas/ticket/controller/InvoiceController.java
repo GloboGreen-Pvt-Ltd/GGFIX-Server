@@ -8,8 +8,10 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.UUID;
 
@@ -50,5 +52,14 @@ public class InvoiceController {
         return invoiceService.findByTicket(ticketId)
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    @Operation(summary = "Delete the invoice for a ticket (only before Out for Delivery)")
+    @DeleteMapping
+    public ResponseEntity<Void> delete(@PathVariable UUID ticketId, HttpServletRequest request) {
+        String sid = (String) request.getAttribute("shopId");
+        if (sid == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Missing shop context");
+        invoiceService.delete(ticketId, UUID.fromString(sid));
+        return ResponseEntity.noContent().build();
     }
 }
