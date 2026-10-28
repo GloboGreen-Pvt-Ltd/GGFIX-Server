@@ -25,6 +25,9 @@ public class CustomerRequest {
     @Schema(description = "Phone number", required = true)
     private String phone;
 
+    @Schema(description = "Alternate / additional mobile number (optional)")
+    private String alternatePhone;
+
     @Schema(description = "Optional customer ID proof document URL")
     private String idProofUrl;
 

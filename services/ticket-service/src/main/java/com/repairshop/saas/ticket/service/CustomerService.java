@@ -47,6 +47,9 @@ public class CustomerService {
         String phone = normalizePhone(request.getPhone());
         String addr  = request.getAddress() != null ? request.getAddress().trim() : null;
         String idProofUrl = trimOrNull(request.getIdProofUrl());
+        // Optional second number; ignored when it repeats the primary one.
+        String altPhone = normalizePhone(request.getAlternatePhone());
+        if (altPhone != null && altPhone.equals(phone)) altPhone = null;
 
         // If a customer_users row already exists for this mobile, reuse it
         // instead of failing on the UNIQUE constraint. Refresh the name/email
@@ -60,12 +63,14 @@ public class CustomerService {
             user.setEmail(email);
             user.setMobile(phone);
             user.setIdProofUrl(idProofUrl);
+            user.setAlternateMobile(altPhone);
             user.setIsActive(true);
             user.setOtpCode(DEFAULT_DEV_OTP);
         } else {
             if (name != null && !name.isBlank()) user.setFullName(name);
             if (email != null) user.setEmail(email);
             if (idProofUrl != null) user.setIdProofUrl(idProofUrl);
+            if (altPhone != null) user.setAlternateMobile(altPhone);
             if (user.getOtpCode() == null) user.setOtpCode(DEFAULT_DEV_OTP);
             user.setIsActive(true);
         }
@@ -196,6 +201,7 @@ public class CustomerService {
                 .email(u.getEmail())
                 .phone(u.getMobile())
                 .mobile(u.getMobile())
+                .alternatePhone(u.getAlternateMobile())
                 .idProofUrl(u.getIdProofUrl())
                 .address(joinAddress(addr))
                 .createdAt(null)

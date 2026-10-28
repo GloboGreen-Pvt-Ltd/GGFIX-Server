@@ -31,6 +31,9 @@ public class CustomerResponse {
     @Schema(description = "Mobile number alias for phone")
     private String mobile;
 
+    @Schema(description = "Alternate / additional mobile number")
+    private String alternatePhone;
+
     @Schema(description = "Optional customer ID proof document URL")
     private String idProofUrl;
 
