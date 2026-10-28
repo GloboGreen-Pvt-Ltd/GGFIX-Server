@@ -34,6 +34,10 @@ public class PlatformCustomerUser {
 
     private String mobile;
 
+    /** Second contact number the shop records for this customer (optional). */
+    @Column(name = "alternate_mobile")
+    private String alternateMobile;
+
     @Column(name = "id_proof_url")
     private String idProofUrl;
 
