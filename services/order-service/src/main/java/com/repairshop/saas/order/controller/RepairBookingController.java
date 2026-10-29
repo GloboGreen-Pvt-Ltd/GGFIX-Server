@@ -754,6 +754,7 @@ public class RepairBookingController {
         }
         r.setServices(new java.util.ArrayList<>(deduped.values()));
         r.setEvents(eventRepo.findByBookingIdOrderByCreatedAtAsc(b.getId()).stream()
+                .filter(e -> !RepairBookingEvent.isShopInternal(e))
                 .map(e -> RepairBookingEventResp.builder()
                         .id(e.getId()).status(e.getStatus()).note(e.getNote()).actor(e.getActor())
                         .audioUrl(e.getAudioUrl())

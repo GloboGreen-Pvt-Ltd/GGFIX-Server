@@ -397,9 +397,13 @@ public class AuthController {
 
     @PostMapping("/shops/{shopId}/technicians")
     @ResponseStatus(HttpStatus.CREATED)
-    @Operation(summary = "Add technician", description = "Add a technician user to a shop")
-    public RegisterResponse addTechnician(@PathVariable UUID shopId,
+    @Operation(summary = "Add technician",
+            description = "Add a technician user to a shop. SUPER_ADMIN, or the SHOP_OWNER of that shop; 401 without a token.")
+    public RegisterResponse addTechnician(HttpServletRequest httpRequest,
+                                         @PathVariable UUID shopId,
                                          @Valid @RequestBody RegisterTechnicianRequest request) {
+        // /auth/** is permitAll (SecurityConfig), so this is the real gate.
+        authService.requireShopAccess(requireUserId(httpRequest), shopId);
         RegisterResponse resp = authService.registerTechnician(shopId, request);
         // Separate transaction: link an existing technician row (by shop+phone)
         // to the new login so /technicians/me resolves. Best-effort — never

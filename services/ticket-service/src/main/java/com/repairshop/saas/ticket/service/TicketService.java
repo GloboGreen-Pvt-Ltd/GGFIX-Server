@@ -241,11 +241,22 @@ public class TicketService {
         return toResponsePage(ticketRepository.findByAssignedTechnicianId(technicianId, pageable));
     }
 
-    /** For technician "my tickets": resolve user id to technician id then list assigned tickets. */
+    /**
+     * For technician "my tickets": resolve user id to technician id then list
+     * assigned tickets, filtered by status (comma-separated) and q. shopId
+     * scopes the technician lookup (employee callers); null keeps the legacy
+     * first-row-by-user lookup.
+     */
     @Transactional(readOnly = true)
-    public Page<TicketResponse> listByAssignedUser(UUID userId, Pageable pageable) {
-        return technicianRepository.findFirstByUserId(userId)
-                .map(tech -> toResponsePage(ticketRepository.findByAssignedTechnicianId(tech.getId(), pageable)))
+    public Page<TicketResponse> listByAssignedUser(UUID shopId, UUID userId, String status, String q, Pageable pageable) {
+        List<String> statuses = status == null ? List.of() : java.util.Arrays.stream(status.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).toList();
+        String query = q != null ? q.trim() : "";
+        return (shopId != null
+                ? technicianRepository.findByShopIdAndUserId(shopId, userId)
+                : technicianRepository.findFirstByUserId(userId))
+                .map(tech -> toResponsePage(ticketRepository.searchByAssignedTechnician(
+                        tech.getShopId(), tech.getId(), statuses.isEmpty(), statuses, query, pageable)))
                 .orElse(new PageImpl<>(Collections.emptyList(), pageable, 0));
     }
 
@@ -263,13 +274,37 @@ public class TicketService {
     @Transactional(readOnly = true)
     public Map<String, Long> getCountsByShop(UUID shopId) {
         Map<String, Long> counts = new HashMap<>();
-        String[] statuses = { "CREATED", "IN_DIAGNOSIS", "QUOTED", "APPROVED", "IN_REPAIR", "READY",
-                "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING", "DELIVERED", "CANCELLED" };
-        for (String s : statuses) {
+        for (String s : COUNT_STATUSES) {
             counts.put(s, ticketRepository.countByShopIdAndStatus(shopId, s));
         }
         counts.put("total", ticketRepository.countByShopId(shopId));
         counts.put("assignedCount", ticketRepository.countByShopIdAndAssignedTechnicianIdNotNull(shopId));
+        return counts;
+    }
+
+    private static final String[] COUNT_STATUSES = { "CREATED", "IN_DIAGNOSIS", "QUOTED", "APPROVED", "IN_REPAIR", "READY",
+            "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING", "DELIVERED", "CANCELLED" };
+
+    /**
+     * Same keys as getCountsByShop, counted over the caller's own assigned
+     * tickets only (employee callers). Every count is 0 when the user has no
+     * technician row in this shop; assignedCount equals total.
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Long> getCountsByAssignedUser(UUID shopId, UUID userId) {
+        Map<String, Long> counts = new HashMap<>();
+        for (String s : COUNT_STATUSES) counts.put(s, 0L);
+        long total = 0;
+        Technician tech = userId == null ? null : technicianRepository.findByShopIdAndUserId(shopId, userId).orElse(null);
+        if (tech != null) {
+            for (Object[] row : ticketRepository.countByAssignedTechnicianGroupByStatus(shopId, tech.getId())) {
+                long n = ((Number) row[1]).longValue();
+                total += n;
+                if (row[0] != null && counts.containsKey(row[0].toString())) counts.put(row[0].toString(), n);
+            }
+        }
+        counts.put("total", total);
+        counts.put("assignedCount", total);
         return counts;
     }
 
@@ -1103,6 +1138,59 @@ public class TicketService {
         return toResponse(ticket);
     }
 
+    /**
+     * Technician's explicit Decline, the counterpart of Accept: hands a job
+     * that is assigned to them but not yet accepted back to the owner. Clears
+     * the assignment and leaves status alone — the booking is not cancelled,
+     * it just needs another technician. Writes TECHNICIAN_DECLINED with the
+     * reason to the owner's timeline.
+     *
+     * 403 when the caller is not the assigned technician (including a repeat
+     * decline, since the first one unassigned them); 409 once accepted.
+     */
+    @Transactional
+    public TicketResponse declineByTechnician(UUID shopId, UUID userId, UUID ticketId, String reason) {
+        Ticket ticket = ticketRepository.findByShopIdAndId(shopId, ticketId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
+        if (ticket.getAssignedTechnicianId() == null) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "ticket has no assigned technician");
+        }
+        Technician me = technicianRepository.findByShopIdAndUserId(shopId, userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN, "not a technician of this shop"));
+        if (!ticket.getAssignedTechnicianId().equals(me.getId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "ticket is assigned to a different technician");
+        }
+        if (ticket.getTechnicianAcceptedAt() != null) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This job is already accepted and can't be declined.");
+        }
+        ticket.setAssignedTechnicianId(null);
+        ticket = ticketRepository.save(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket);
+        // emitOrUpdate, not insert-once like Accept's row: a job declined by one
+        // technician and then by the next must show the latest reason, not the first.
+        emitOrUpdateBookingEvent(ticket.getId(), "TECHNICIAN_DECLINED", reason, "TECHNICIAN");
+        return toResponse(ticket);
+    }
+
+    /**
+     * Employee (Staff app) access check: the ticket must be in the caller's shop
+     * and assigned to the caller's technician row there, else 403. With
+     * {@code mustBeAccepted}, a job still awaiting the technician's Accept is a
+     * 409 so the app can prompt for it rather than show a permission error.
+     */
+    @Transactional(readOnly = true)
+    public void requireAssignedTechnician(UUID shopId, UUID userId, UUID ticketId, boolean mustBeAccepted) {
+        Ticket ticket = ticketRepository.findByShopIdAndId(shopId, ticketId).orElse(null);
+        UUID mine = userId == null ? null : technicianRepository.findByShopIdAndUserId(shopId, userId)
+                .map(Technician::getId).orElse(null);
+        if (ticket == null || mine == null || !mine.equals(ticket.getAssignedTechnicianId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This job is not assigned to you.");
+        }
+        if (mustBeAccepted && ticket.getTechnicianAcceptedAt() == null) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Accept the job first.");
+        }
+    }
+
     private static boolean hasAtLeastOneUrl(String json) {
         if (json == null) return false;
         String trimmed = json.trim();
@@ -1663,6 +1751,35 @@ public class TicketService {
             });
         }
         return base;
+    }
+
+    /**
+     * Pre-acceptance preview for employee (Staff app) callers: until the
+     * assigned technician accepts, the job shows the device and the issue but
+     * not the customer's contact details, any money, or the unlock code.
+     * Applied to the built DTO and only for employee callers, so owner
+     * responses are untouched; an accepted job passes through unchanged.
+     */
+    public static TicketResponse redactUntilAccepted(TicketResponse r) {
+        if (r == null || r.getTechnicianAcceptedAt() != null) return r;
+        r.setCustomerId(null);
+        r.setCustomerPhone(null);
+        r.setCustomerAddress(null);
+        r.setEstimatedPrice(null);
+        r.setFinalPrice(null);
+        r.setPaymentType(null);
+        r.setPaymentAmount(null);
+        r.setBalanceAmount(null);
+        r.setPaymentStatus(null);
+        r.setPaymentPaidAt(null);
+        r.setPriceItemsJson(null);
+        r.setInvoiceId(null);
+        r.setInvoiceNo(null);
+        r.setInvoiceGeneratedAt(null);
+        r.setInvoiceAmount(null);
+        r.setDeviceSecurityType(null);
+        r.setDeviceSecurityValue(null);
+        return r;
     }
 
     private TicketResponse toResponse(Ticket t) {

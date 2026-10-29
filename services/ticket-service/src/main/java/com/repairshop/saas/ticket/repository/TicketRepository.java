@@ -44,6 +44,38 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
             @Param("q") String q,
             Pageable pageable);
 
+    /**
+     * One technician's jobs (Staff app list / assignedToMe). {@code anyStatus}
+     * stands in for "no status filter" so an empty IN list is never bound.
+     * {@code q} matches booking and device text like searchByShop, minus the
+     * customer's phone, which employees don't see before accepting; pass ""
+     * for no search — '%%' matches every row.
+     */
+    @Query("""
+            SELECT t FROM Ticket t
+            WHERE t.shopId = :shopId
+              AND t.assignedTechnicianId = :technicianId
+              AND (:anyStatus = true OR t.status IN :statuses)
+              AND (
+                LOWER(COALESCE(t.trackingId, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.bookingNumber, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.customerName, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.deviceDisplayName, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.repairServicesSummary, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+              )
+            """)
+    Page<Ticket> searchByAssignedTechnician(
+            @Param("shopId") UUID shopId,
+            @Param("technicianId") UUID technicianId,
+            @Param("anyStatus") boolean anyStatus,
+            @Param("statuses") List<String> statuses,
+            @Param("q") String q,
+            Pageable pageable);
+
+    @Query("SELECT t.status, COUNT(t) FROM Ticket t WHERE t.shopId = :shopId AND t.assignedTechnicianId = :technicianId GROUP BY t.status")
+    List<Object[]> countByAssignedTechnicianGroupByStatus(@Param("shopId") UUID shopId,
+                                                          @Param("technicianId") UUID technicianId);
+
     boolean existsByShopIdAndTrackingId(UUID shopId, String trackingId);
 
     /**

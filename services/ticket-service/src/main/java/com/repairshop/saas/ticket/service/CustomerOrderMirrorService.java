@@ -194,6 +194,11 @@ public class CustomerOrderMirrorService {
                     java.util.Map.entry("TECHNICIAN_ACCEPTED_SERVICE",
                             new String[]{"Technician accepted the job",
                                     "Your technician accepted booking %s."}),
+                    // The job is unassigned again and needs a new technician.
+                    // Shop-only: there is deliberately no customer template.
+                    java.util.Map.entry("TECHNICIAN_DECLINED",
+                            new String[]{"Technician declined the job",
+                                    "Booking %s was declined by its technician. Assign another technician."}),
                     java.util.Map.entry("TECHNICIAN_WORK_STARTED",
                             new String[]{"Technician work started",
                                     "Work has started on booking %s."}),

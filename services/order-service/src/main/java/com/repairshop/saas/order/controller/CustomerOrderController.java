@@ -213,7 +213,7 @@ public class CustomerOrderController {
         List<RepairBookingEvent> events = eventRepo.findByBookingIdOrderByCreatedAtAsc(bookingId);
         RepairBookingEvent latest = null;
         for (RepairBookingEvent e : events) {
-            if (e.getCreatedAt() == null) continue;
+            if (e.getCreatedAt() == null || RepairBookingEvent.isShopInternal(e)) continue;
             if (latest == null) { latest = e; continue; }
             int byTime = e.getCreatedAt().compareTo(latest.getCreatedAt());
             if (byTime > 0 || (byTime == 0 && phaseRank(e) >= phaseRank(latest))) latest = e;

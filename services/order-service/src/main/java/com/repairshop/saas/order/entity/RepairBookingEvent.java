@@ -30,4 +30,14 @@ public class RepairBookingEvent {
     @Column(name = "created_at", nullable = false) private Instant createdAt;
 
     @PrePersist void prePersist() { if (createdAt == null) createdAt = Instant.now(); }
+
+    // Shop-internal steps ticket-service writes to this shared table that must
+    // not reach customer or pickup responses. TECHNICIAN_DECLINED carries the
+    // technician's free-text reason for handing a job back to the owner, and as
+    // the newest row it would otherwise become the My Orders "Status:" line.
+    private static final java.util.Set<String> SHOP_INTERNAL_STATUSES = java.util.Set.of("TECHNICIAN_DECLINED");
+
+    public static boolean isShopInternal(RepairBookingEvent e) {
+        return e.getStatus() != null && SHOP_INTERNAL_STATUSES.contains(e.getStatus().trim().toUpperCase());
+    }
 }

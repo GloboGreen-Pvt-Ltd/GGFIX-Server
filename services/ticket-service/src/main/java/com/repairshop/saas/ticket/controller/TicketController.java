@@ -8,12 +8,15 @@ import com.repairshop.saas.ticket.dto.SolutionPackResponse;
 import com.repairshop.saas.ticket.dto.TicketEventResponse;
 import com.repairshop.saas.ticket.dto.TicketRequest;
 import com.repairshop.saas.ticket.dto.TicketResponse;
+import com.repairshop.saas.ticket.security.CallerRoles;
 import com.repairshop.saas.ticket.service.TicketService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -21,6 +24,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -45,11 +49,26 @@ public class TicketController {
         return uid != null ? UUID.fromString(uid) : null;
     }
 
+    // Employee (Staff app) callers only reach a ticket while it is assigned to
+    // them, and may only write to it once they have accepted it. Owner and
+    // admin tokens skip the check entirely.
+    private void requireOwnJob(HttpServletRequest request, UUID shopId, UUID ticketId, boolean mustBeAccepted) {
+        if (!CallerRoles.isEmployee(request)) return;
+        ticketService.requireAssignedTechnician(shopId, userIdFrom(request), ticketId, mustBeAccepted);
+    }
+
+    // Employees see a job's money, customer contact and unlock code only after
+    // accepting it; owner responses are returned as built.
+    private TicketResponse forCaller(TicketResponse ticket, HttpServletRequest request) {
+        return CallerRoles.isEmployee(request) ? TicketService.redactUntilAccepted(ticket) : ticket;
+    }
+
     @GetMapping("/counts")
-    @Operation(summary = "Get booking/ticket counts for shop (dashboard)")
+    @Operation(summary = "Get booking/ticket counts for shop (dashboard); employees get counts over their own jobs")
     public Map<String, Long> getCounts(HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        if (CallerRoles.isEmployee(request)) return ticketService.getCountsByAssignedUser(shopId, userIdFrom(request));
         return ticketService.getCountsByShop(shopId);
     }
 
@@ -58,7 +77,8 @@ public class TicketController {
     public TicketResponse getById(@PathVariable UUID id, HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        return ticketService.getById(shopId, id);
+        requireOwnJob(request, shopId, id, false);
+        return forCaller(ticketService.getById(shopId, id), request);
     }
 
     @GetMapping("/customer/{id}")
@@ -75,6 +95,7 @@ public class TicketController {
     public List<TicketEventResponse> getEvents(@PathVariable UUID id, HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        requireOwnJob(request, shopId, id, false);
         return ticketService.getEventsForShop(shopId, id);
     }
 
@@ -89,17 +110,24 @@ public class TicketController {
     }
 
     @GetMapping
-    @Operation(summary = "List tickets (paginated). Use assignedToMe=true for technician's assigned tickets.")
+    @Operation(summary = "List tickets (paginated). Use assignedToMe=true for technician's assigned tickets "
+            + "(status may be comma-separated there); employee logins always get only their own.")
     public Page<TicketResponse> list(
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String q,
             @RequestParam(required = false, defaultValue = "false") boolean assignedToMe,
             Pageable pageable,
             HttpServletRequest request) {
-        if (assignedToMe) {
+        boolean employee = CallerRoles.isEmployee(request);
+        if (assignedToMe || employee) {
             UUID userId = userIdFrom(request);
             if (userId == null) throw new IllegalStateException("Missing user context");
-            return ticketService.listByAssignedUser(userId, pageable);
+            if (!employee) return ticketService.listByAssignedUser(null, userId, status, q, pageable);
+            // Employees resolve their technician row within their own shop.
+            UUID shopId = shopIdFrom(request);
+            if (shopId == null) throw new IllegalStateException("Missing shop context");
+            return ticketService.listByAssignedUser(shopId, userId, status, q, pageable)
+                    .map(TicketService::redactUntilAccepted);
         }
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
@@ -110,6 +138,7 @@ public class TicketController {
     @ResponseStatus(HttpStatus.CREATED)
     @Operation(summary = "Create ticket")
     public TicketResponse create(@Valid @RequestBody TicketRequest body, HttpServletRequest request) {
+        CallerRoles.denyEmployee(request);
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         return ticketService.create(shopId, body);
@@ -121,6 +150,7 @@ public class TicketController {
             @PathVariable UUID id,
             @Valid @RequestBody TicketRequest body,
             HttpServletRequest request) {
+        CallerRoles.denyEmployee(request);
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         return ticketService.update(shopId, id, body);
@@ -134,6 +164,14 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        if (CallerRoles.isEmployee(request)) {
+            requireOwnJob(request, shopId, id, true);
+            // The Staff app only uploads its own device photos here; every other
+            // field (booking details, assignment, payment, status) is the owner's.
+            Map<String, Object> own = new HashMap<>();
+            if (body.containsKey("technicianPhotosJson")) own.put("technicianPhotosJson", body.get("technicianPhotosJson"));
+            body = own;
+        }
         return ticketService.patch(shopId, id, body);
     }
 
@@ -145,6 +183,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        requireOwnJob(request, shopId, id, true);
         return ticketService.reEstimate(shopId, id, body);
     }
 
@@ -156,6 +195,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        requireOwnJob(request, shopId, id, true);
         return ticketService.revisePrices(shopId, id, body);
     }
 
@@ -165,6 +205,7 @@ public class TicketController {
             @PathVariable UUID id,
             @RequestParam String status,
             HttpServletRequest request) {
+        CallerRoles.denyEmployee(request);
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         ticketService.updateStatus(shopId, id, status);
@@ -175,6 +216,7 @@ public class TicketController {
     public TicketResponse reopen(
             @PathVariable UUID id,
             HttpServletRequest request) {
+        CallerRoles.denyEmployee(request);
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         return ticketService.reopen(shopId, id);
@@ -189,6 +231,23 @@ public class TicketController {
         UUID userId = userIdFrom(request);
         if (shopId == null || userId == null) throw new IllegalStateException("Missing auth context");
         return ticketService.acceptByTechnician(shopId, userId, id);
+    }
+
+    // Staff app Decline: hands an assigned, not-yet-accepted job back to the
+    // owner for reassignment. The booking itself is not cancelled.
+    @PostMapping("/{id}/decline")
+    @Operation(summary = "Assigned technician declines the ticket before accepting it (unassigns; status unchanged)")
+    public TicketResponse declineByTechnician(
+            @PathVariable UUID id,
+            @Valid @RequestBody DeclineRequest body,
+            HttpServletRequest request) {
+        if (!CallerRoles.isEmployee(request)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Only the assigned technician can decline a job.");
+        }
+        UUID shopId = shopIdFrom(request);
+        UUID userId = userIdFrom(request);
+        if (shopId == null || userId == null) throw new IllegalStateException("Missing auth context");
+        return forCaller(ticketService.declineByTechnician(shopId, userId, id, body.getReason().trim()), request);
     }
 
     // Pre-flight for the shop app's invoice gate: is this IMEI well-formed, and
@@ -217,6 +276,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        requireOwnJob(request, shopId, id, true);
         return ticketService.addRepairNote(shopId, id, userIdFrom(request), body);
     }
 
@@ -232,6 +292,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        requireOwnJob(request, shopId, id, true);
         return ticketService.updateRepairNote(shopId, id, noteId, body);
     }
 
@@ -240,6 +301,7 @@ public class TicketController {
     public List<RepairNoteResponse> listNotes(@PathVariable UUID id, HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        requireOwnJob(request, shopId, id, false);
         return ticketService.listRepairNotes(shopId, id);
     }
 
@@ -265,6 +327,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        requireOwnJob(request, shopId, id, true);
         return ticketService.addSolutionPack(shopId, id, userIdFrom(request), body);
     }
 
@@ -280,7 +343,10 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        ticketService.emitProgressStepEvent(shopId, id, body.getStatusKey(), body.getNote(), body.getActor());
+        requireOwnJob(request, shopId, id, true);
+        // An employee's step is always the technician's — never recorded as OWNER.
+        String actor = CallerRoles.isEmployee(request) ? "TECHNICIAN" : body.getActor();
+        ticketService.emitProgressStepEvent(shopId, id, body.getStatusKey(), body.getNote(), actor);
     }
 
     @lombok.Data
@@ -290,5 +356,12 @@ public class TicketController {
         /** Caller-supplied actor — TECHNICIAN (default) or OWNER. Frontend uses
          *  this to distinguish manually-submitted rows from auto-emitted ones. */
         private String actor;
+    }
+
+    @lombok.Data
+    public static class DeclineRequest {
+        @NotBlank(message = "reason is required")
+        @Size(max = 500, message = "reason must be at most 500 characters")
+        private String reason;
     }
 }

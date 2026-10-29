@@ -103,6 +103,12 @@ public class TechnicianController {
         UUID shopId = shopIdFrom(request);
         UUID userId = userIdFrom(request);
         if (shopId == null || userId == null) throw new IllegalStateException("Missing shop or user context");
+        // The duty roster is owner-managed: an employee must not move their own
+        // check-in/out times (attendance is judged against them).
+        if (!isOwnerOrAdmin(request)) {
+            body.setDefaultCheckIn(null);
+            body.setDefaultCheckOut(null);
+        }
         return technicianService.updateMe(shopId, userId, body);
     }
 
@@ -198,6 +204,8 @@ public class TechnicianController {
     public List<TechnicianResponse> list(HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        // Full roster rows carry salary and KYC fields; employees use /me.
+        requireOwner(request);
         return technicianService.listByShop(shopId);
     }
 

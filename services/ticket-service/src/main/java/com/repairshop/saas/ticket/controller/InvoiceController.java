@@ -2,6 +2,7 @@ package com.repairshop.saas.ticket.controller;
 
 import com.repairshop.saas.ticket.dto.InvoiceRequest;
 import com.repairshop.saas.ticket.dto.InvoiceResponse;
+import com.repairshop.saas.ticket.security.CallerRoles;
 import com.repairshop.saas.ticket.service.InvoiceService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -43,6 +44,7 @@ public class InvoiceController {
     public InvoiceResponse upsert(@PathVariable UUID ticketId,
                                   @RequestBody InvoiceRequest body,
                                   HttpServletRequest request) {
+        CallerRoles.denyEmployee(request);
         return invoiceService.upsert(ticketId, body, userIdFrom(request));
     }
 
@@ -57,6 +59,7 @@ public class InvoiceController {
     @Operation(summary = "Delete the invoice for a ticket (only before Out for Delivery)")
     @DeleteMapping
     public ResponseEntity<Void> delete(@PathVariable UUID ticketId, HttpServletRequest request) {
+        CallerRoles.denyEmployee(request);
         String sid = (String) request.getAttribute("shopId");
         if (sid == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Missing shop context");
         invoiceService.delete(ticketId, UUID.fromString(sid));

@@ -22,6 +22,7 @@ import com.repairshop.saas.auth.entity.Shop;
 import com.repairshop.saas.auth.entity.Subscription;
 import com.repairshop.saas.auth.entity.User;
 import com.repairshop.saas.auth.exception.BadRequestException;
+import com.repairshop.saas.auth.exception.ForbiddenException;
 import com.repairshop.saas.auth.exception.UnauthorizedException;
 import com.repairshop.saas.auth.repository.ShopRepository;
 import com.repairshop.saas.auth.repository.SubscriptionRepository;
@@ -1256,6 +1257,22 @@ public class AuthService {
     public User requireUser(UUID userId) {
         return userRepository.findById(userId)
                 .orElseThrow(() -> new UnauthorizedException("User not found"));
+    }
+
+    /**
+     * Gate for managing a shop's staff logins: SUPER_ADMIN for any shop, a
+     * SHOP_OWNER only for a shop they own (shops.owner_user_id, as switchShop
+     * checks) or their own users.shop (owners created by /auth/register).
+     * 401 when the user doesn't resolve, 403 for anyone else.
+     */
+    @Transactional(readOnly = true)
+    public void requireShopAccess(UUID userId, UUID shopId) {
+        User caller = requireUser(userId);
+        if (Roles.isAdmin(caller.getRole())) return;
+        boolean owns = Roles.isShopOwner(caller.getRole())
+                && (shopRepository.findById(shopId).map(s -> userId.equals(s.getOwnerUserId())).orElse(false)
+                        || (caller.getShop() != null && shopId.equals(caller.getShop().getId())));
+        if (!owns) throw new ForbiddenException("Only the owner of this shop can add employees to it");
     }
 
     /** Name to record for a person, falling back to email when unnamed. */
