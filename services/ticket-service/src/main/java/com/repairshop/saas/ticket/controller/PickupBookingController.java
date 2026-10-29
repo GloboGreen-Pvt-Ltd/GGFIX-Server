@@ -1450,7 +1450,7 @@ public class PickupBookingController {
         List<Map<String, Object>> rows;
         try {
             rows = jdbc.query(
-                    "SELECT id, service_code, service_name, repair_service_id, estimated_price " +
+                    "SELECT id, service_code, service_name, repair_service_id, estimated_price, warranty " +
                             "FROM repair_booking_services WHERE booking_id = CAST(? AS UUID) ORDER BY created_at ASC",
                     (rs, rn) -> {
                         Map<String, Object> r = new LinkedHashMap<>();
@@ -1460,6 +1460,10 @@ public class PickupBookingController {
                         r.put("repairServiceId", rs.getString("repair_service_id"));
                         BigDecimal price = rs.getBigDecimal("estimated_price");
                         if (price != null) r.put("amount", price);
+                        // The pickup estimate's per-service warranty — the invoice /
+                        // receipt lines read it from the ticket's price items.
+                        String warranty = rs.getString("warranty");
+                        if (warranty != null && !warranty.isBlank()) r.put("warranty", warranty);
                         return r;
                     },
                     bookingId.toString());

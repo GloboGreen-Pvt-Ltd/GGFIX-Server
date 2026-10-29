@@ -583,10 +583,16 @@ public class CustomerOrderMirrorService {
                 try { price = new BigDecimal(amount.toString()); }
                 catch (NumberFormatException ignored) {}
             }
+            // Carry the warranty across the rebuild — dropping it here wiped the
+            // per-service warranty the pickup estimate had saved on the booking.
+            Object warranty = it.get("warranty");
+            String warrantyText = warranty != null && !warranty.toString().isBlank() ? warranty.toString().trim() : null;
+            if (warrantyText != null && warrantyText.length() > 20) warrantyText = warrantyText.substring(0, 20);
             bookingServiceRepo.save(PlatformRepairBookingService.builder()
                     .bookingId(bookingId)
                     .serviceName(label != null ? label.toString() : null)
                     .estimatedPrice(price)
+                    .warranty(warrantyText)
                     .build());
         }
     }
