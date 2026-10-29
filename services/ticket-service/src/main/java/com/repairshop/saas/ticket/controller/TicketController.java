@@ -37,6 +37,10 @@ import java.util.UUID;
 @SecurityRequirement(name = "Bearer")
 public class TicketController {
 
+    /** Progress steps the Staff app's Job Details screen posts (JobDetailsScreen ROWS). */
+    private static final java.util.Set<String> TECHNICIAN_PROGRESS_KEYS = java.util.Set.of(
+            "IN_REPAIR", "PARTS_REQUIRED", "REPAIR_COMPLETED", "QUALITY_CHECK_COMPLETED", "REPAIR_NOT_COMPLETED");
+
     private final TicketService ticketService;
 
     private UUID shopIdFrom(HttpServletRequest request) {
@@ -344,8 +348,15 @@ public class TicketController {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         requireOwnJob(request, shopId, id, true);
+        boolean employee = CallerRoles.isEmployee(request);
+        // Employees may only post the repair-bench steps the Staff app offers; READY,
+        // invoice, delivery and cancel steps move the ticket forward and stay owner-side.
+        if (employee && (body.getStatusKey() == null
+                || !TECHNICIAN_PROGRESS_KEYS.contains(body.getStatusKey().trim().toUpperCase(java.util.Locale.ROOT)))) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This step can only be updated by the shop owner.");
+        }
         // An employee's step is always the technician's — never recorded as OWNER.
-        String actor = CallerRoles.isEmployee(request) ? "TECHNICIAN" : body.getActor();
+        String actor = employee ? "TECHNICIAN" : body.getActor();
         ticketService.emitProgressStepEvent(shopId, id, body.getStatusKey(), body.getNote(), actor);
     }
 

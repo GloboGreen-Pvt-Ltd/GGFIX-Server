@@ -76,6 +76,16 @@ class TicketControllerEmployeeGuardTest {
     }
 
     @Test
+    void employeeCannotPostOwnerSideSteps() {
+        for (String key : new String[] { "DELIVERED", "CANCELLED", "READY", "INVOICE_GENERATED" }) {
+            ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                    () -> controller.emitProgressEvent(ticketId, step(key), request("TECHNICIAN")));
+            assertEquals(403, ex.getStatusCode().value());
+        }
+        verify(service, never()).emitProgressStepEvent(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void ownerProgressEventSkipsTheEmployeeGuard() {
         controller.emitProgressEvent(ticketId, step("QUALITY_CHECK_COMPLETED"), request("SHOP_OWNER"));
         verify(service, never()).requireAssignedTechnician(any(), any(), any(), anyBoolean());
