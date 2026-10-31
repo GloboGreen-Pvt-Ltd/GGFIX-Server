@@ -123,7 +123,9 @@ class ReEstimateWorkflowServiceTest {
                 mock(PlatformCustomerAddressRepository.class), mock(PlatformCustomerUserRepository.class),
                 mock(RepairNoteRepository.class), mock(TicketSolutionPackRepository.class),
                 mock(MasterTechnicianWorkStatusViewRepository.class), mock(InvoiceRepository.class),
-                mirror, mock(TicketNumberService.class), workflow);
+                mirror, mock(TicketNumberService.class), workflow,
+                mock(com.repairshop.saas.common.notify.ShopPushService.class),
+                mock(com.repairshop.saas.common.notify.PushService.class));
 
         // Repair work had started before the extra issue was found.
         event("IN_REPAIR", Instant.now().minusSeconds(3600));
@@ -426,7 +428,7 @@ class ReEstimateWorkflowServiceTest {
         ReEstimateRevisionDtos.Revision req = workflow.requestReEstimate(
                 shopId, techUserId, TECH, ticketId, techRequest("Port damaged", "Found while testing", "800"));
 
-        ticketService.updateStatus(shopId, ticketId, "CANCELLED");
+        ticketService.updateStatus(shopId, ticketId, "CANCELLED", null);
 
         assertEquals("DISMISSED", revisions.get(req.getId()).getStatus());
         assertEquals("CANCELLED", ticket.getStatus());
