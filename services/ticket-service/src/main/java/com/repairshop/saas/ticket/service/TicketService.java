@@ -63,6 +63,7 @@ public class TicketService {
     private final InvoiceRepository invoiceRepository;
     private final CustomerOrderMirrorService customerOrderMirrorService;
     private final TicketNumberService ticketNumberService;
+    private final ReEstimateWorkflowService reEstimateWorkflow;
 
     @Transactional
     public TicketResponse getById(UUID shopId, UUID id) {
@@ -448,6 +449,12 @@ public class TicketService {
      */
     @Transactional
     public TicketResponse reEstimate(UUID shopId, UUID id, com.repairshop.saas.ticket.dto.ReEstimateRequest req) {
+        return reEstimate(shopId, id, req, null);
+    }
+
+    /** As above, recording who submitted it on the re-estimate revision (ReEstimateWorkflowService). */
+    @Transactional
+    public TicketResponse reEstimate(UUID shopId, UUID id, com.repairshop.saas.ticket.dto.ReEstimateRequest req, UUID submittedBy) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
         if (hasCurrentInvoice(ticket.getId())) {
@@ -457,6 +464,9 @@ public class TicketService {
         if (reason.length() < 3) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Add the reason for the extra work");
         }
+        // Re-estimate workflow: 409 while another revision awaits approval; snapshot the price + scope
+        // a rejection restores; link the technician's open request (req.requestId).
+        ReEstimateWorkflowService.PendingRevision revision = reEstimateWorkflow.openPartnerRevision(ticket, req.getRequestId());
         java.util.List<java.util.Map<String, Object>> items = parsePriceItemList(ticket.getPriceItemsJson());
         java.util.Set<String> keys = new java.util.HashSet<>();
         for (java.util.Map<String, Object> it : items) keys.add(priceItemIdentity(it));
@@ -528,6 +538,7 @@ public class TicketService {
                 .isInternal(true)
                 .imagesJson(images)
                 .build());
+        reEstimateWorkflow.recordPartnerSubmission(revision, ticket, submittedBy, added, extra, newTotal, reason, images);
         markReEstimated(ticket);
         if (approvedNow) {
             onCustomerApproved(ticket, "SHOP");
@@ -578,6 +589,7 @@ public class TicketService {
         if (hasCurrentInvoice(ticket.getId())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Invoice already generated — revise the price on the invoice");
         }
+        reEstimateWorkflow.assertNoPendingApproval(ticket);
         String reason = req == null || req.getReason() == null ? "" : req.getReason().trim();
         String notes = req == null || req.getNotes() == null ? "" : req.getNotes().trim();
         if (reason.isEmpty()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Select the reason for the revision");
@@ -683,6 +695,7 @@ public class TicketService {
     public void updateStatus(UUID shopId, UUID id, String status) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        reEstimateWorkflow.onProgressStep(ticket, status);
         ticket.setStatus(status);
         ticket = ticketRepository.save(ticket);
         customerOrderMirrorService.mirrorOnUpsert(ticket);
@@ -1145,6 +1158,8 @@ public class TicketService {
         emitOrUpdateBookingEvent(ticket.getId(), "CUSTOMER_APPROVED",
                 afterReEstimate ? NOTE_APPROVED_RE_ESTIMATE : NOTE_APPROVED,
                 actor, null, null, java.time.Instant.now());
+        // An approval also settles a re-estimate awaiting it (approved + back to repair).
+        reEstimateWorkflow.onCustomerApproval(ticket, actor);
     }
 
     private boolean hasBookingEvent(UUID ticketId, String statusKey) {
@@ -1226,7 +1241,9 @@ public class TicketService {
             // BOOKING_EDITED is the shop's "booking details changed" marker
             // (Edit Booking). History only — not a lifecycle or master work
             // code, so ticket.status is left as it was.
-            "BOOKING_EDITED");
+            "BOOKING_EDITED",
+            // Re-estimate workflow: the decision emits it; the technician may also tap it.
+            "REPAIR_WORK_RESUMED");
 
     // Who may be recorded as having performed a step. The endpoint is shop-scoped
     // rather than role-gated, so an owner token and an employee token can both
@@ -1247,6 +1264,9 @@ public class TicketService {
         if (!ALLOWED_PROGRESS_STEP_KEYS.contains(key)) {
             throw new IllegalArgumentException("Status key not allowed: " + key);
         }
+        // Repair Completed / QC / Ready / invoice wait for an open re-estimate (409 REESTIMATE_PENDING);
+        // Customer Rejected / Cancelled / Return Delivery close it instead.
+        reEstimateWorkflow.onProgressStep(t, key);
         // A delivered or cancelled booking is closed: the device is with the
         // customer (or the job was called off) and there is no further status to
         // record. The owner app already hides the picker at that point, but the
@@ -1527,6 +1547,10 @@ public class TicketService {
             case "READY":                  return "Ready for Delivery";
             case "DELIVERED":              return "Delivered to Customer";
             case "CANCELLED":              return "Repair Cancelled";
+            case "TECHNICIAN_REESTIMATE_REQUESTED": return "Technician Re-Estimate Requested";
+            case "RE_ESTIMATE_APPROVED":   return "Re-Estimate Approved by Customer";
+            case "RE_ESTIMATE_REJECTED":   return "Re-Estimate Rejected by Customer";
+            case "REPAIR_WORK_RESUMED":    return "Repair Work in Progress (Resumed)";
             default:                       return key;
         }
     }
