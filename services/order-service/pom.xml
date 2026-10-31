@@ -28,6 +28,14 @@
             <artifactId>common-subscription</artifactId>
             <version>${project.version}</version>
         </dependency>
+
+        <!-- Partner app push: booking / sell-request alerts and the
+             /shop/push-tokens registration this service exposes. -->
+        <dependency>
+            <groupId>com.repairshop.saas</groupId>
+            <artifactId>common-notify</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
 
     <build>

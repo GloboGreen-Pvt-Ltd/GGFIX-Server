@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.repairshop.saas</groupId>
+        <artifactId>repair-shop-services</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+    <artifactId>common-notify</artifactId>
+    <name>Common Notify</name>
+
+    <!--
+        Push notifications to the Partner (shop) app, plus the shared writer for
+        shop_notifications rows that services without the JPA entity need.
+
+        Shared rather than per-service because three services raise shop alerts
+        (order-service: bookings and sell orders, ticket-service: Service History
+        steps, marketplace-service: chat orders) and they never call each other —
+        every one of them has to be able to reach the shop's phone on its own.
+
+        Deliberately JDBC, not JPA, for the same reason as common-subscription:
+        shop_push_tokens and shop_notifications are read from several services,
+        and an @Entity here would join every consumer's validate-on-boot check.
+
+        A jar, not an application: consumers add com.repairshop.saas.common.notify
+        to their scanned packages.
+    -->
+    <packaging>jar</packaging>
+
+    <dependencies>
+        <!-- JdbcTemplate + TransactionSynchronizationManager. The DataSource comes from the consuming service. -->
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>
+
+        <!-- Expo push request / ticket JSON. -->
+        <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>
+
+        <!--
+            FCM through the Firebase Admin SDK. Only Messaging is used, so the
+            Firestore and Cloud Storage clients (gRPC, Netty, several MB) are
+            excluded — every consuming fat jar runs on the shared t3.micro.
+        -->
+        <dependency>
+            <groupId>com.google.firebase</groupId>
+            <artifactId>firebase-admin</artifactId>
+            <version>${firebase-admin.version}</version>
+            <exclusions>
+                <exclusion><groupId>com.google.cloud</groupId><artifactId>google-cloud-firestore</artifactId></exclusion>
+                <exclusion><groupId>com.google.cloud</groupId><artifactId>google-cloud-storage</artifactId></exclusion>
+            </exclusions>
+        </dependency>
+        <!--
+            firebase-admin's ApiClientUtils uses JacksonFactory but only gets this
+            artifact through Firestore — put back explicitly, same version as the
+            google-http-client it resolves (2.2.0).
+        -->
+        <dependency>
+            <groupId>com.google.http-client</groupId>
+            <artifactId>google-http-client-jackson2</artifactId>
+            <version>2.2.0</version>
+        </dependency>
+
+        <!--
+            Production credentials: the service-account JSON is read from AWS
+            Secrets Manager with the EC2 instance role, so the key never sits in
+            the repo, the jar or the .env. Same JDK-client setup as common-media.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>secretsmanager</artifactId>
+            <exclusions>
+                <exclusion><groupId>software.amazon.awssdk</groupId><artifactId>apache-client</artifactId></exclusion>
+                <exclusion><groupId>software.amazon.awssdk</groupId><artifactId>netty-nio-client</artifactId></exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Same reason as common-subscription: a repackaged library cannot be compiled against. -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

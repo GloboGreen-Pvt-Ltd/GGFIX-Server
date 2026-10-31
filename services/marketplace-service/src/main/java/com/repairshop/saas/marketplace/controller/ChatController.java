@@ -60,7 +60,7 @@ public class ChatController {
         UUID userId = callerId(req);
         snapshots.touchCustomerPresence(userId);
         chat.requireOwnedByCustomer(threadId, userId);
-        CustomerChatMessage m = chat.send(threadId, Side.CUSTOMER, body);
+        CustomerChatMessage m = chat.send(threadId, Side.CUSTOMER, body, callerShopId(req));
         return ResponseEntity.ok(chat.toMessageResponse(m));
     }
 
@@ -89,6 +89,13 @@ public class ChatController {
         UUID userId = callerId(req);
         snapshots.touchCustomerPresence(userId);
         return ResponseEntity.noContent().build();
+    }
+
+    // Set only when the token belongs to a shop account; a plain customer has none.
+    private UUID callerShopId(HttpServletRequest req) {
+        Object s = req.getAttribute("shopId");
+        try { return s != null ? UUID.fromString(s.toString()) : null; }
+        catch (IllegalArgumentException e) { return null; }
     }
 
     private UUID callerId(HttpServletRequest req) {

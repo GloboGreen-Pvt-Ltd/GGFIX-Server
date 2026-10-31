@@ -2,10 +2,14 @@ package com.repairshop.saas.ticket.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.repairshop.saas.common.notify.PushApp;
+import com.repairshop.saas.common.notify.PushService;
 import com.repairshop.saas.ticket.dto.StaffTaskDtos.*;
 import com.repairshop.saas.ticket.entity.StaffTask;
 import com.repairshop.saas.ticket.entity.StaffTaskAssignee;
+import com.repairshop.saas.ticket.entity.Technician;
 import com.repairshop.saas.ticket.repository.StaffTaskRepository;
+import com.repairshop.saas.ticket.repository.TechnicianRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -40,6 +44,8 @@ public class StaffTaskService {
 
     private final StaffTaskRepository repository;
     private final ObjectMapper objectMapper;
+    private final TechnicianRepository technicianRepository;
+    private final PushService pushService;
 
     // ---- Reads -----------------------------------------------------------------
 
@@ -100,12 +106,14 @@ public class StaffTaskService {
                 .build();
         replaceAssignees(t, assignees);
         appendHistory(t, "CREATED", "Assigned to " + names(t), "OWNER");
-        return toResponse(repository.save(t));
+        StaffTask saved = repository.save(t);
+        pushAssigned(saved, assigneeIds(saved), userId);
+        return toResponse(saved);
     }
 
     /** Only the fields sent change; schedule and assignee changes are logged as such. */
     @Transactional
-    public TaskResponse update(UUID shopId, UUID id, TaskRequest req) {
+    public TaskResponse update(UUID shopId, UUID id, UUID userId, TaskRequest req) {
         StaffTask t = load(shopId, id, null);
         boolean edited = false;
 
@@ -139,13 +147,19 @@ public class StaffTaskService {
             appendHistory(t, "RESCHEDULED", date + " " + start.format(HHMM) + " - " + end.format(HHMM), "OWNER");
         }
 
+        Set<UUID> newlyAssigned = new HashSet<>();
         if (req.getAssignees() != null) {
             if (req.getAssignees().isEmpty()) throw bad("Assign at least one employee.");
             String before = names(t);
+            Set<UUID> previous = assigneeIds(t);
             replaceAssignees(t, req.getAssignees());
             appendHistory(t, "REASSIGNED", before + " -> " + names(t), "OWNER");
+            newlyAssigned = assigneeIds(t);
+            newlyAssigned.removeAll(previous);
         }
-        return toResponse(repository.save(t));
+        StaffTask saved = repository.save(t);
+        pushAssigned(saved, newlyAssigned, userId);
+        return toResponse(saved);
     }
 
     @Transactional
@@ -195,6 +209,29 @@ public class StaffTaskService {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found.");
         }
         return t;
+    }
+
+    private static Set<UUID> assigneeIds(StaffTask t) {
+        return t.getAssignees().stream().map(StaffTaskAssignee::getTechnicianId)
+                .collect(Collectors.toCollection(HashSet::new));
+    }
+
+    // Employee app: each newly assigned employee hears about the task. Assignees
+    // hold technicians.id; technicians.user_id is the auth user id the device is
+    // registered under. Never the owner who made the change. Sent after commit.
+    private void pushAssigned(StaffTask t, Set<UUID> technicianIds, UUID actorUserId) {
+        if (technicianIds.isEmpty()) return;
+        List<UUID> userIds = new ArrayList<>();
+        for (UUID techId : technicianIds) {
+            technicianRepository.findByShopIdAndId(t.getShopId(), techId)
+                    .map(Technician::getUserId)
+                    .filter(u -> !u.equals(actorUserId))
+                    .ifPresent(userIds::add);
+        }
+        Map<String, Object> data = new HashMap<>();
+        data.put("kind", "TASK_ASSIGNED");
+        data.put("taskId", t.getId());
+        pushService.pushToUsers(PushApp.EMPLOYEE, userIds, "New task assigned", t.getTitle(), data);
     }
 
     private void replaceAssignees(StaffTask t, List<Assignee> list) {
