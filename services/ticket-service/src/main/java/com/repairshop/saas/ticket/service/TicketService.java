@@ -757,6 +757,7 @@ public class TicketService {
         // delivery schedule are NOT in this list — those have their own actions.
         patchText(body, "customerName", ticket::setCustomerName);
         patchText(body, "customerPhone", ticket::setCustomerPhone);
+        patchText(body, "customerAddress", ticket::setCustomerAddress);
         patchUuid(body, "brandId", ticket::setBrandId);
         patchUuid(body, "modelId", ticket::setModelId);
         patchUuid(body, "ramOptionId", ticket::setRamOptionId);
