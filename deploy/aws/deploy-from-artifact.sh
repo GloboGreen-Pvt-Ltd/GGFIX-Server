@@ -92,6 +92,28 @@ ensure_env_file() {
     google_vision_key="$(read_env_value GOOGLE_VISION_API_KEY)"
   fi
 
+  # Razorpay (subscription-service UPI checkout). Same rule: the workflow
+  # secret when passed, else the value already on the box. Empty keys are fine
+  # — the service then answers "Payments are not configured".
+  rzp_key_id="${RAZORPAY_KEY_ID:-}"
+  if [[ -z "$rzp_key_id" ]]; then
+    rzp_key_id="$(read_env_value RAZORPAY_KEY_ID)"
+  fi
+  rzp_key_secret="${RAZORPAY_KEY_SECRET:-}"
+  if [[ -z "$rzp_key_secret" ]]; then
+    rzp_key_secret="$(read_env_value RAZORPAY_KEY_SECRET)"
+  fi
+  rzp_webhook_secret="${RAZORPAY_WEBHOOK_SECRET:-}"
+  if [[ -z "$rzp_webhook_secret" ]]; then
+    rzp_webhook_secret="$(read_env_value RAZORPAY_WEBHOOK_SECRET)"
+  fi
+  # TEST | LIVE; must match the key prefix (rzp_test_ / rzp_live_) or payments stay off.
+  rzp_mode="${RAZORPAY_MODE:-}"
+  if [[ -z "$rzp_mode" ]]; then
+    rzp_mode="$(read_env_value RAZORPAY_MODE)"
+  fi
+  rzp_mode="${rzp_mode:-TEST}"
+
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
 DB_HOST=$RDS_DB_HOST
 DB_PORT=$RDS_DB_PORT
@@ -108,6 +130,10 @@ AWS_REGION=$aws_region
 AWS_S3_BUCKET=$aws_bucket
 AWS_S3_BASE_URL=$aws_base_url
 GOOGLE_VISION_API_KEY=$google_vision_key
+RAZORPAY_KEY_ID=$rzp_key_id
+RAZORPAY_KEY_SECRET=$rzp_key_secret
+RAZORPAY_WEBHOOK_SECRET=$rzp_webhook_secret
+RAZORPAY_MODE=$rzp_mode
 JAVA_OPTS="-Xms64m -Xmx160m"
 SERVICES="$SERVICES_DEFAULT"
 EOF

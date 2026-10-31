@@ -72,6 +72,14 @@ jobs:
       # (Partner App Visual Device Scanner). Written into the EC2 .env by
       # deploy-from-artifact.sh; empty keeps the value a previous deploy wrote.
       GOOGLE_VISION_API_KEY: ${{ secrets.GOOGLE_VISION_API_KEY }}
+      # Razorpay (subscription-service UPI checkout). Written into the EC2 .env
+      # by deploy-from-artifact.sh; empty keeps the values a previous deploy wrote.
+      RAZORPAY_KEY_ID: ${{ secrets.RAZORPAY_KEY_ID }}
+      RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
+      RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+      # TEST | LIVE (not secret: a repo variable, or a secret if preferred).
+      # Empty keeps the previous value on the box, else TEST.
+      RAZORPAY_MODE: ${{ vars.RAZORPAY_MODE || secrets.RAZORPAY_MODE }}
 
     steps:
       - name: Verify branch (main only)
@@ -345,7 +353,7 @@ jobs:
             -p "$EC2_PORT" \
             -o StrictHostKeyChecking=yes \
             "$EC2_USER@$EC2_HOST" \
-            "API_DOMAIN='$API_DOMAIN' CERTBOT_EMAIL='${CERTBOT_EMAIL:-}' SKIP_TLS='$SKIP_TLS' DB_HOST='${DB_HOST:-}' DB_NAME='${DB_NAME:-}' DB_USER='${DB_USER:-}' DB_PASSWORD='${DB_PASSWORD:-}' GOOGLE_VISION_API_KEY='${GOOGLE_VISION_API_KEY:-}' bash -s" <<'REMOTE_SCRIPT'
+            "API_DOMAIN='$API_DOMAIN' CERTBOT_EMAIL='${CERTBOT_EMAIL:-}' SKIP_TLS='$SKIP_TLS' DB_HOST='${DB_HOST:-}' DB_NAME='${DB_NAME:-}' DB_USER='${DB_USER:-}' DB_PASSWORD='${DB_PASSWORD:-}' GOOGLE_VISION_API_KEY='${GOOGLE_VISION_API_KEY:-}' RAZORPAY_KEY_ID='${RAZORPAY_KEY_ID:-}' RAZORPAY_KEY_SECRET='${RAZORPAY_KEY_SECRET:-}' RAZORPAY_WEBHOOK_SECRET='${RAZORPAY_WEBHOOK_SECRET:-}' RAZORPAY_MODE='${RAZORPAY_MODE:-}' bash -s" <<'REMOTE_SCRIPT'
           set -euo pipefail
 
           DEPLOY_DIR="$HOME/ggfix-deploy"
