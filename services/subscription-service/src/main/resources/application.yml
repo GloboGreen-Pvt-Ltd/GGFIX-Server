@@ -22,3 +22,13 @@ server:
 app:
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
+# Razorpay (Subscription v2, UPI checkout). Values come ONLY from the
+# environment; empty keys keep every non-payment endpoint working and make the
+# payment endpoints answer 409 "Payments are not configured".
+razorpay:
+  key-id: ${RAZORPAY_KEY_ID:}
+  key-secret: ${RAZORPAY_KEY_SECRET:}
+  webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:}
+  # TEST | LIVE. The key id prefix (rzp_test_ / rzp_live_) must match, otherwise
+  # payments stay disabled ("Razorpay key does not match RAZORPAY_MODE").
+  mode: ${RAZORPAY_MODE:TEST}
