@@ -534,6 +534,7 @@ public class RepairBookingController {
                 afterReEstimate ? "Customer approved the re-estimated service"
                                 : "Customer approved the estimate",
                 "USER", java.time.Instant.now());
+        convergeReEstimateApproval(b, userId, events);
         notifyCustomer(b, "CUSTOMER_APPROVED", "Customer Approved",
                 "You approved the repair estimate for booking " + b.getBookingNumber() + ".");
         notifyShop(b, "CUSTOMER_APPROVED", "Customer approved the estimate",
@@ -564,6 +565,53 @@ public class RepairBookingController {
                         + (b.getCustomerName() != null ? " (" + b.getCustomerName() + ")" : "")
                         + " was cancelled by the customer.");
         return ResponseEntity.ok(toResponseWithChildren(b));
+    }
+
+    /**
+     * Re-estimate workflow (ticket-service ReEstimateWorkflowService, migration
+     * 107): the customer's Approve tap also settles a revision awaiting it —
+     * same outcome as the shop's decision: revision APPROVED (decided_via
+     * CUSTOMER_APP), ticket back to IN_REPAIR when repair work had started in
+     * this cycle (else APPROVED, forward only), plus RE_ESTIMATE_APPROVED and
+     * REPAIR_WORK_RESUMED rows. repair_bookings.status follows on ticket-service's
+     * next mirror run, as it does for the shop decision. No-op when there is no
+     * open revision or the table isn't there yet (migration not applied).
+     */
+    private void convergeReEstimateApproval(RepairBooking b, UUID customerUserId, List<RepairBookingEvent> events) {
+        if (b.getTicketId() == null) return;
+        Boolean migrated = jdbc.queryForObject(
+                "SELECT to_regclass('public.ticket_reestimate_revisions') IS NOT NULL", Boolean.class);
+        if (!Boolean.TRUE.equals(migrated)) return;
+        List<UUID> awaiting = jdbc.queryForList(
+                "SELECT id FROM ticket_reestimate_revisions WHERE ticket_id = ? AND status = 'AWAITING_APPROVAL' FOR UPDATE",
+                UUID.class, b.getTicketId());
+        if (awaiting.isEmpty()) return;
+        java.time.Instant now = java.time.Instant.now();
+        java.sql.Timestamp at = java.sql.Timestamp.from(now);
+        jdbc.update("UPDATE ticket_reestimate_revisions SET status = 'APPROVED', decision = 'APPROVED', decided_at = ?,"
+                        + " decided_by_user_id = ?, decided_by_name = ?, decided_via = 'CUSTOMER_APP', updated_at = ?"
+                        + " WHERE id = ? AND status = 'AWAITING_APPROVAL'",
+                at, customerUserId, b.getCustomerName(), at, awaiting.get(0));
+
+        // Current repair cycle only (a Re-Service reopen starts a new one).
+        int start = 0;
+        for (int i = events.size() - 1; i >= 0; i--) {
+            if ("RE_SERVICE".equalsIgnoreCase(events.get(i).getStatus())) { start = i; break; }
+        }
+        List<RepairBookingEvent> cycle = events.subList(start, events.size());
+        boolean repairStarted = cycle.stream().anyMatch(e -> "IN_REPAIR".equalsIgnoreCase(e.getStatus()));
+        if (repairStarted) {
+            jdbc.update("UPDATE tickets SET status = 'IN_REPAIR', updated_at = now() WHERE id = ?"
+                    + " AND status IN ('CREATED','IN_DIAGNOSIS','QUOTED','APPROVED')", b.getTicketId());
+        } else {
+            jdbc.update("UPDATE tickets SET status = 'APPROVED', updated_at = now() WHERE id = ?"
+                    + " AND status IN ('CREATED','IN_DIAGNOSIS','QUOTED')", b.getTicketId());
+        }
+        upsertEvent(cycle, b, "RE_ESTIMATE_APPROVED", "Re-estimate approved by the customer in the app", "USER", now);
+        if (repairStarted) {
+            upsertEvent(cycle, b, "REPAIR_WORK_RESUMED", "Repair work resumed after the re-estimate was approved",
+                    "SHOP", now.plusMillis(1));
+        }
     }
 
     /**

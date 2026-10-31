@@ -107,6 +107,24 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
+    /**
+     * Re-estimate workflow refusals (409 REESTIMATE_PENDING / INVALID_TRANSITION,
+     * 403 NOT_ASSIGNED_TECHNICIAN / ROLE_NOT_ALLOWED, 400 VALIDATION). Flat body
+     * with {@code code} so the apps can branch without parsing the message.
+     */
+    @ExceptionHandler(ReEstimateException.class)
+    public ResponseEntity<Map<String, Object>> handleReEstimate(
+            ReEstimateException ex, HttpServletRequest req) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("timestamp", Instant.now().toString());
+        body.put("status", ex.getStatus().value());
+        body.put("error", ex.getCode());
+        body.put("code", ex.getCode());
+        body.put("message", ex.getMessage());
+        body.put("path", req.getRequestURI());
+        return ResponseEntity.status(ex.getStatus()).body(body);
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest req) {
         List<ApiError.FieldError> errors = ex.getBindingResult().getFieldErrors().stream()
