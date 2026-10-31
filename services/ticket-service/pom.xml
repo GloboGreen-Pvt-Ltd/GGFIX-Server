@@ -75,6 +75,13 @@
             <artifactId>common-subscription</artifactId>
             <version>${project.version}</version>
         </dependency>
+
+        <!-- Partner app push for Service History steps (technician progress). -->
+        <dependency>
+            <groupId>com.repairshop.saas</groupId>
+            <artifactId>common-notify</artifactId>
+            <version>${project.version}</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

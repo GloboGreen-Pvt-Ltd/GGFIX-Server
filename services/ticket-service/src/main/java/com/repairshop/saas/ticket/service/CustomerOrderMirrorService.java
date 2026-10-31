@@ -2,6 +2,9 @@ package com.repairshop.saas.ticket.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.repairshop.saas.common.notify.PushApp;
+import com.repairshop.saas.common.notify.PushService;
+import com.repairshop.saas.common.notify.ShopPushService;
 import com.repairshop.saas.ticket.entity.*;
 import com.repairshop.saas.ticket.repository.*;
 import lombok.RequiredArgsConstructor;
@@ -38,6 +41,8 @@ public class CustomerOrderMirrorService {
     private final PlatformCustomerNotificationRepository notificationRepo;
     private final PlatformShopNotificationRepository shopNotificationRepo;
     private final ObjectMapper objectMapper;
+    private final ShopPushService shopPush;
+    private final PushService pushService;
 
     /** Ticket-side status → (booking.status, customer_order.status).
      *  customer_order.status stays PENDING through the post-READY billing /
@@ -166,7 +171,7 @@ public class CustomerOrderMirrorService {
             String bookingNumber = booking.getBookingNumber() != null
                     ? booking.getBookingNumber()
                     : "";
-            notificationRepo.save(PlatformCustomerNotification.builder()
+            PlatformCustomerNotification n = notificationRepo.save(PlatformCustomerNotification.builder()
                     .customerUserId(userId)
                     .bookingId(booking.getId())
                     .bookingNumber(bookingNumber)
@@ -176,6 +181,7 @@ public class CustomerOrderMirrorService {
                     .type("orders")
                     .isRead(false)
                     .build());
+            pushToCustomer(n, booking.getTicketId());
         });
     }
 
@@ -293,6 +299,11 @@ public class CustomerOrderMirrorService {
      * to be enforced at call time for a status that BOTH sides can raise.
      *
      * A null/unknown actor notifies as before.
+     *
+     * The row is also pushed to the shop's phones (kind TICKET_STATUS) once
+     * this transaction commits — unless the caller is inside
+     * {@link ShopPushService#quiet()}, which the read-time back-fill uses so a
+     * step that happened long ago doesn't buzz anyone when the job is opened.
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void emitShopNotificationForStatus(UUID bookingId, String statusKey, String actor) {
@@ -308,7 +319,7 @@ public class CustomerOrderMirrorService {
             String bookingNumber = booking.getBookingNumber() != null
                     ? shopFacingNumber(booking.getBookingNumber())
                     : "";
-            shopNotificationRepo.save(PlatformShopNotification.builder()
+            PlatformShopNotification n = shopNotificationRepo.save(PlatformShopNotification.builder()
                     .shopId(shopId)
                     .bookingId(booking.getId())
                     .bookingNumber(bookingNumber)
@@ -319,6 +330,14 @@ public class CustomerOrderMirrorService {
                     .type("bookings")
                     .isRead(false)
                     .build());
+            Map<String, Object> data = new HashMap<>();
+            data.put("kind", "TICKET_STATUS");
+            data.put("notificationId", String.valueOf(n.getId()));
+            data.put("bookingId", String.valueOf(booking.getId()));
+            if (booking.getTicketId() != null) data.put("ticketId", booking.getTicketId().toString());
+            data.put("statusKey", key);
+            data.put("bookingNumber", bookingNumber);
+            shopPush.pushToShop(shopId, n.getTitle(), n.getBody(), data);
         });
     }
 
@@ -333,8 +352,14 @@ public class CustomerOrderMirrorService {
      *  the injected bean so each keeps its own REQUIRES_NEW and a failure on
      *  one feed can't roll back the other or the outer event save. */
     void emitNotificationsForStatus(UUID bookingId, String statusKey) {
+        emitNotificationsForStatus(bookingId, statusKey, null);
+    }
+
+    /** As above, with the actor for the shop feed — see the actor-aware
+     *  {@link #emitShopNotificationForStatus(UUID, String, String)}. */
+    void emitNotificationsForStatus(UUID bookingId, String statusKey, String actor) {
         emitCustomerNotificationForStatus(bookingId, statusKey);
-        emitShopNotificationForStatus(bookingId, statusKey);
+        emitShopNotificationForStatus(bookingId, statusKey, actor);
     }
 
     /** Inline variant — runs in the CALLER'S transaction so it can see a ticket
@@ -347,7 +372,7 @@ public class CustomerOrderMirrorService {
      *  failure semantics they rely on. */
     @Transactional(propagation = Propagation.REQUIRED)
     public void mirrorOnUpsertInline(Ticket ticket) {
-        doMirror(ticket);
+        doMirror(ticket, null);
     }
 
     /** Insert (or update) the platform-side booking + customer order for a ticket.
@@ -357,10 +382,18 @@ public class CustomerOrderMirrorService {
      *  events read would throw UnexpectedRollbackException. */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void mirrorOnUpsert(Ticket ticket) {
-        doMirror(ticket);
+        doMirror(ticket, null);
     }
 
-    private void doMirror(Ticket ticket) {
+    /** Same, for a write whose caller is known. {@code actor} OWNER — the shop
+     *  owner changed the status from their own app — keeps a macro-status step
+     *  it implies (READY) off the owner's feed and phone: they just did it. */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void mirrorOnUpsert(Ticket ticket, String actor) {
+        doMirror(ticket, actor);
+    }
+
+    private void doMirror(Ticket ticket, String actor) {
         // platformUserId may be null for walk-in customers. We still create
         // the booking row (with customer_user_id null) so the timeline rail
         // and owner-side history work; the customer-facing feed mirror
@@ -428,7 +461,7 @@ public class CustomerOrderMirrorService {
 
         emitTimelineEvents(booking.getId(), isNew, prevBookingStatus, bookingStatus,
                 newTechId, tech, upper(ticket.getStatus()),
-                ticket.getTechnicianAcceptedAt() != null);
+                ticket.getTechnicianAcceptedAt() != null, actor);
 
         // Customer-side feed (My Orders) + notifications only apply when the
         // customer has a platform_user_id link. Walk-in tickets stop here —
@@ -459,7 +492,7 @@ public class CustomerOrderMirrorService {
         customerOrderRepo.save(co);
 
         if (isNew) {
-            notificationRepo.save(PlatformCustomerNotification.builder()
+            PlatformCustomerNotification n = notificationRepo.save(PlatformCustomerNotification.builder()
                     .customerUserId(platformUserId)
                     .bookingId(booking.getId())
                     .bookingNumber(booking.getBookingNumber())
@@ -470,7 +503,20 @@ public class CustomerOrderMirrorService {
                     .type("orders")
                     .isRead(false)
                     .build());
+            pushToCustomer(n, ticket.getId());
         }
+    }
+
+    /** The customer_notifications row, on the customer's phone (after commit; silent under quiet()). */
+    private void pushToCustomer(PlatformCustomerNotification n, UUID ticketId) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("kind", "BOOKING_STATUS");
+        data.put("notificationId", n.getId());
+        data.put("bookingId", n.getBookingId());
+        data.put("bookingNumber", n.getBookingNumber());
+        data.put("ticketId", ticketId);
+        data.put("statusKey", n.getStatusKey());
+        pushService.pushToUser(PushApp.CUSTOMER, n.getCustomerUserId(), n.getTitle(), n.getBody(), data);
     }
 
     /**
@@ -483,7 +529,7 @@ public class CustomerOrderMirrorService {
                                     String prevBookingStatus, String bookingStatus,
                                     UUID newTechId,
                                     Technician tech, String ticketStatus,
-                                    boolean technicianAccepted) {
+                                    boolean technicianAccepted, String actor) {
         if (isNew) {
             bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                     .bookingId(bookingId).status("BOOKING_CREATED_BY_SHOP")
@@ -507,7 +553,7 @@ public class CustomerOrderMirrorService {
             if (stepKey != null) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status(stepKey).actor("SHOP").build());
-                emitNotificationsForStatus(bookingId, stepKey);
+                emitNotificationsForStatus(bookingId, stepKey, actor);
             }
         }
 

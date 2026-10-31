@@ -2,6 +2,9 @@ package com.repairshop.saas.order.controller;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.repairshop.saas.common.notify.PushApp;
+import com.repairshop.saas.common.notify.PushService;
+import com.repairshop.saas.common.notify.ShopPushService;
 import com.repairshop.saas.order.dto.RepairBookingDtos.*;
 import com.repairshop.saas.order.entity.CustomerNotification;
 import com.repairshop.saas.order.entity.CustomerOrder;
@@ -52,6 +55,8 @@ public class RepairBookingController {
     // picked up by the JPA bootstrap.
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
+    private final ShopPushService shopPush;
+    private final PushService pushService;
 
     @PostMapping
     @Transactional
@@ -172,12 +177,18 @@ public class RepairBookingController {
         // Confirm the booking to the customer in their notification feed.
         notifyCustomer(saved, initialStatus, pickupMode ? "Pickup requested" : "Order placed",
                 "Booking " + saved.getBookingNumber() + " placed - we'll keep you posted.");
-        // Alert the shop owner that a new booking has landed.
-        String shopTitle = pickupMode ? "New pickup request" : "New booking received";
+        // Alert the shop owner that a new booking has landed. Pickups and
+        // enquiries get their own feed type and push kind so the Partner app
+        // can open the Pickups / Enquiry tab instead of Bookings.
+        final boolean enquiryMode = "ENQUIRY".equalsIgnoreCase(serviceMode);
+        String shopTitle = pickupMode ? "New pickup request"
+                : enquiryMode ? "New enquiry" : "New booking received";
         String shopBody = "Booking " + saved.getBookingNumber()
                 + (nameMobile[0] != null ? " from " + nameMobile[0] : "")
                 + " - tap to view details.";
-        notifyShop(saved, initialStatus, shopTitle, shopBody);
+        notifyShop(saved, initialStatus, shopTitle, shopBody,
+                pickupMode ? "pickups" : enquiryMode ? "enquiry" : "bookings",
+                pickupMode ? "PICKUP" : enquiryMode ? "ENQUIRY" : "BOOKING");
 
         return ResponseEntity.ok(toResponseWithChildren(saved));
     }
@@ -451,6 +462,7 @@ public class RepairBookingController {
         }
         boolean reassign = b.getAssignedPickupPersonId() != null
                 && !body.getPickupPersonId().equals(b.getAssignedPickupPersonId());
+        boolean newPerson = !body.getPickupPersonId().equals(b.getAssignedPickupPersonId());
         b.setAssignedPickupPersonId(body.getPickupPersonId());
         b.setPickupPersonName(body.getPickupPersonName());
         b.setPickupPersonPhone(body.getPickupPersonPhone());
@@ -466,6 +478,7 @@ public class RepairBookingController {
         notifyCustomer(b, "PICKUP_PERSON_ASSIGNED",
                 reassign ? "Pickup person reassigned" : "Pickup person assigned",
                 "Booking " + b.getBookingNumber() + " - " + displayName + " will pick up your device.");
+        if (newPerson) pushPickupAssigned(req, b);
         // Flip the customer's My Orders → Pickup card out of "PENDING" the
         // moment a pickup agent is committed. PickupBookingController owns
         // the same mirror for later transitions; this catches the first hop
@@ -636,9 +649,32 @@ public class RepairBookingController {
         eventRepo.save(e);
     }
 
+    // Employee app: the newly assigned pickup person hears about it on their
+    // phone. pickupPersonId is technicians.id; technicians.user_id is the auth
+    // user id their device is registered under. Never the caller who assigned.
+    private void pushPickupAssigned(HttpServletRequest req, RepairBooking b) {
+        List<String> userIds = jdbc.queryForList(
+                "SELECT CAST(user_id AS TEXT) FROM technicians " +
+                        "WHERE id = CAST(? AS UUID) AND shop_id = CAST(? AS UUID) AND user_id IS NOT NULL",
+                String.class, b.getAssignedPickupPersonId().toString(), b.getShopId().toString());
+        if (userIds.isEmpty()) return;
+        UUID userId = UUID.fromString(userIds.get(0));
+        Object caller = req.getAttribute("userId");
+        if (caller != null && userId.toString().equalsIgnoreCase(caller.toString())) return;
+        Map<String, Object> data = new HashMap<>();
+        data.put("kind", "PICKUP_ASSIGNED");
+        data.put("bookingId", b.getId());
+        data.put("bookingNumber", b.getBookingNumber());
+        String customer = b.getCustomerName() != null && !b.getCustomerName().isBlank()
+                ? " · " + b.getCustomerName() : "";
+        pushService.pushToUser(PushApp.EMPLOYEE, userId, "New pickup assigned",
+                "Booking " + b.getBookingNumber() + customer, data);
+    }
+
     // Append an in-app notification to the customer's feed for a booking event.
+    // The same title/body is pushed to the customer's phone after commit.
     private void notifyCustomer(RepairBooking b, String statusKey, String title, String body) {
-        notificationRepo.save(CustomerNotification.builder()
+        CustomerNotification n = notificationRepo.save(CustomerNotification.builder()
                 .customerUserId(b.getCustomerUserId())
                 .bookingId(b.getId())
                 .bookingNumber(b.getBookingNumber())
@@ -648,13 +684,29 @@ public class RepairBookingController {
                 .type("orders")
                 .read(false)
                 .build());
+        Map<String, Object> data = new HashMap<>();
+        data.put("kind", "BOOKING_STATUS");
+        data.put("notificationId", n.getId());
+        data.put("bookingId", b.getId());
+        data.put("bookingNumber", b.getBookingNumber());
+        if (b.getTicketId() != null) data.put("ticketId", b.getTicketId());
+        data.put("statusKey", statusKey);
+        pushService.pushToUser(PushApp.CUSTOMER, b.getCustomerUserId(), title, body, data);
     }
 
     // Mirror notification for the shop owner's feed. No-op when the booking
     // has no shopId yet (customer-initiated pickup before a shop accepts).
     private void notifyShop(RepairBooking b, String statusKey, String title, String body) {
+        notifyShop(b, statusKey, title, body, "bookings", "BOOKING");
+    }
+
+    // `type` is the feed row's tab (bookings | pickups | enquiry); `kind` is the
+    // push data's routing key in the Partner app. The push goes out after this
+    // transaction commits, so a rolled-back booking never reaches a phone.
+    private void notifyShop(RepairBooking b, String statusKey, String title, String body,
+                            String type, String kind) {
         if (b.getShopId() == null) return;
-        shopNotificationRepo.save(ShopNotification.builder()
+        ShopNotification n = shopNotificationRepo.save(ShopNotification.builder()
                 .shopId(b.getShopId())
                 .bookingId(b.getId())
                 .bookingNumber(b.getBookingNumber())
@@ -664,9 +716,17 @@ public class RepairBookingController {
                 .statusKey(statusKey)
                 .title(title)
                 .body(body)
-                .type("bookings")
+                .type(type)
                 .read(false)
                 .build());
+        Map<String, Object> data = new HashMap<>();
+        data.put("kind", kind);
+        data.put("notificationId", String.valueOf(n.getId()));
+        data.put("bookingId", String.valueOf(b.getId()));
+        if (b.getBookingNumber() != null) data.put("bookingNumber", b.getBookingNumber());
+        if (b.getTicketId() != null) data.put("ticketId", b.getTicketId().toString());
+        data.put("statusKey", statusKey);
+        shopPush.pushToShop(b.getShopId(), title, body, data);
     }
 
     private RepairBookingResponse toResponse(RepairBooking b) {

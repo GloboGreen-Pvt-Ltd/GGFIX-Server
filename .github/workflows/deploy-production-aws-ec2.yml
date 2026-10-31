@@ -80,6 +80,17 @@ jobs:
       # TEST | LIVE (not secret: a repo variable, or a secret if preferred).
       # Empty keeps the previous value on the box, else TEST.
       RAZORPAY_MODE: ${{ vars.RAZORPAY_MODE || secrets.RAZORPAY_MODE }}
+      # Partner app push (Expo). Optional secret: only needed when enhanced push
+      # security is on for the Expo project. PUSH_ENABLED is a repository
+      # variable (false = kill switch). Empty keeps the value already on the box.
+      EXPO_ACCESS_TOKEN: ${{ secrets.EXPO_ACCESS_TOKEN }}
+      PUSH_ENABLED: ${{ vars.PUSH_ENABLED }}
+      # FCM (Firebase Admin SDK). Repository VARIABLES, not secrets: only the
+      # NAME of the AWS Secrets Manager secret travels; the service-account key
+      # stays in Secrets Manager and is read by the services with the EC2 role.
+      FIREBASE_CREDENTIALS_SECRET_ID: ${{ vars.FIREBASE_CREDENTIALS_SECRET_ID }}
+      FIREBASE_CREDENTIALS_SECRET_REGION: ${{ vars.FIREBASE_CREDENTIALS_SECRET_REGION }}
+      FCM_ENABLED: ${{ vars.FCM_ENABLED }}
 
     steps:
       - name: Verify branch (main only)
@@ -353,7 +364,7 @@ jobs:
             -p "$EC2_PORT" \
             -o StrictHostKeyChecking=yes \
             "$EC2_USER@$EC2_HOST" \
-            "API_DOMAIN='$API_DOMAIN' CERTBOT_EMAIL='${CERTBOT_EMAIL:-}' SKIP_TLS='$SKIP_TLS' DB_HOST='${DB_HOST:-}' DB_NAME='${DB_NAME:-}' DB_USER='${DB_USER:-}' DB_PASSWORD='${DB_PASSWORD:-}' GOOGLE_VISION_API_KEY='${GOOGLE_VISION_API_KEY:-}' RAZORPAY_KEY_ID='${RAZORPAY_KEY_ID:-}' RAZORPAY_KEY_SECRET='${RAZORPAY_KEY_SECRET:-}' RAZORPAY_WEBHOOK_SECRET='${RAZORPAY_WEBHOOK_SECRET:-}' RAZORPAY_MODE='${RAZORPAY_MODE:-}' bash -s" <<'REMOTE_SCRIPT'
+            "API_DOMAIN='$API_DOMAIN' CERTBOT_EMAIL='${CERTBOT_EMAIL:-}' SKIP_TLS='$SKIP_TLS' DB_HOST='${DB_HOST:-}' DB_NAME='${DB_NAME:-}' DB_USER='${DB_USER:-}' DB_PASSWORD='${DB_PASSWORD:-}' GOOGLE_VISION_API_KEY='${GOOGLE_VISION_API_KEY:-}' RAZORPAY_KEY_ID='${RAZORPAY_KEY_ID:-}' RAZORPAY_KEY_SECRET='${RAZORPAY_KEY_SECRET:-}' RAZORPAY_WEBHOOK_SECRET='${RAZORPAY_WEBHOOK_SECRET:-}' RAZORPAY_MODE='${RAZORPAY_MODE:-}' EXPO_ACCESS_TOKEN='${EXPO_ACCESS_TOKEN:-}' PUSH_ENABLED='${PUSH_ENABLED:-}' FIREBASE_CREDENTIALS_SECRET_ID='${FIREBASE_CREDENTIALS_SECRET_ID:-}' FIREBASE_CREDENTIALS_SECRET_REGION='${FIREBASE_CREDENTIALS_SECRET_REGION:-}' FCM_ENABLED='${FCM_ENABLED:-}' bash -s" <<'REMOTE_SCRIPT'
           set -euo pipefail
 
           DEPLOY_DIR="$HOME/ggfix-deploy"

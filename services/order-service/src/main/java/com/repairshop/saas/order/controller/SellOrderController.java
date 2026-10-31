@@ -1,6 +1,8 @@
 package com.repairshop.saas.order.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.repairshop.saas.common.notify.ShopNotificationWriter;
+import com.repairshop.saas.common.notify.ShopPushService;
 import com.repairshop.saas.common.subscription.SubscriptionFeature;
 import com.repairshop.saas.common.subscription.SubscriptionLimitService;
 import com.repairshop.saas.order.dto.SellOrderDtos.*;
@@ -10,10 +12,13 @@ import com.repairshop.saas.order.exception.ResourceNotFoundException;
 import com.repairshop.saas.order.repository.*;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.security.SecureRandom;
 import java.util.HashMap;
 import java.util.List;
@@ -23,6 +28,7 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/sell-orders")
 @RequiredArgsConstructor
+@Slf4j
 public class SellOrderController {
 
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -37,6 +43,10 @@ public class SellOrderController {
     private final CustomerOrderRepository customerOrderRepo;
     private final ObjectMapper objectMapper;
     private final SubscriptionLimitService subscriptionLimits;
+    private final ShopNotificationRepository shopNotificationRepo;
+    private final ShopNotificationWriter shopNotificationWriter;
+    private final ShopPushService shopPush;
+    private final JdbcTemplate jdbc;
 
     @PostMapping
     @Transactional
@@ -104,6 +114,13 @@ public class SellOrderController {
                 .status("PENDING")
                 .payloadJson(payloadJson)
                 .build());
+
+        // Any active shop may quote, so every one of them hears about it. Runs
+        // after commit, off the request thread: one feed row per shop is a
+        // best-effort side effect and must not be able to fail (or slow) the
+        // customer's sell request.
+        UUID sellerShopId = optionalShopId(req);
+        shopPush.afterCommit(() -> notifyShopsOfSellRequest(saved, userId, sellerShopId));
 
         return ResponseEntity.ok(toResponseWithQuotes(saved));
     }
@@ -178,7 +195,90 @@ public class SellOrderController {
             co.setTotalAmount(chosen.getQuotationPrice());
             customerOrderRepo.save(co);
         });
+        notifyQuoteAccepted(s, chosen);
         return ResponseEntity.ok(toResponseWithQuotes(s));
+    }
+
+    // ── Partner app notifications ───────────────────────────────────────────
+
+    /** Feed row + push for every active shop except the seller's own. */
+    private void notifyShopsOfSellRequest(SellOrder s, UUID sellerUserId, UUID sellerShopId) {
+        String title = "New sell request";
+        String device = deviceName(s.getBrandId(), s.getModelId());
+        String body = (device != null ? device : "A device") + " is up for sale ("
+                + s.getSellNumber() + ") - tap to send your quote.";
+        Map<UUID, UUID> rows = shopNotificationWriter.insertForActiveShops(
+                sellerUserId, sellerShopId, "sell", "SELL_REQUESTED", title, body, s.getSellNumber());
+        Map<UUID, Map<String, Object>> dataByShop = new HashMap<>();
+        rows.forEach((shopId, notificationId) -> {
+            Map<String, Object> data = sellPushData(s, "SELL_REQUESTED");
+            data.put("notificationId", notificationId.toString());
+            dataByShop.put(shopId, data);
+        });
+        shopPush.pushEach(title, body, dataByShop);
+    }
+
+    /** The customer picked this shop's quotation — tell the shop it won the order. */
+    private void notifyQuoteAccepted(SellOrder s, SellOrderQuotation chosen) {
+        if (chosen.getShopId() == null) return;
+        String title = "Your quote was accepted";
+        String body = "Sell request " + s.getSellNumber() + " - the customer accepted your quote"
+                + (chosen.getQuotationPrice() != null ? " of ₹" + plain(chosen.getQuotationPrice()) : "")
+                + ". Tap to view details.";
+        ShopNotification n = shopNotificationRepo.save(ShopNotification.builder()
+                .shopId(chosen.getShopId())
+                .bookingNumber(s.getSellNumber())
+                .statusKey("SELL_CONFIRMED")
+                .title(title)
+                .body(body)
+                .type("sell")
+                .read(false)
+                .build());
+        Map<String, Object> data = sellPushData(s, "SELL_CONFIRMED");
+        data.put("notificationId", String.valueOf(n.getId()));
+        data.put("quotationId", String.valueOf(chosen.getId()));
+        shopPush.pushToShop(chosen.getShopId(), title, body, data);
+    }
+
+    private static Map<String, Object> sellPushData(SellOrder s, String statusKey) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("kind", "SELL_REQUEST");
+        data.put("sellOrderId", String.valueOf(s.getId()));
+        data.put("sellNumber", s.getSellNumber());
+        data.put("statusKey", statusKey);
+        return data;
+    }
+
+    /** "Samsung Galaxy S21" from the master tables; null when neither resolves. */
+    private String deviceName(UUID brandId, UUID modelId) {
+        String brand = masterName("master_brands", brandId);
+        String model = masterName("master_models", modelId);
+        if (model == null) return brand;
+        if (brand == null || model.toLowerCase().startsWith(brand.toLowerCase())) return model;
+        return brand + " " + model;
+    }
+
+    private String masterName(String table, UUID id) {
+        if (id == null) return null;
+        try {
+            List<String> rows = jdbc.query("SELECT name FROM " + table + " WHERE id = ?",
+                    (rs, i) -> rs.getString("name"), id);
+            return rows.isEmpty() || rows.get(0) == null || rows.get(0).isBlank() ? null : rows.get(0).trim();
+        } catch (Exception e) {
+            log.debug("{} lookup failed: {}", table, e.getMessage());
+            return null;
+        }
+    }
+
+    private static String plain(BigDecimal n) {
+        return n.stripTrailingZeros().toPlainString();
+    }
+
+    // Set for shop-owner / SHOP-login tokens; null for a customer account.
+    private UUID optionalShopId(HttpServletRequest req) {
+        Object s = req.getAttribute("shopId");
+        try { return s != null ? UUID.fromString(s.toString()) : null; }
+        catch (IllegalArgumentException e) { return null; }
     }
 
     // Customer-side edit. Allowed only while the sell order is still

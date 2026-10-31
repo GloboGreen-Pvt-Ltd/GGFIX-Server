@@ -53,6 +53,18 @@ public class TicketController {
         return uid != null ? UUID.fromString(uid) : null;
     }
 
+    // OWNER when the caller is the shop owner — an owner or SHOP-login token,
+    // both of which carry the SHOP_OWNER role. The service keeps the steps such
+    // a change implies off the owner's own notification feed and phone; an
+    // employee-app (technician) caller still notifies the owner as before.
+    private String ownerActorFrom(HttpServletRequest request) {
+        Object raw = request.getAttribute("roles");
+        boolean owner = raw instanceof List<?> roles
+                && roles.stream().anyMatch(r -> "SHOP_OWNER".equals(
+                        String.valueOf(r).trim().toUpperCase(Locale.ROOT).replaceFirst("^ROLE_", "")));
+        return owner ? "OWNER" : null;
+    }
+
     @GetMapping("/counts")
     @Operation(summary = "Get booking/ticket counts for shop (dashboard)")
     public Map<String, Long> getCounts(HttpServletRequest request) {
@@ -144,7 +156,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        return ticketService.patch(shopId, id, body);
+        return ticketService.patch(shopId, id, body, ownerActorFrom(request), userIdFrom(request));
     }
 
     @PostMapping("/{id}/re-estimate")
@@ -178,7 +190,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        ticketService.updateStatus(shopId, id, status);
+        ticketService.updateStatus(shopId, id, status, ownerActorFrom(request));
     }
 
     @PostMapping("/{id}/reopen")

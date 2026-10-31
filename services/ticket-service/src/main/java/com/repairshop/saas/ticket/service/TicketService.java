@@ -64,6 +64,8 @@ public class TicketService {
     private final CustomerOrderMirrorService customerOrderMirrorService;
     private final TicketNumberService ticketNumberService;
     private final ReEstimateWorkflowService reEstimateWorkflow;
+    private final com.repairshop.saas.common.notify.ShopPushService shopPush;
+    private final com.repairshop.saas.common.notify.PushService pushService;
 
     @Transactional
     public TicketResponse getById(UUID shopId, UUID id) {
@@ -79,10 +81,15 @@ public class TicketService {
         // read in parallel with getEventsForShop, and both call mirrorOnUpsert
         // in REQUIRES_NEW transactions. A transient race (optimistic lock)
         // must not break the primary read — the next mirror run will heal it.
-        try { customerOrderMirrorService.mirrorOnUpsert(t); }
-        catch (Exception e) { log.error("mirrorOnUpsert failed for ticket {}", id, e); }
-        try { syncStepEventsFromTicketState(t); }
-        catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", id, e); }
+        //
+        // quiet(): whatever this self-heal back-fills already happened, possibly
+        // days ago — it still gets its feed row, but no phone push.
+        try (var quiet = shopPush.quiet()) {
+            try { customerOrderMirrorService.mirrorOnUpsert(t); }
+            catch (Exception e) { log.error("mirrorOnUpsert failed for ticket {}", id, e); }
+            try { syncStepEventsFromTicketState(t); }
+            catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", id, e); }
+        }
         return toResponse(t);
     }
 
@@ -100,11 +107,14 @@ public class TicketService {
         // Same self-heal as getById: create the booking mirror if missing so
         // walk-in tickets gain a timeline on first view. Errors here are
         // caught + logged so a bad mirror state doesn't 500 the whole events
-        // endpoint — we still try to return whatever events exist.
-        try { customerOrderMirrorService.mirrorOnUpsert(t); }
-        catch (Exception e) { log.error("mirrorOnUpsert failed for ticket {}", ticketId, e); }
-        try { syncStepEventsFromTicketState(t); }
-        catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", ticketId, e); }
+        // endpoint — we still try to return whatever events exist. Quiet for the
+        // same reason as getById: back-filled steps are not news.
+        try (var quiet = shopPush.quiet()) {
+            try { customerOrderMirrorService.mirrorOnUpsert(t); }
+            catch (Exception e) { log.error("mirrorOnUpsert failed for ticket {}", ticketId, e); }
+            try { syncStepEventsFromTicketState(t); }
+            catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", ticketId, e); }
+        }
         return platformRepairBookingRepository.findByTicketId(t.getId())
                 .map(b -> platformRepairBookingEventRepository
                         .findCurrentCycle(b.getId())
@@ -691,15 +701,18 @@ public class TicketService {
         return n.stripTrailingZeros().toPlainString();
     }
 
+    /** {@code actor} is OWNER when the shop owner (or a SHOP login) set the
+     *  status from their own app, so the step it implies is not announced back
+     *  to them in their feed or as a push; null otherwise. */
     @Transactional
-    public void updateStatus(UUID shopId, UUID id, String status) {
+    public void updateStatus(UUID shopId, UUID id, String status, String actor) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
         reEstimateWorkflow.onProgressStep(ticket, status);
         ticket.setStatus(status);
         ticket = ticketRepository.save(ticket);
-        customerOrderMirrorService.mirrorOnUpsert(ticket);
-        emitStepEventsForTicketStatus(ticket.getId(), status);
+        customerOrderMirrorService.mirrorOnUpsert(ticket, actor);
+        emitStepEventsForTicketStatus(ticket.getId(), status, actor);
     }
 
     /**
@@ -744,6 +757,21 @@ public class TicketService {
      */
     @Transactional
     public TicketResponse patch(UUID shopId, UUID id, Map<String, Object> body) {
+        return patch(shopId, id, body, null);
+    }
+
+    /** {@code actor} as in {@link #updateStatus}: OWNER keeps the steps this
+     *  patch implies off the owner's own feed and phone. */
+    @Transactional
+    public TicketResponse patch(UUID shopId, UUID id, Map<String, Object> body, String actor) {
+        return patch(shopId, id, body, actor, null);
+    }
+
+    /** {@code callerUserId}: who sent the patch, so a technician is never
+     *  pushed about an assignment they made themselves. */
+    @Transactional
+    public TicketResponse patch(UUID shopId, UUID id, Map<String, Object> body, String actor,
+                                UUID callerUserId) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
 
@@ -865,7 +893,7 @@ public class TicketService {
         // that has never been through a payment-aware write.
         recomputeBalance(ticket);
         ticket = ticketRepository.save(ticket);
-        customerOrderMirrorService.mirrorOnUpsert(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket, actor);
 
         // After the mirror has ensured the booking row exists, drop a
         // TECH_UPLOADED_IMAGES event so the customer/owner Service History
@@ -874,13 +902,13 @@ public class TicketService {
         // is rendered the same way on the owner side.
         if (photosBecameNonEmpty) {
             emitBookingEvent(ticket.getId(), "TECHNICIAN_UPLOADED_DEVICE_IMAGES",
-                    "Technician Uploaded Device Images", "TECHNICIAN");
+                    "Technician Uploaded Device Images", "TECHNICIAN", actor);
         }
         // If the patch carried a status change, emit the matching step event(s)
         // (work-started / waiting-for-approval). Use the prior status as a guard
         // so a no-op repaint doesn't churn events.
         if (ticket.getStatus() != null && !ticket.getStatus().equalsIgnoreCase(statusBeforePatch)) {
-            emitStepEventsForTicketStatus(ticket.getId(), ticket.getStatus());
+            emitStepEventsForTicketStatus(ticket.getId(), ticket.getStatus(), actor);
         }
         // Technician assignment changed — light up the customer/owner timeline
         // rows for it.
@@ -916,6 +944,7 @@ public class TicketService {
             // assignment's "awaiting" timestamp.
             emitOrUpdateBookingEvent(ticket.getId(), "AWAITING_TECHNICIAN_ACCEPTANCE",
                     "Awaiting Technician Acceptance", "SHOP");
+            pushJobAssigned(ticket, assignedTechAfterPatch, callerUserId);
         }
         // Owner ticked "Customer Repair Approval" in the Edit Booking screen —
         // same handler as update() and as the customer's own Approve tap, so the
@@ -926,6 +955,22 @@ public class TicketService {
             onCustomerApproved(ticket, "SHOP");
         }
         return toResponse(ticket);
+    }
+
+    // Employee app: the newly (re)assigned technician hears about the job on
+    // their phone — technicians.user_id is their auth user id. Skipped when
+    // the technician assigned it to themselves. Sent after commit.
+    private void pushJobAssigned(Ticket ticket, Technician tech, UUID callerUserId) {
+        if (tech == null || tech.getUserId() == null || tech.getUserId().equals(callerUserId)) return;
+        String device = ticket.getDeviceDisplayName() != null && !ticket.getDeviceDisplayName().isBlank()
+                ? ticket.getDeviceDisplayName() : "Device";
+        String body = ticket.getTrackingId() != null ? device + " · " + ticket.getTrackingId() : device;
+        Map<String, Object> data = new HashMap<>();
+        data.put("kind", "JOB_ASSIGNED");
+        data.put("ticketId", ticket.getId());
+        data.put("trackingId", ticket.getTrackingId());
+        pushService.pushToUser(com.repairshop.saas.common.notify.PushApp.EMPLOYEE, tech.getUserId(),
+                "New job assigned", body, data);
     }
 
     private static java.time.Instant parseInstantOrNull(Object raw) {
@@ -1176,6 +1221,14 @@ public class TicketService {
     // up the booking mirrored against the ticket; skips if an event with the
     // same status key already exists so re-saves don't double-emit.
     private void emitBookingEvent(UUID ticketId, String statusKey, String note, String actor) {
+        emitBookingEvent(ticketId, statusKey, note, actor, actor);
+    }
+
+    // `actor` is what the timeline row records (SHOP / TECHNICIAN); `notifyActor`
+    // is who actually made the change, for the shop feed — OWNER when the owner
+    // did it from their own app, so they are not notified about their own tap.
+    private void emitBookingEvent(UUID ticketId, String statusKey, String note, String actor,
+                                  String notifyActor) {
         platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
             boolean alreadyEmitted = platformRepairBookingEventRepository
                     .findCurrentCycle(booking.getId())
@@ -1197,7 +1250,7 @@ public class TicketService {
             // proxied invocations so each keeps its own REQUIRES_NEW — one feed
             // failing must not roll back the other or this event save.
             customerOrderMirrorService.emitCustomerNotificationForStatus(booking.getId(), statusKey);
-            customerOrderMirrorService.emitShopNotificationForStatus(booking.getId(), statusKey);
+            customerOrderMirrorService.emitShopNotificationForStatus(booking.getId(), statusKey, notifyActor);
         });
     }
 
@@ -1651,18 +1704,20 @@ public class TicketService {
     // — moved the badge and left the rail behind. emitBookingEvent is idempotent
     // per (booking, statusKey), so a status that also arrives through
     // /progress-events writes one row, not two, whichever lands first.
-    private void emitStepEventsForTicketStatus(UUID ticketId, String status) {
+    //
+    // `notifyActor` is passed through to the shop feed (see emitBookingEvent).
+    private void emitStepEventsForTicketStatus(UUID ticketId, String status, String notifyActor) {
         if (status == null) return;
         String s = status.trim().toUpperCase();
         switch (s) {
             case "IN_REPAIR":
             case "APPROVED":
                 emitBookingEvent(ticketId, "TECHNICIAN_WORK_STARTED",
-                        "Technician Work Started", "TECHNICIAN");
+                        "Technician Work Started", "TECHNICIAN", notifyActor);
                 break;
             case "QUOTED":
                 emitBookingEvent(ticketId, "WAITING_FOR_CUSTOMER_APPROVAL",
-                        "Waiting for Customer Approval", "TECHNICIAN");
+                        "Waiting for Customer Approval", "TECHNICIAN", notifyActor);
                 break;
             default:
                 break;
@@ -1672,7 +1727,7 @@ public class TicketService {
             // status sheet. defaultProgressLabel is the same wording
             // /progress-events would have written, so the row reads identically
             // whichever door the status came through.
-            emitBookingEvent(ticketId, s, defaultProgressLabel(s), "SHOP");
+            emitBookingEvent(ticketId, s, defaultProgressLabel(s), "SHOP", notifyActor);
         }
     }
 

@@ -114,6 +114,39 @@ ensure_env_file() {
   fi
   rzp_mode="${rzp_mode:-TEST}"
 
+  # Partner app push (common-notify, via Expo). Both optional and carried the
+  # same way: the workflow's value when it passes one, else what is already on
+  # the box. An empty EXPO_ACCESS_TOKEN still sends (Expo only requires it when
+  # enhanced push security is on); PUSH_ENABLED=false is the kill switch.
+  expo_access_token="${EXPO_ACCESS_TOKEN:-}"
+  if [[ -z "$expo_access_token" ]]; then
+    expo_access_token="$(read_env_value EXPO_ACCESS_TOKEN)"
+  fi
+  push_enabled="${PUSH_ENABLED:-}"
+  if [[ -z "$push_enabled" ]]; then
+    push_enabled="$(read_env_value PUSH_ENABLED)"
+  fi
+  push_enabled="${push_enabled:-true}"
+
+  # FCM (Firebase Admin SDK, common-notify). The service-account key never
+  # touches this box's disk or .env: the services read it from AWS Secrets
+  # Manager with the EC2 instance role. Only the secret's NAME is carried here.
+  # Blank secret id = FCM sends are skipped (Expo tokens still work).
+  firebase_secret_id="${FIREBASE_CREDENTIALS_SECRET_ID:-}"
+  if [[ -z "$firebase_secret_id" ]]; then
+    firebase_secret_id="$(read_env_value FIREBASE_CREDENTIALS_SECRET_ID)"
+  fi
+  firebase_secret_region="${FIREBASE_CREDENTIALS_SECRET_REGION:-}"
+  if [[ -z "$firebase_secret_region" ]]; then
+    firebase_secret_region="$(read_env_value FIREBASE_CREDENTIALS_SECRET_REGION)"
+  fi
+  firebase_secret_region="${firebase_secret_region:-${aws_region:-ap-south-1}}"
+  fcm_enabled="${FCM_ENABLED:-}"
+  if [[ -z "$fcm_enabled" ]]; then
+    fcm_enabled="$(read_env_value FCM_ENABLED)"
+  fi
+  fcm_enabled="${fcm_enabled:-true}"
+
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
 DB_HOST=$RDS_DB_HOST
 DB_PORT=$RDS_DB_PORT
@@ -134,6 +167,12 @@ RAZORPAY_KEY_ID=$rzp_key_id
 RAZORPAY_KEY_SECRET=$rzp_key_secret
 RAZORPAY_WEBHOOK_SECRET=$rzp_webhook_secret
 RAZORPAY_MODE=$rzp_mode
+
+EXPO_ACCESS_TOKEN=$expo_access_token
+PUSH_ENABLED=$push_enabled
+FIREBASE_CREDENTIALS_SECRET_ID=$firebase_secret_id
+FIREBASE_CREDENTIALS_SECRET_REGION=$firebase_secret_region
+FCM_ENABLED=$fcm_enabled
 JAVA_OPTS="-Xms64m -Xmx160m"
 SERVICES="$SERVICES_DEFAULT"
 EOF
