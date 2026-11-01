@@ -46,6 +46,8 @@ public class StaffTaskService {
     private final ObjectMapper objectMapper;
     private final TechnicianRepository technicianRepository;
     private final PushService pushService;
+    private final com.repairshop.saas.common.notify.ShopNotificationWriter shopNotifications;
+    private final com.repairshop.saas.common.notify.ShopPushService shopPush;
 
     // ---- Reads -----------------------------------------------------------------
 
@@ -183,7 +185,38 @@ public class StaffTaskService {
         t.setStatus(status);
         t.setIncompleteReason("INCOMPLETE".equals(status) ? note : null);
         appendHistory(t, status, note, technicianId == null ? "OWNER" : "EMPLOYEE");
-        return toResponse(repository.save(t));
+        TaskResponse saved = toResponse(repository.save(t));
+        if (technicianId != null) notifyShopOfEmployeeStatus(t, technicianId, status, note);
+        return saved;
+    }
+
+    // Partner App: an employee moved a task on (started / completed / could not
+    // complete) — the owner hears about it: a feed row (Team tab) and a push
+    // (kind STAFF_TASK, opens the task). After commit, on the push thread, so it
+    // can never undo the employee's status change.
+    private void notifyShopOfEmployeeStatus(StaffTask t, UUID technicianId, String status, String note) {
+        String who = technicianRepository.findByShopIdAndId(t.getShopId(), technicianId)
+                .map(Technician::getName).filter(n -> n != null && !n.isBlank()).map(String::trim)
+                .orElse("An employee");
+        String title = switch (status) {
+            case "IN_PROGRESS" -> "Task started";
+            case "COMPLETED" -> "Task completed";
+            case "INCOMPLETE" -> "Task not completed";
+            default -> "Task updated";
+        };
+        String body = who + " · " + t.getTitle() + ("INCOMPLETE".equals(status) && note != null ? " — " + note : "");
+        UUID shopId = t.getShopId();
+        String taskId = String.valueOf(t.getId());
+        shopPush.afterCommit(() -> {
+            UUID notificationId = shopNotifications.insert(shopId, "team", "STAFF_TASK_" + status, title, body,
+                    null, null, null);
+            Map<String, Object> data = new HashMap<>();
+            data.put("kind", "STAFF_TASK");
+            data.put("taskId", taskId);
+            data.put("notificationId", notificationId.toString());
+            data.put("statusKey", "STAFF_TASK_" + status);
+            shopPush.pushToShop(shopId, title, body, data);
+        });
     }
 
     @Transactional
