@@ -23,31 +23,41 @@ public final class BookingTemplateVariables {
 
     /** WhatsApp rejects empty parameters, newlines/tabs and long runs of spaces. */
     private static final int MAX_PARAM = 160;
-    private static final DateTimeFormatter WHEN = DateTimeFormatter.ofPattern("dd MMM yyyy, hh:mm a", Locale.ENGLISH);
+    private static final DateTimeFormatter WHEN = DateTimeFormatter.ofPattern("dd MMM yyyy, h:mm a", Locale.ENGLISH);
 
     private BookingTemplateVariables() {}
 
     public static List<String> of(BookingSnapshot b, ZoneId zone) {
         List<String> v = new ArrayList<>(8);
         v.add(clean(b.customerName(), "Customer"));
-        v.add(clean(b.shopName(), "NearGFix Partner"));
+        v.add(clean(b.shopName(), "Your Shop"));
         v.add(clean(b.bookingNumber(), "-"));
-        v.add(clean(join(b.devices().stream().map(BookingSnapshot.Device::name).toList(), ", "), "Device"));
-        v.add(clean(join(b.devices().stream().map(BookingTemplateVariables::services).toList(), "; "), "Repair service"));
+        v.add(clean(join(b.devices().stream().map(BookingTemplateVariables::device).toList(), ", "), "Device"));
+        v.add(clean(join(b.devices().stream().map(BookingTemplateVariables::services).toList(), "; "), "-"));
         v.add(money(b.total()));
         v.add(when(b.latestDelivery(), zone));
         v.add(clean(b.shopPhone(), "Contact the shop"));
         return v;
     }
 
-    /** A device's services: its summary line, else its price-item labels. */
+    /** "Oppo A5 5G · CPH2751 (6 GB / 128 GB · Aurora Green)" — same wording as the Partner App share text. */
+    static String device(BookingSnapshot.Device d) {
+        BookingSnapshot.DeviceName n = BookingSnapshot.DeviceName.parse(d.name());
+        String spec = join(java.util.Arrays.asList(n.ramStorage(), d.color()), " · ");
+        return (n.name() == null ? "Device" : n.name())
+                + (n.modelNumber() == null ? "" : " · " + n.modelNumber())
+                + (spec.isEmpty() ? "" : " (" + spec + ")");
+    }
+
+    /** A device's repair issues (with notes), not the service charge; else its summary line. */
     static String services(BookingSnapshot.Device d) {
-        if (d.servicesSummary() != null && !d.servicesSummary().isBlank()) return d.servicesSummary();
-        return d.items() == null ? null : join(d.items().stream().map(BookingSnapshot.PriceItem::label).toList(), ", ");
+        String names = join(d.repairItems().stream().map(BookingSnapshot.PriceItem::label).toList(), ", ");
+        if (!names.isEmpty()) return names;
+        return d.servicesSummary();
     }
 
     public static String when(Instant at, ZoneId zone) {
-        return at == null ? "Will be updated soon" : WHEN.format(at.atZone(zone)).replace("am", "AM").replace("pm", "PM");
+        return at == null ? "To Be Confirmed" : WHEN.format(at.atZone(zone)).replace("am", "AM").replace("pm", "PM");
     }
 
     /** Indian grouping, no symbol: 150000 → "1,50,000"; 1499.5 → "1,499.50". */
