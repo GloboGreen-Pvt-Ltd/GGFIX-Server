@@ -1,5 +1,7 @@
 package com.repairshop.saas.subscription.service;
 
+import com.repairshop.saas.subscription.billing.GstCalculator;
+import com.repairshop.saas.subscription.billing.GstStateCodes;
 import com.repairshop.saas.subscription.dto.v2.V2Views.AdminSettingsView;
 import com.repairshop.saas.subscription.entity.SubscriptionSetting;
 import com.repairshop.saas.subscription.exception.ApiException;
@@ -17,7 +19,9 @@ import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * subscription_settings (key/value). Missing keys fall back to the contract
@@ -30,13 +34,21 @@ import java.util.Set;
 public class SettingsService {
 
     public static final String DEFAULT_BUSINESS_NAME = "Globogreen System & Technology Private Limited";
+    public static final String DEFAULT_INVOICE_PREFIX = "NGF";
+    public static final String DEFAULT_INVOICE_WHATSAPP_TEMPLATE = "neargfix_subscription_paid";
+
+    /** ≤ 4 so "{prefix}/26-27/00001" stays within GST's 16-character invoice number limit. */
+    private static final Pattern INVOICE_PREFIX = Pattern.compile("^[A-Z0-9]{1,4}$");
+    private static final Pattern TEMPLATE_NAME = Pattern.compile("^[a-z0-9_]{1,100}$");
+    private static final Pattern SAC = Pattern.compile("^[0-9]{4,8}$");
 
     private static final Set<String> INT_KEYS = Set.of("trialDays", "trialMaxShops", "renewalReminderDays",
             "expiryAlertDays", "paymentRetryLimit", "gracePeriodDays", "quoteTtlMinutes");
     private static final Set<String> BOOL_KEYS = Set.of("taxInclusive", "trialOncePerOrg", "webCheckoutEnabled",
-            "androidCheckoutEnabled", "iosCheckoutEnabled");
+            "androidCheckoutEnabled", "iosCheckoutEnabled", "invoiceWhatsappEnabled");
     private static final Set<String> TEXT_KEYS = Set.of("receiptBusinessName", "receiptAddress", "receiptGstin",
-            "receiptEmail", "receiptPhone");
+            "receiptEmail", "receiptPhone", "receiptState", "receiptStateCode", "receiptSac", "invoicePrefix",
+            "invoiceWhatsappTemplate");
 
     private final SubscriptionSettingRepository repository;
     private final RazorpayProperties razorpay;
@@ -49,11 +61,32 @@ public class SettingsService {
             int gracePeriodDays, int quoteTtlMinutes, int paymentRetryLimit, int renewalReminderDays,
             int expiryAlertDays, boolean webCheckoutEnabled, boolean androidCheckoutEnabled,
             boolean iosCheckoutEnabled, String receiptBusinessName, String receiptAddress, String receiptGstin,
-            String receiptEmail, String receiptPhone) {
+            String receiptEmail, String receiptPhone, String receiptState, String receiptStateCode,
+            String receiptSac, String invoicePrefix, boolean invoiceWhatsappEnabled,
+            String invoiceWhatsappTemplate) {
 
         public static Settings defaults() {
             return new Settings(BigDecimal.ZERO, true, 15, 2, true, 0, 30, 3, 7, 7, true, false, false,
-                    DEFAULT_BUSINESS_NAME, null, null, null, null);
+                    DEFAULT_BUSINESS_NAME, null, null, null, null, null, null, null, DEFAULT_INVOICE_PREFIX, false,
+                    DEFAULT_INVOICE_WHATSAPP_TEMPLATE);
+        }
+
+        /** GST applies only when a supplier GSTIN is configured AND taxPercent > 0 (invoice contract). */
+        public boolean gstApplicable() {
+            return GstCalculator.applicable(receiptGstin, taxPercent);
+        }
+
+        /** The rate actually split out of prices: taxPercent when GST applies, else 0. */
+        public BigDecimal effectiveTaxPercent() {
+            return gstApplicable() ? taxPercent : BigDecimal.ZERO;
+        }
+
+        /** Supplier state code: the GSTIN prefix when a GSTIN is set, else the configured code, else the state name. */
+        public String supplierStateCode() {
+            String fromGstin = GstStateCodes.codeFromGstin(receiptGstin);
+            if (fromGstin != null) return fromGstin;
+            if (GstStateCodes.isKnownCode(receiptStateCode)) return receiptStateCode.trim();
+            return GstStateCodes.codeForName(receiptState);
         }
 
         public boolean channelEnabled(String channel) {
@@ -94,7 +127,14 @@ public class SettingsService {
                 blankToNull(raw.get("receiptAddress")),
                 blankToNull(raw.get("receiptGstin")),
                 blankToNull(raw.get("receiptEmail")),
-                blankToNull(raw.get("receiptPhone")));
+                blankToNull(raw.get("receiptPhone")),
+                blankToNull(raw.get("receiptState")),
+                blankToNull(raw.get("receiptStateCode")),
+                blankToNull(raw.get("receiptSac")),
+                notBlank(raw.get("invoicePrefix")) ? raw.get("invoicePrefix").trim() : d.invoicePrefix(),
+                bool(raw, "invoiceWhatsappEnabled", d.invoiceWhatsappEnabled()),
+                notBlank(raw.get("invoiceWhatsappTemplate")) ? raw.get("invoiceWhatsappTemplate").trim()
+                        : d.invoiceWhatsappTemplate());
     }
 
     public AdminSettingsView adminView() {
@@ -105,7 +145,9 @@ public class SettingsService {
                 s.renewalReminderDays(), s.expiryAlertDays(), s.paymentRetryLimit(), s.gracePeriodDays(),
                 s.quoteTtlMinutes(), s.webCheckoutEnabled(), s.androidCheckoutEnabled(), s.iosCheckoutEnabled(),
                 s.receiptBusinessName(), s.receiptAddress(), s.receiptGstin(), s.receiptEmail(), s.receiptPhone(),
-                razorpay.isModeMismatch(), razorpay.keyMode(), razorpay.unavailableReason());
+                razorpay.isModeMismatch(), razorpay.keyMode(), razorpay.unavailableReason(),
+                s.receiptState(), s.receiptStateCode(), s.receiptSac(), s.invoicePrefix(),
+                s.invoiceWhatsappEnabled(), s.invoiceWhatsappTemplate());
     }
 
     /**
@@ -144,7 +186,8 @@ public class SettingsService {
                 if (text != null && text.length() > 500) {
                     throw ApiException.badRequest("INVALID_SETTING", key + " is too long");
                 }
-                changes.put(key, text == null || text.isEmpty() ? null : text);
+                text = text == null || text.isEmpty() ? null : validateText(key, text);
+                changes.put(key, text);
             }
         }
         for (Map.Entry<String, String> c : changes.entrySet()) {
@@ -251,6 +294,45 @@ public class SettingsService {
         String s = String.valueOf(v).trim().toLowerCase();
         if ("true".equals(s) || "false".equals(s)) return Boolean.parseBoolean(s);
         throw ApiException.badRequest("INVALID_SETTING", key + " must be true or false");
+    }
+
+    /** Format checks for the invoice keys; blank always means "not configured". Returns the stored form. */
+    private static String validateText(String key, String text) {
+        switch (key) {
+            case "receiptGstin" -> {
+                String g = GstStateCodes.validGstin(text);
+                if (g == null) throw ApiException.badRequest("INVALID_SETTING", "receiptGstin must be a valid 15-character GSTIN");
+                return g;
+            }
+            case "receiptStateCode" -> {
+                String c = text.length() == 1 ? "0" + text : text;
+                if (!GstStateCodes.isKnownCode(c)) {
+                    throw ApiException.badRequest("INVALID_SETTING", "receiptStateCode must be a 2-digit GST state code");
+                }
+                return c;
+            }
+            case "receiptSac" -> {
+                if (!SAC.matcher(text).matches()) throw ApiException.badRequest("INVALID_SETTING", "receiptSac must be 4 to 8 digits");
+                return text;
+            }
+            case "invoicePrefix" -> {
+                String p = text.toUpperCase(Locale.ROOT);
+                if (!INVOICE_PREFIX.matcher(p).matches()) {
+                    throw ApiException.badRequest("INVALID_SETTING", "invoicePrefix must be 1 to 4 letters or digits");
+                }
+                return p;
+            }
+            case "invoiceWhatsappTemplate" -> {
+                if (!TEMPLATE_NAME.matcher(text).matches()) {
+                    throw ApiException.badRequest("INVALID_SETTING",
+                            "invoiceWhatsappTemplate must use lower-case letters, digits and _ only");
+                }
+                return text;
+            }
+            default -> {
+                return text;
+            }
+        }
     }
 
     private static boolean notBlank(String s) {

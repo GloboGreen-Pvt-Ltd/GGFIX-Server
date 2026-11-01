@@ -72,6 +72,8 @@ class TestStore {
     final RazorpayClient razorpay = mock(RazorpayClient.class);
     final RazorpayProperties props;
     final MySubscriptionService mineMock = mock(MySubscriptionService.class);
+    /** Application events published by the services (e.g. PaymentActivatedEvent → invoice issuance). */
+    final List<Object> publishedEvents = new ArrayList<>();
 
     final PlanCatalogService plans;
     final OrderViews views;
@@ -100,7 +102,7 @@ class TestStore {
         plans = new PlanCatalogService(planRepo, audit, mapper, settings);
         views = new OrderViews(mapper, paymentRepo);
         lifecycle = new OrderLifecycleService(orderRepo, paymentRepo, subRepo, shopRepo, plans, settings, numbers,
-                audit, views, clock, props);
+                audit, views, clock, props, publishedEvents::add);
         quotes = new QuoteService(plans, settings, directory, subRepo, clock);
         checkout = new CheckoutService(quotes, lifecycle, orderRepo, razorpay, props, settings, directory, views,
                 mineMock, audit, mapper, clock);

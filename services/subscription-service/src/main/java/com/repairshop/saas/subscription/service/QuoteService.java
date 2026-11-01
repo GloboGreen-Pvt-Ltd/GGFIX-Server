@@ -1,5 +1,6 @@
 package com.repairshop.saas.subscription.service;
 
+import com.repairshop.saas.subscription.billing.GstCalculator;
 import com.repairshop.saas.subscription.billing.PricingCalculator;
 import com.repairshop.saas.subscription.billing.SubscriptionState;
 import com.repairshop.saas.subscription.billing.SubscriptionTerms;
@@ -63,7 +64,7 @@ public class QuoteService {
         }
         List<ShopInfo> shops = validateShops(ownerUserId, shopIds, plan.getShopLimit(), null);
         QuoteView quote = compute(plan, shops.stream().map(ShopInfo::id).toList(), shops.size(),
-                current(ownerUserId), forcedPurpose, settings.get());
+                current(ownerUserId), forcedPurpose, settings.get(), placeOfSupply(shops));
         return new QuoteContext(plan, quote, shops);
     }
 
@@ -80,13 +81,14 @@ public class QuoteService {
                     plan.getName() + " allows up to " + plan.getShopLimit() + " shops");
         }
         Subscription current = ownerUserIdOrNull == null ? null : current(ownerUserIdOrNull);
-        return compute(plan, List.of(), n, current, null, s);
+        return compute(plan, List.of(), n, current, null, s, null);
     }
 
     /** The zero-price TRIAL "quote" snapshotted on a trial order. */
     public QuoteContext trial(SubscriptionPlanMaster trialPlan, List<ShopInfo> shops, SettingsService.Settings s) {
         SubscriptionPlanMaster plan = PlanCatalogService.withTrialSettings(trialPlan, s);
-        QuoteView q = compute(plan, shops.stream().map(ShopInfo::id).toList(), shops.size(), null, TRIAL, s);
+        QuoteView q = compute(plan, shops.stream().map(ShopInfo::id).toList(), shops.size(), null, TRIAL, s,
+                placeOfSupply(shops));
         return new QuoteContext(plan, q, shops);
     }
 
@@ -135,8 +137,16 @@ public class QuoteService {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    /** Place of supply = the billing (first selected) shop: GSTIN prefix, else its state. Null when unknown. */
+    GstCalculator.PlaceOfSupply placeOfSupply(List<ShopInfo> shops) {
+        if (shops == null || shops.isEmpty()) return null;
+        return directory.billingShop(shops.get(0).id())
+                .map(b -> GstCalculator.placeOfSupply(b.gstNumber(), b.state()))
+                .orElse(null);
+    }
+
     QuoteView compute(SubscriptionPlanMaster plan, List<UUID> shopIds, int shopCount, Subscription current,
-                      String forcedPurpose, SettingsService.Settings s) {
+                      String forcedPurpose, SettingsService.Settings s, GstCalculator.PlaceOfSupply pos) {
         Instant now = clock.instant();
         String state = SubscriptionState.status(current, now);
         boolean activePaid = SubscriptionState.ACTIVE.equals(state);
@@ -181,8 +191,11 @@ public class QuoteService {
             notice = "Your free trial ends as soon as this plan is activated.";
         }
 
+        // Tax is split out only when GST applies (supplier GSTIN set AND rate > 0); otherwise 0 everywhere.
         PricingCalculator.Breakdown b = PricingCalculator.price(
-                plan.getPricePaise(), plan.getAdditionalShopDiscountPct(), shopCount, s.taxPercent());
+                plan.getPricePaise(), plan.getAdditionalShopDiscountPct(), shopCount, s.effectiveTaxPercent());
+        var gst = GstCalculator.compute(b.totalPaise(), b.subtotalPaise(), b.discountPaise(), s.taxPercent(),
+                s.gstApplicable(), s.supplierStateCode(), pos);
         String durationLabel = SubscriptionTerms.durationLabel(plan.getDurationValue(), plan.getDurationUnit());
 
         List<Line> lines = new ArrayList<>();
@@ -199,6 +212,6 @@ public class QuoteService {
                 b.firstShopPaise(), b.additionalShopsCount(), b.additionalShopUnitPaise(),
                 b.additionalShopsTotalPaise(), b.additionalShopDiscountPct(), b.discountPaise(), b.subtotalPaise(),
                 b.taxPercent(), true, b.taxPaise(), b.totalPaise(), "INR", lines, startsAt, endsAt,
-                b.totalPaise(), replacesCurrent, notice);
+                b.totalPaise(), replacesCurrent, notice, gst);
     }
 }

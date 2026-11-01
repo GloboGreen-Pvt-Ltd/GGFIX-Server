@@ -37,6 +37,10 @@ public class OwnerDirectory {
 
     public record OwnerInfo(UUID id, String name, String email, String phone, String role) {}
 
+    /** What an invoice's "Bill To" block and the GST place of supply need from a shop. */
+    public record BillingShop(UUID id, String name, String phone, String mobile, String address, String city,
+                              String state, String pincode, String gstNumber) {}
+
     private static final String SHOP_COLUMNS =
             "id, owner_user_id, name, slug, area, district, state, address, is_active, mobile";
 
@@ -61,6 +65,25 @@ public class OwnerDirectory {
         } catch (Exception e) {
             log.warn("Could not load shops {}: {}", ids, e.toString());
             return Map.of();
+        }
+    }
+
+    /** One shop's billing details (invoice Bill To / place of supply); empty when unreadable. */
+    public Optional<BillingShop> billingShop(UUID shopId) {
+        if (shopId == null) return Optional.empty();
+        try {
+            List<BillingShop> rows = jdbc.query("""
+                    SELECT id, name, phone, mobile, address, COALESCE(NULLIF(city, ''), district) AS city, state,
+                           pincode, gst_number
+                      FROM shops WHERE id = :id
+                    """, new MapSqlParameterSource("id", shopId),
+                    (rs, i) -> new BillingShop((UUID) rs.getObject("id"), rs.getString("name"), rs.getString("phone"),
+                            rs.getString("mobile"), rs.getString("address"), rs.getString("city"),
+                            rs.getString("state"), rs.getString("pincode"), rs.getString("gst_number")));
+            return rows.stream().findFirst();
+        } catch (Exception e) {
+            log.warn("Could not load billing details of shop {}: {}", shopId, e.toString());
+            return Optional.empty();
         }
     }
 

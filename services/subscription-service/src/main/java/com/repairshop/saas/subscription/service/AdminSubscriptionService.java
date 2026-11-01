@@ -195,7 +195,7 @@ public class AdminSubscriptionService {
         } else {
             var shops = quotes.validateShops(req.ownerUserId(), req.shopIds(), plan.getShopLimit(), null);
             var q = quotes.compute(plan, shops.stream().map(OwnerDirectory.ShopInfo::id).toList(), shops.size(),
-                    quotes.current(req.ownerUserId()), null, settings.get());
+                    quotes.current(req.ownerUserId()), null, settings.get(), quotes.placeOfSupply(shops));
             ctx = new QuoteContext(plan, q, shops);
         }
         SubscriptionOrder o = lifecycle.activateWithoutPayment(req.ownerUserId(), ctx, "ADMIN",
