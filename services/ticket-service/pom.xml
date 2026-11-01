@@ -82,6 +82,12 @@
             <artifactId>common-notify</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- AWS S3 SDK (UrlConnection client) for WhatsApp receipt images; only the SDK is used, not its beans. -->
+        <dependency>
+            <groupId>com.repairshop.saas</groupId>
+            <artifactId>common-media</artifactId>
+            <version>${project.version}</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

@@ -24,6 +24,19 @@ server:
 app:
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
+  # WhatsApp booking confirmations via BotBee Nexa. OFF until Meta approves the
+  # template: BOTBEE_WHATSAPP_ENABLED=true AND BOTBEE_API_KEY set. Never put the key here.
+  whatsapp:
+    enabled: ${BOTBEE_WHATSAPP_ENABLED:false}
+    base-url: ${BOTBEE_BASE_URL:https://nexa.botbee.io}
+    api-key: ${BOTBEE_API_KEY:}
+    channel-id: ${BOTBEE_CHANNEL_ID:}
+    booking-template: ${BOTBEE_BOOKING_TEMPLATE:neargfix_booking_confirmed}
+    language: ${BOTBEE_TEMPLATE_LANGUAGE:en}
+    fallback-header-image-url: ${BOTBEE_FALLBACK_HEADER_IMAGE_URL:}
+    receipt-bucket: ${AWS_S3_BUCKET:${MEDIA_S3_BUCKET:}}
+    receipt-region: ${AWS_REGION:${MEDIA_S3_REGION:ap-south-1}}
+    public-base-url: ${AWS_S3_BASE_URL:https://media.ggfix.in}
 
 springdoc:
   api-docs:
