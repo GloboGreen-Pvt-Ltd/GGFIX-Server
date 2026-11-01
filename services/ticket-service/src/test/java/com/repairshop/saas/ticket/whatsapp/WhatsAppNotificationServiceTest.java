@@ -170,11 +170,21 @@ class WhatsAppNotificationServiceTest {
     }
 
     @Test
-    void resendRefusesSentMessageSoNoDuplicate() {
-        when(repo.findByBooking(shopId, "GTS-014", "BOOKING_CONFIRMED")).thenReturn(Optional.of(row("SENT", 1, 0)));
-        ResponseStatusException e = assertThrows(ResponseStatusException.class, () -> service.resend(shopId, ticketId));
-        assertEquals(409, e.getStatusCode().value());
+    void resendRefusesWhileQueuedOrSendingSoNoDuplicate() {
+        for (String status : List.of("PENDING", "SENDING")) {
+            when(repo.findByBooking(shopId, "GTS-014", "BOOKING_CONFIRMED")).thenReturn(Optional.of(row(status, 1, 0)));
+            ResponseStatusException e = assertThrows(ResponseStatusException.class, () -> service.resend(shopId, ticketId));
+            assertEquals(409, e.getStatusCode().value());
+        }
         verify(repo, never()).requeue(any(), any(), any());
+    }
+
+    @Test
+    void ownerCanResendADeliveredConfirmation() {
+        when(repo.findByBooking(shopId, "GTS-014", "BOOKING_CONFIRMED")).thenReturn(Optional.of(row("DELIVERED", 1, 0)));
+        when(repo.requeue(rowId, "+919876543210", "Resent by shop")).thenReturn(1);
+        service.resend(shopId, ticketId);
+        verify(repo).requeue(rowId, "+919876543210", "Resent by shop");
     }
 
     @Test
@@ -190,12 +200,14 @@ class WhatsAppNotificationServiceTest {
     }
 
     @Test
-    void statusMasksPhoneAndOffersResendOnlyAfterFailure() {
+    void statusMasksPhoneAndOffersResendWhenSettled() {
         when(repo.findByBooking(shopId, "GTS-014", "BOOKING_CONFIRMED")).thenReturn(Optional.of(row("FAILED", 6, 0)));
         WhatsAppNotificationService.StatusView v = service.status(shopId, ticketId);
         assertEquals("+91******3210", v.recipient());
         assertTrue(v.canResend());
         when(repo.findByBooking(shopId, "GTS-014", "BOOKING_CONFIRMED")).thenReturn(Optional.of(row("DELIVERED", 1, 0)));
+        assertTrue(service.status(shopId, ticketId).canResend(), "a delivered confirmation can be sent again on request");
+        when(repo.findByBooking(shopId, "GTS-014", "BOOKING_CONFIRMED")).thenReturn(Optional.of(row("PENDING", 0, 0)));
         assertFalse(service.status(shopId, ticketId).canResend());
     }
 

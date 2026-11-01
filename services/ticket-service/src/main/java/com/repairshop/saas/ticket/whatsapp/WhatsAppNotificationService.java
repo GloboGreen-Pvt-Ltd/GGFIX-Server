@@ -116,9 +116,11 @@ public class WhatsAppNotificationService {
     }
 
     /**
-     * Owner resend — the owner confirms the customer agreed. Allowed only after
-     * FAILED / SKIPPED (or when no message exists yet), at most max-resends times,
-     * so a sent message is never duplicated by a stray tap.
+     * Owner send / resend (Booking Details card, Jobs → Receipt) — the owner
+     * confirms the customer agreed. Allowed for any settled message (failed,
+     * skipped, or already sent / delivered / read when the customer needs it
+     * again) and when none exists yet; never while one is queued or sending,
+     * and at most max-resends times per booking.
      */
     public StatusView resend(UUID shopId, UUID ticketId) {
         if (!props.isSendingOn()) throw new ResponseStatusException(HttpStatus.CONFLICT, TURNED_OFF);
@@ -133,8 +135,8 @@ public class WhatsAppNotificationService {
                     "PENDING", null, Instant.now(), "QUEUED");
         } else {
             WhatsAppNotificationRepository.Row r = row.get();
-            if (!"FAILED".equals(r.status()) && !"SKIPPED".equals(r.status())) {
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "This confirmation is already " + r.status().toLowerCase() + ".");
+            if (inFlight(r.status())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "This confirmation is already being sent.");
             }
             if (r.resendCount() >= props.getMaxResends()) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "Resend limit reached for this booking.");
@@ -147,13 +149,17 @@ public class WhatsAppNotificationService {
         return view(t.bookingKey(), repo.findByBooking(shopId, t.bookingKey(), BOOKING_CONFIRMED).orElse(null));
     }
 
+    /** Queued or being sent right now — a resend then would only duplicate it. */
+    static boolean inFlight(String status) {
+        return "PENDING".equals(status) || "SENDING".equals(status);
+    }
+
     StatusView view(String bookingNumber, WhatsAppNotificationRepository.Row r) {
         boolean on = props.isSendingOn();
         if (r == null) {
             return new StatusView(bookingNumber, "NONE", null, null, 0, 0, on, on, null, null, null, null);
         }
-        boolean canResend = on && ("FAILED".equals(r.status()) || "SKIPPED".equals(r.status()))
-                && r.resendCount() < props.getMaxResends();
+        boolean canResend = on && !inFlight(r.status()) && r.resendCount() < props.getMaxResends();
         return new StatusView(bookingNumber, r.status(), r.statusReason(), PhoneNumbers.mask(r.recipientPhone()), r.attempts(),
                 r.resendCount(), canResend, on, r.sentAt(), r.deliveredAt(), r.readAt(), r.updatedAt());
     }
