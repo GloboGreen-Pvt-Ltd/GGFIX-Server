@@ -9,10 +9,11 @@ APP_USER="${APP_USER:-repairshop}"
 # needed to unpack and run the deployment bundle are required.
 install_packages() {
   if command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y java-25-amazon-corretto-headless git tar gzip openssl
+    # fontconfig + DejaVu: ticket-service draws the WhatsApp booking receipt image (Java2D).
+    sudo dnf install -y java-25-amazon-corretto-headless git tar gzip openssl fontconfig dejavu-sans-fonts
   elif command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update
-    sudo apt-get install -y openjdk-25-jre-headless git tar gzip openssl
+    sudo apt-get install -y openjdk-25-jre-headless git tar gzip openssl fontconfig fonts-dejavu-core
   else
     echo "Unsupported Linux package manager. Install Java 25, git, tar, gzip, and openssl manually." >&2
     exit 1

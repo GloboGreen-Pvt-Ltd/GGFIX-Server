@@ -147,6 +147,28 @@ ensure_env_file() {
   fi
   fcm_enabled="${fcm_enabled:-true}"
 
+  # BotBee WhatsApp booking confirmations (ticket-service). Same rule: the
+  # workflow's value when passed, else what is already on the box. Sending
+  # stays off unless BOTBEE_WHATSAPP_ENABLED=true (after Meta template approval).
+  botbee_api_key="${BOTBEE_API_KEY:-}"
+  if [[ -z "$botbee_api_key" ]]; then
+    botbee_api_key="$(read_env_value BOTBEE_API_KEY)"
+  fi
+  botbee_base_url="${BOTBEE_BASE_URL:-}"
+  if [[ -z "$botbee_base_url" ]]; then
+    botbee_base_url="$(read_env_value BOTBEE_BASE_URL)"
+  fi
+  botbee_base_url="${botbee_base_url:-https://nexa.botbee.io}"
+  botbee_channel_id="${BOTBEE_CHANNEL_ID:-}"
+  if [[ -z "$botbee_channel_id" ]]; then
+    botbee_channel_id="$(read_env_value BOTBEE_CHANNEL_ID)"
+  fi
+  botbee_enabled="${BOTBEE_WHATSAPP_ENABLED:-}"
+  if [[ -z "$botbee_enabled" ]]; then
+    botbee_enabled="$(read_env_value BOTBEE_WHATSAPP_ENABLED)"
+  fi
+  botbee_enabled="${botbee_enabled:-false}"
+
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
 DB_HOST=$RDS_DB_HOST
 DB_PORT=$RDS_DB_PORT
@@ -173,6 +195,10 @@ PUSH_ENABLED=$push_enabled
 FIREBASE_CREDENTIALS_SECRET_ID=$firebase_secret_id
 FIREBASE_CREDENTIALS_SECRET_REGION=$firebase_secret_region
 FCM_ENABLED=$fcm_enabled
+BOTBEE_API_KEY=$botbee_api_key
+BOTBEE_BASE_URL=$botbee_base_url
+BOTBEE_CHANNEL_ID=$botbee_channel_id
+BOTBEE_WHATSAPP_ENABLED=$botbee_enabled
 JAVA_OPTS="-Xms64m -Xmx160m"
 SERVICES="$SERVICES_DEFAULT"
 EOF
