@@ -124,12 +124,13 @@ public class WhatsAppNotificationRepository {
                 reason, providerResponse, variablesJson, "FAILED", reason, id);
     }
 
-    /** Manual resend: only from FAILED / SKIPPED. Returns 0 when the row moved on meanwhile. */
+    /** Owner resend of a settled message (not PENDING / SENDING). Returns 0 when the row moved on meanwhile. */
     public int requeue(UUID id, String phone, String note) {
         return jdbc.update("UPDATE whatsapp_notifications SET status = 'PENDING', status_reason = NULL, recipient_phone = ?, "
                         + "opt_in = true, attempts = 0, resend_count = resend_count + 1, next_attempt_at = now(), "
-                        + "provider_message_id = NULL, updated_at = now(), " + HISTORY
-                        + " WHERE id = ? AND status IN ('FAILED', 'SKIPPED')",
+                        + "provider_message_id = NULL, sent_at = NULL, delivered_at = NULL, read_at = NULL, "
+                        + "updated_at = now(), " + HISTORY
+                        + " WHERE id = ? AND status IN ('FAILED', 'SKIPPED', 'SENT', 'DELIVERED', 'READ')",
                 phone, "RESEND", note, id);
     }
 
