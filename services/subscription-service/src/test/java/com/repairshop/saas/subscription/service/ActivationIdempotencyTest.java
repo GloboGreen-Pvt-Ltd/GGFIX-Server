@@ -63,6 +63,12 @@ class ActivationIdempotencyTest {
         assertEquals(SubscriptionOrder.ACTIVATED, t.orders.get(o.getId()).getStatus());
         verify(t.razorpay, times(1)).fetchPayment("pay_T1");
         verify(t.audit, times(1)).log(any(), any(), eq("SUBSCRIPTION_ACTIVATED"), any(), any(), any());
+        // Exactly one invoice trigger (handled after commit by InvoiceIssuer), carrying the payment row id.
+        List<Object> activated = t.publishedEvents.stream()
+                .filter(e -> e instanceof com.repairshop.saas.subscription.invoice.PaymentActivatedEvent).toList();
+        assertEquals(1, activated.size());
+        assertEquals(t.paymentsFor(o.getId()).get(0).getId(),
+                ((com.repairshop.saas.subscription.invoice.PaymentActivatedEvent) activated.get(0)).paymentId());
 
         Subscription sub = onlySubscription();
         assertEquals("BASIC_6M", sub.getPlanCode());
@@ -93,6 +99,7 @@ class ActivationIdempotencyTest {
         Map<String, Object> replay = t.webhooks.handle(body, sig, "evt_1");
 
         assertEquals(Outcome.ALREADY_PROCESSED.name(), first.get("status"));
+        assertEquals(1, t.publishedEvents.size(), "a replayed webhook never triggers a second invoice");
         assertEquals("duplicate", replay.get("status"));
         assertEquals(1, t.paymentsFor(o.getId()).size());
         assertEquals(endAfterVerify, onlySubscription().getInactiveDate());

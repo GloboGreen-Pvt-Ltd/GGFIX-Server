@@ -33,7 +33,18 @@ public final class V2Views {
             long firstShopPaise, int additionalShopsCount, long additionalShopUnitPaise, long additionalShopsTotalPaise,
             BigDecimal additionalShopDiscountPct, long discountPaise, long subtotalPaise, BigDecimal taxPercent,
             boolean taxInclusive, long taxPaise, long totalPaise, String currency, List<Line> lines,
-            Instant startsAt, Instant endsAt, long renewalPricePaise, boolean replacesCurrent, String notice) {}
+            Instant startsAt, Instant endsAt, long renewalPricePaise, boolean replacesCurrent, String notice,
+            GstBreakdown gst) {}   // additive: GST split of totalPaise (invoice contract §2)
+
+    /**
+     * GST split of an inclusive amount (invoice contract §2). Not applicable (no supplier GSTIN or a 0 rate)
+     * → documentType PAYMENT_RECEIPT, taxable = total, every tax 0.
+     */
+    public record GstBreakdown(
+            boolean applicable, String documentType, BigDecimal ratePercent, boolean inclusive, long grossPaise,
+            long discountPaise, long taxablePaise, boolean interState, BigDecimal cgstPercent, long cgstPaise,
+            BigDecimal sgstPercent, long sgstPaise, BigDecimal igstPercent, long igstPaise, long taxPaise,
+            long totalPaise, String placeOfSupply, String supplierStateCode) {}
 
     public record ShopRef(UUID shopId, String name) {}
 
@@ -79,7 +90,30 @@ public final class V2Views {
 
     public record PaymentHistoryItem(
             UUID paymentId, UUID orderId, String orderNo, Instant paidAt, String planName, String durationLabel,
-            int shopCount, long amountPaise, String method, String status, String receiptNo) {}
+            int shopCount, long amountPaise, String method, String status, String receiptNo,
+            UUID invoiceId, String invoiceNo, String documentType, String whatsappStatus) {}   // additive (invoice §4)
+
+    // ── Invoices (invoice contract §3) ──────────────────────────────────────
+
+    public record InvoiceSupplier(String brand, String name, String address, String state, String stateCode,
+                                  String gstin, String sac, String email, String phone) {}
+
+    public record InvoiceBillTo(String ownerName, String mobile, String shopName, String address, String state,
+                                String pincode, String gstin) {}
+
+    public record InvoiceSubscription(String planName, String durationLabel, int shopCount, List<String> shopNames,
+                                      Instant startsAt, Instant endsAt) {}
+
+    public record InvoicePayment(String orderNo, String razorpayOrderId, String razorpayPaymentId, String method,
+                                 String status, String currency, Instant paidAt) {}
+
+    /** status: PENDING | SENT | FAILED | SKIPPED. */
+    public record InvoiceWhatsApp(String status, String reason, Instant sentAt, boolean canRetry) {}
+
+    public record InvoiceView(
+            UUID id, String invoiceNo, String documentType, String title, Instant issuedAt, InvoiceSupplier supplier,
+            InvoiceBillTo billTo, InvoiceSubscription subscription, GstBreakdown gst, InvoicePayment payment,
+            InvoiceWhatsApp whatsapp) {}
 
     public record IssuedBy(String name, String address, String gstin, String email, String phone) {}
 
@@ -120,7 +154,10 @@ public final class V2Views {
             int quoteTtlMinutes, boolean webCheckoutEnabled, boolean androidCheckoutEnabled,
             boolean iosCheckoutEnabled, String receiptBusinessName, String receiptAddress, String receiptGstin,
             String receiptEmail, String receiptPhone, boolean razorpayModeMismatch,
-            String razorpayKeyMode, String razorpayStatusMessage) {}
+            String razorpayKeyMode, String razorpayStatusMessage,
+            // additive (invoice contract §1)
+            String receiptState, String receiptStateCode, String receiptSac, String invoicePrefix,
+            boolean invoiceWhatsappEnabled, String invoiceWhatsappTemplate) {}
 
     public record AuditLogView(UUID id, Instant at, UUID actorUserId, String actorRole, String action,
                                String entityType, String entityId, JsonNode details) {}

@@ -22,6 +22,26 @@ server:
 app:
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
+  # Subscription invoices / receipts. The public PDF link (WhatsApp document
+  # header only) is HMAC-signed with link-secret (defaults to the JWT secret)
+  # and expires within link-ttl-minutes (max 60).
+  invoice:
+    link-secret: ${INVOICE_LINK_SECRET:${app.jwt.secret}}
+    public-base-url: ${INVOICE_PUBLIC_BASE_URL:https://api.ggfix.in/subscription}
+    link-ttl-minutes: 60
+    sweep:
+      enabled: ${INVOICE_SWEEP_ENABLED:true}
+      interval-ms: 300000
+      lookback-days: 30
+  # WhatsApp invoice delivery via BotBee (same env as ticket-service). OFF unless
+  # BOTBEE_WHATSAPP_ENABLED=true AND BOTBEE_API_KEY is set AND the admin setting
+  # invoiceWhatsappEnabled is on. Never put the key here.
+  whatsapp:
+    enabled: ${BOTBEE_WHATSAPP_ENABLED:false}
+    base-url: ${BOTBEE_BASE_URL:https://nexa.botbee.io}
+    api-key: ${BOTBEE_API_KEY:}
+    channel-id: ${BOTBEE_CHANNEL_ID:}
+    language: en
 # Razorpay (Subscription v2, UPI checkout). Values come ONLY from the
 # environment; empty keys keep every non-payment endpoint working and make the
 # payment endpoints answer 409 "Payments are not configured".

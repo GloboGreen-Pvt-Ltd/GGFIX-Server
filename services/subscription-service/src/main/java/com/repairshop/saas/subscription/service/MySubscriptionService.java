@@ -70,7 +70,7 @@ public class MySubscriptionService {
         return new CatalogView(plans.shopPlans(),
                 new CheckoutFlags(s.webCheckoutEnabled(), s.androidCheckoutEnabled(), s.iosCheckoutEnabled(),
                         razorpay.isConfigured(), razorpay.checkoutMode()),
-                s.taxPercent(), true);
+                s.effectiveTaxPercent(), true);
     }
 
     public Subscription current(UUID ownerUserId) {
@@ -196,7 +196,7 @@ public class MySubscriptionService {
             return new PaymentHistoryItem(p.getId(), p.getOrderId(), o == null ? null : o.getOrderNo(), p.getPaidAt(),
                     o == null ? null : o.getPlanName(), o == null ? null : o.getDurationLabel(),
                     o == null || o.getShopCount() == null ? 0 : o.getShopCount(), p.getAmountPaise(), p.getMethod(),
-                    p.getStatus(), p.getReceiptNo());
+                    p.getStatus(), p.getReceiptNo(), null, null, null, null);   // invoice fields: InvoiceService.withInvoices
         }).toList();
     }
 

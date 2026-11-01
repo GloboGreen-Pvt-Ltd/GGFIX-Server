@@ -22,6 +22,9 @@
         <dependency><groupId>org.projectlombok</groupId><artifactId>lombok</artifactId><optional>true</optional></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
 
+        <!-- Subscription invoice / receipt PDFs (A4, embedded DejaVu Sans for the ₹ glyph). -->
+        <dependency><groupId>org.apache.pdfbox</groupId><artifactId>pdfbox</artifactId><version>3.0.5</version></dependency>
+
         <!-- The shared plan catalogue + limit engine. The same jar backs the
              enforcement in ticket-service, which is what keeps the allowance
              this service advertises identical to the one that gets enforced. -->

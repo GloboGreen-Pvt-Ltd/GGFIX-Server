@@ -9,6 +9,7 @@ import com.repairshop.saas.subscription.entity.SubscriptionOrder;
 import com.repairshop.saas.subscription.entity.SubscriptionPayment;
 import com.repairshop.saas.subscription.entity.SubscriptionShop;
 import com.repairshop.saas.subscription.exception.ApiException;
+import com.repairshop.saas.subscription.invoice.PaymentActivatedEvent;
 import com.repairshop.saas.subscription.razorpay.RazorpayPayment;
 import com.repairshop.saas.subscription.razorpay.RazorpayProperties;
 import com.repairshop.saas.subscription.repository.SubscriptionOrderRepository;
@@ -19,6 +20,7 @@ import com.repairshop.saas.subscription.security.CurrentUser.Actor;
 import com.repairshop.saas.subscription.service.QuoteService.QuoteContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -63,6 +65,7 @@ public class OrderLifecycleService {
     private final OrderViews views;
     private final Clock clock;
     private final RazorpayProperties razorpay;
+    private final ApplicationEventPublisher events;
 
     /** A Razorpay payment reduced to what activation checks. */
     public record CapturedPayment(String paymentId, String razorpayOrderId, long amountPaise, String currency,
@@ -206,6 +209,8 @@ public class OrderLifecycleService {
 
         audit.log(actorId, actorRole, "SUBSCRIPTION_ACTIVATED", "SUBSCRIPTION", sub.getId().toString(),
                 details(o, p, via));
+        // Invoice issuance listens AFTER_COMMIT (InvoiceIssuer), so it can never roll back or delay activation.
+        events.publishEvent(new PaymentActivatedEvent(payment.getId(), o.getId()));
         return new ActivationResult(Outcome.ACTIVATED, o.getId(), payment.getId(), sub.getId());
     }
 

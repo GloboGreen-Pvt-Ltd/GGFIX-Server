@@ -18,6 +18,7 @@ import com.repairshop.saas.subscription.dto.v2.V2Views.QuoteView;
 import com.repairshop.saas.subscription.dto.v2.V2Views.ReceiptView;
 import com.repairshop.saas.subscription.dto.v2.V2Views.VerifyResult;
 import com.repairshop.saas.subscription.exception.ApiException;
+import com.repairshop.saas.subscription.invoice.InvoiceService;
 import com.repairshop.saas.subscription.security.CurrentUser;
 import com.repairshop.saas.subscription.service.CheckoutService;
 import com.repairshop.saas.subscription.service.MySubscriptionService;
@@ -48,6 +49,7 @@ public class SubscriptionV2Controller {
     private final CheckoutService checkout;
     private final TrialService trials;
     private final WebhookService webhooks;
+    private final InvoiceService invoices;
 
     @GetMapping("/catalog")
     public CatalogView catalog() {
@@ -112,7 +114,7 @@ public class SubscriptionV2Controller {
 
     @GetMapping("/payment/history")
     public List<PaymentHistoryItem> history() {
-        return mine.history(currentUser.requireOwnerId());
+        return invoices.withInvoices(mine.history(currentUser.requireOwnerId()));
     }
 
     /** The owner's own receipt; platform admins may open any receipt. */
