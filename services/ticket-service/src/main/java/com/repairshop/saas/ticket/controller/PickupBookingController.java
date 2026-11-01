@@ -55,6 +55,8 @@ public class PickupBookingController {
     private final JdbcTemplate jdbc;
     private final TicketNumberService ticketNumberService;
     private final PushService pushService;
+    private final com.repairshop.saas.common.notify.ShopNotificationWriter shopNotifications;
+    private final com.repairshop.saas.common.notify.ShopPushService shopPush;
 
     // Diagnostic ping — hit this in the browser to confirm the new controller
     // is loaded into the JVM. If this 200s but /me/pickup-bookings 500s, the
@@ -618,6 +620,27 @@ public class PickupBookingController {
                 } catch (Exception e) {
                     log.warn("pickup-status: notification INSERT failed for {}: {}", id, e.getMessage());
                 }
+            }
+
+            // Shop owner — the pickup person moved this booking on: a feed row
+            // (Pickup tab) + a push to the Partner App (kind PICKUP). Best-effort.
+            try {
+                String who = me.getName() == null || me.getName().isBlank() ? "Pickup person" : me.getName().trim();
+                String shopTitle = labelFor(target);
+                String shopBody = who + " · Booking " + bookingNumber + " — " + labelFor(target);
+                UUID ticketUuid = mintedTicketId == null ? null : UUID.fromString(mintedTicketId);
+                UUID shopNotificationId = shopNotifications.insert(shopId, "pickups", target, shopTitle, shopBody,
+                        id, bookingNumber, ticketUuid);
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("kind", "PICKUP");
+                data.put("notificationId", shopNotificationId.toString());
+                data.put("bookingId", id.toString());
+                if (mintedTicketId != null) data.put("ticketId", mintedTicketId);
+                data.put("bookingNumber", bookingNumber);
+                data.put("statusKey", target);
+                shopPush.pushToShop(shopId, shopTitle, shopBody, data);
+            } catch (Exception e) {
+                log.warn("pickup-status: shop notification failed for {}: {}", id, e.getMessage());
             }
 
             log.info("pickup-status: shop={} tech={} booking={} {} -> {} (distance={}m)",
