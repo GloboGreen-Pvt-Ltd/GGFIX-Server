@@ -7,8 +7,13 @@ spring:
     password: ${DB_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
     hikari:
-      maximum-pool-size: 5
-      minimum-idle: 1
+      # Busiest service (Jobs list + per-ticket invoice reads + WhatsApp worker):
+      # 5 connections were held long enough that requests waited 20s+ for one.
+      maximum-pool-size: ${TICKET_DB_POOL_SIZE:12}
+      minimum-idle: 2
+      connection-timeout: 10000
+      # Logs the stack of any code holding a connection > 15s (diagnostic only).
+      leak-detection-threshold: 15000
   jpa:
     hibernate:
       ddl-auto: validate
