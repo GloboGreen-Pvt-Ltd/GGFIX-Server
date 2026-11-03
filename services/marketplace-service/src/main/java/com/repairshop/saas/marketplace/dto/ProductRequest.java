@@ -41,4 +41,14 @@ public class ProductRequest {
     private String imageUrl;
     private List<String> extraImageUrls;
     private String assessmentJson;
+
+    // ---- Sell module ----
+    private String listingType;        // DEVICE | SPARE_PART | ACCESSORY
+    private String itemCondition;      // NEW | USED | REFURBISHED
+    private Integer quantity;
+    private Boolean negotiable;
+    private List<String> fulfilmentOptions; // PICKUP | SHIPPING
+    private String videoUrl;
+    private String clientRef;          // idempotency key (<= 64)
+    private UUID batchId;
 }

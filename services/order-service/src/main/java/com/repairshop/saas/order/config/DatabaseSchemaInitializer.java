@@ -24,6 +24,8 @@ public class DatabaseSchemaInitializer {
             // (3M/6M/12M) so the customer and owner can audit what the
             // technician committed to.
             addColumnIfMissing("repair_booking_services", "warranty", "VARCHAR(20)");
+            // Customer Sell Leads quotes: listing → sell order link (migration 107).
+            addColumnIfMissing("marketplace_listings", "sell_order_id", "UUID");
         };
     }
 
