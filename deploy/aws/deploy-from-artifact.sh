@@ -126,7 +126,9 @@ ensure_env_file() {
   if [[ -z "$push_enabled" ]]; then
     push_enabled="$(read_env_value PUSH_ENABLED)"
   fi
-  push_enabled="${push_enabled:-true}"
+  push_enabled="${push_enabled:-false}"
+  # A false already on the box is a kill switch the workflow cannot undo.
+  [[ "$(read_env_value PUSH_ENABLED)" == "false" ]] && push_enabled=false
 
   # FCM (Firebase Admin SDK, common-notify). The service-account key never
   # touches this box's disk or .env: the services read it from AWS Secrets
@@ -145,7 +147,8 @@ ensure_env_file() {
   if [[ -z "$fcm_enabled" ]]; then
     fcm_enabled="$(read_env_value FCM_ENABLED)"
   fi
-  fcm_enabled="${fcm_enabled:-true}"
+  fcm_enabled="${fcm_enabled:-false}"
+  [[ "$(read_env_value FCM_ENABLED)" == "false" ]] && fcm_enabled=false
 
   # BotBee WhatsApp booking confirmations (ticket-service). Same rule: the
   # workflow's value when passed, else what is already on the box. Sending
@@ -168,6 +171,7 @@ ensure_env_file() {
     botbee_enabled="$(read_env_value BOTBEE_WHATSAPP_ENABLED)"
   fi
   botbee_enabled="${botbee_enabled:-false}"
+  [[ "$(read_env_value BOTBEE_WHATSAPP_ENABLED)" == "false" ]] && botbee_enabled=false
 
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
 DB_HOST=$RDS_DB_HOST
