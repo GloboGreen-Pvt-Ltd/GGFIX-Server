@@ -88,6 +88,38 @@ public class MarketplaceProduct {
     @Column(name = "assessment_json", columnDefinition = "TEXT")
     private String assessmentJson;
 
+    // ---- Sell module (migration 106_marketplace_sell_module.sql) ----
+
+    @Column(name = "listing_type", length = 20)
+    private String listingType;  // DEVICE | SPARE_PART | ACCESSORY
+
+    @Column(name = "item_condition", length = 20)
+    private String itemCondition;  // NEW | USED | REFURBISHED
+
+    /** Remaining stock. */
+    @Column(nullable = false)
+    private Integer quantity;
+
+    @Column(name = "sold_quantity", nullable = false)
+    private Integer soldQuantity;
+
+    @Column(nullable = false)
+    private Boolean negotiable;
+
+    /** Comma-separated PICKUP,SHIPPING. */
+    @Column(name = "fulfilment_options", length = 100)
+    private String fulfilmentOptions;
+
+    @Column(name = "video_url", length = 500)
+    private String videoUrl;
+
+    /** Idempotency key, unique per (shop_id, client_ref). */
+    @Column(name = "client_ref", length = 64)
+    private String clientRef;
+
+    @Column(name = "batch_id")
+    private UUID batchId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -100,6 +132,10 @@ public class MarketplaceProduct {
         if (createdAt == null) createdAt = now;
         if (updatedAt == null) updatedAt = now;
         if (status == null) status = "ACTIVE";
+        if (quantity == null) quantity = 1;
+        if (soldQuantity == null) soldQuantity = 0;
+        if (negotiable == null) negotiable = false;
+        if (fulfilmentOptions == null) fulfilmentOptions = "PICKUP";
     }
 
     @PreUpdate

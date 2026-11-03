@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.*;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
@@ -36,4 +37,17 @@ public class ProductResponse {
     private String imageUrl;
     private List<String> extraImageUrls;
     private String assessmentJson;
+
+    // ---- Sell module ----
+    private String listingType;
+    private String itemCondition;
+    private Integer quantity;
+    private Integer soldQuantity;
+    private Boolean negotiable;
+    private List<String> fulfilmentOptions;
+    private String videoUrl;
+    private String clientRef;
+    private UUID batchId;
+    private Instant createdAt;
+    private Instant updatedAt;
 }

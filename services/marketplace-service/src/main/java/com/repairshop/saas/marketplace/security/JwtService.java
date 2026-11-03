@@ -45,6 +45,15 @@ public class JwtService {
         }
     }
 
+    /** OWNER (multi-shop login) or SHOP (shop-mobile login, one shop only); null on older tokens. */
+    public String getLoginScope(String token) {
+        try {
+            return parseClaims(token).get("loginScope", String.class);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     @SuppressWarnings("unchecked")
     public List<String> getRoles(String token) {
         List<?> list = parseClaims(token).get("roles", List.class);

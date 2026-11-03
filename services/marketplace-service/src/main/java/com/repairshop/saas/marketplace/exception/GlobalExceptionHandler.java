@@ -3,6 +3,9 @@ package com.repairshop.saas.marketplace.exception;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -10,6 +13,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
@@ -24,6 +28,36 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<ApiError> handleNotFound(ResourceNotFoundException ex, HttpServletRequest req) {
         return response(HttpStatus.NOT_FOUND, ex.getMessage(), req.getRequestURI());
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ApiError> handleConflict(ConflictException ex, HttpServletRequest req) {
+        return response(HttpStatus.CONFLICT, ex.getMessage(), req.getRequestURI());
+    }
+
+    /** @Version clash or row lock timeout: someone else changed the row first. */
+    @ExceptionHandler({OptimisticLockingFailureException.class, PessimisticLockingFailureException.class})
+    public ResponseEntity<ApiError> handleLocking(RuntimeException ex, HttpServletRequest req) {
+        return response(HttpStatus.CONFLICT,
+                "This item was just changed by someone else. Refresh and try again.", req.getRequestURI());
+    }
+
+    /**
+     * FK / unique / NOT NULL violations (e.g. a brand or model id that isn't in
+     * the catalogue): a readable 409 instead of an opaque 500.
+     */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ApiError> handleIntegrity(DataIntegrityViolationException ex, HttpServletRequest req) {
+        log.warn("Data integrity violation on {}: {}", req.getRequestURI(), ex.getMostSpecificCause().getMessage());
+        return response(HttpStatus.CONFLICT,
+                "This listing refers to a catalogue item or record that doesn't exist (or duplicates one). Re-select the device and try again.",
+                req.getRequestURI());
+    }
+
+    /** e.g. a non-UUID path variable or query param: 400 instead of a generic 500. */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiError> handleTypeMismatch(MethodArgumentTypeMismatchException ex, HttpServletRequest req) {
+        return response(HttpStatus.BAD_REQUEST, "Invalid value for " + ex.getName(), req.getRequestURI());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

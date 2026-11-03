@@ -157,19 +157,33 @@ public class SellOrderController {
      */
     @PostMapping("/{id}/quotations")
     @Transactional
-    public ResponseEntity<SellQuotationResponse> addQuote(@PathVariable UUID id, @RequestBody SellOrderQuotationRequest body) {
+    public ResponseEntity<SellQuotationResponse> addQuote(HttpServletRequest req, @PathVariable UUID id, @RequestBody SellOrderQuotationRequest body) {
+        // The quoting shop is the token's shop, never a shopId from the body.
+        Object tokenShop = req.getAttribute("shopId");
+        if (tokenShop == null) throw new ForbiddenException("A shop session is required to quote");
+        UUID shopId = UUID.fromString(tokenShop.toString());
         if (!sellRepo.existsById(id)) throw new ResourceNotFoundException("Sell order not found");
-        subscriptionLimits.requireUsageCapacity(null, body.getShopId(), SubscriptionFeature.SELL_ORDERS);
+        subscriptionLimits.requireUsageCapacity(null, shopId, SubscriptionFeature.SELL_ORDERS);
         SellOrderQuotation q = quoteRepo.save(SellOrderQuotation.builder()
-                .sellOrderId(id).shopId(body.getShopId())
+                .sellOrderId(id).shopId(shopId)
                 .shopName(body.getShopName()).shopPhone(body.getShopPhone()).shopCity(body.getShopCity())
                 .quotationPrice(body.getQuotationPrice()).note(body.getNote()).status("PROPOSED").build());
         return ResponseEntity.ok(toQuoteResp(q));
     }
 
     @GetMapping("/{id}/quotations")
-    public ResponseEntity<List<SellQuotationResponse>> listQuotes(@PathVariable UUID id) {
-        return ResponseEntity.ok(quoteRepo.findBySellOrderId(id).stream().map(this::toQuoteResp).toList());
+    public ResponseEntity<List<SellQuotationResponse>> listQuotes(HttpServletRequest req, @PathVariable UUID id) {
+        // The order's customer sees every quote; a shop sees only its own
+        // (other shops' prices stay private).
+        SellOrder s = sellRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Sell order not found"));
+        UUID userId = callerId(req);
+        Object tokenShop = req.getAttribute("shopId");
+        UUID shopId = tokenShop == null ? null : UUID.fromString(tokenShop.toString());
+        if (!s.getCustomerUserId().equals(userId) && shopId == null) throw new ForbiddenException("Not your sell order");
+        boolean customer = s.getCustomerUserId().equals(userId);
+        return ResponseEntity.ok(quoteRepo.findBySellOrderId(id).stream()
+                .filter(q -> customer || q.getShopId().equals(shopId))
+                .map(this::toQuoteResp).toList());
     }
 
     @PostMapping("/{id}/choose-quotation")

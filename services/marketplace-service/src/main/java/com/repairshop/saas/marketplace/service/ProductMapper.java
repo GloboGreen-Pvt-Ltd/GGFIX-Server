@@ -42,7 +42,38 @@ public final class ProductMapper {
                 .imageUrl(p.getImageUrl())
                 .extraImageUrls(parseExtraImages(p.getExtraImageUrls()))
                 .assessmentJson(p.getAssessmentJson())
+                .listingType(p.getListingType())
+                .itemCondition(p.getItemCondition())
+                .quantity(p.getQuantity() != null ? p.getQuantity() : 1)
+                .soldQuantity(p.getSoldQuantity() != null ? p.getSoldQuantity() : 0)
+                .negotiable(Boolean.TRUE.equals(p.getNegotiable()))
+                .fulfilmentOptions(parseFulfilment(p.getFulfilmentOptions()))
+                .videoUrl(p.getVideoUrl())
+                .clientRef(p.getClientRef())
+                .batchId(p.getBatchId())
+                .createdAt(p.getCreatedAt())
+                .updatedAt(p.getUpdatedAt())
                 .build();
+    }
+
+    /** Stored as "PICKUP,SHIPPING"; a missing value means pickup only. */
+    public static List<String> parseFulfilment(String raw) {
+        if (raw == null || raw.isBlank()) return List.of("PICKUP");
+        return Arrays.stream(raw.split(","))
+                .map(String::trim)
+                .map(String::toUpperCase)
+                .filter(s -> !s.isEmpty())
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    public static String serializeFulfilment(List<String> options) {
+        if (options == null) return null;
+        return options.stream()
+                .filter(s -> s != null && !s.isBlank())
+                .map(s -> s.trim().toUpperCase())
+                .distinct()
+                .collect(Collectors.joining(","));
     }
 
     public static List<String> parseExtraImages(String raw) {

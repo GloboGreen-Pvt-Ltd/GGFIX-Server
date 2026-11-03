@@ -5,13 +5,19 @@ import com.repairshop.saas.marketplace.dto.ProductResponse;
 import com.repairshop.saas.marketplace.entity.MarketplaceProduct;
 import com.repairshop.saas.marketplace.exception.ResourceNotFoundException;
 import com.repairshop.saas.marketplace.repository.MarketplaceProductRepository;
+import com.repairshop.saas.marketplace.security.ShopAccess;
+import com.repairshop.saas.marketplace.service.SellListingService;
 import com.repairshop.saas.marketplace.service.ProductMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @RestController
@@ -19,7 +25,13 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class MarketplaceController {
 
+    private static final Set<String> HIDDEN_FROM_PUBLIC = Set.of("DRAFT", "DELETED");
+    // Statuses the legacy PUT may set; deletion goes through DELETE.
+    private static final Set<String> LEGACY_STATUSES = Set.of("ACTIVE", "INACTIVE", "DRAFT", "SOLD", "COMPLETED", "CANCELLED");
+
     private final MarketplaceProductRepository productRepo;
+    private final ShopAccess shopAccess;
+    private final SellListingService sellListings;
 
     @GetMapping("/products")
     public ResponseEntity<List<ProductResponse>> listProducts(
@@ -28,6 +40,10 @@ public class MarketplaceController {
             @RequestParam(value = "modelId", required = false) UUID modelId,
             @RequestParam(value = "q", required = false) String q
     ) {
+        // The public board never shows drafts or soft-deleted rows, whatever is asked for.
+        if (HIDDEN_FROM_PUBLIC.contains(status.trim().toUpperCase())) {
+            return ResponseEntity.ok(List.of());
+        }
         List<MarketplaceProduct> result;
         if (type != null && !type.isBlank()) {
             result = productRepo.findByTypeAndStatus(type.toUpperCase(), status.toUpperCase());
@@ -43,13 +59,20 @@ public class MarketplaceController {
                     (p.getDescription() != null && p.getDescription().toLowerCase().contains(needle))
             ).toList();
         }
-        return ResponseEntity.ok(result.stream().map(ProductMapper::toResponse).toList());
+        return ResponseEntity.ok(result.stream()
+                .filter(p -> p.getStatus() == null || !HIDDEN_FROM_PUBLIC.contains(p.getStatus().toUpperCase()))
+                .map(ProductMapper::toResponse).toList());
     }
 
     @GetMapping("/products/{id}")
-    public ResponseEntity<ProductResponse> getProduct(@PathVariable UUID id) {
+    public ResponseEntity<ProductResponse> getProduct(HttpServletRequest httpReq, @PathVariable UUID id) {
         MarketplaceProduct p = productRepo.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + id));
+        // Soft-deleted rows are gone for everyone; a draft is visible only to its own shop.
+        String st = p.getStatus() == null ? "" : p.getStatus().toUpperCase();
+        if ("DELETED".equals(st) || ("DRAFT".equals(st) && !shopAccess.canManage(httpReq, p.getShopId()))) {
+            throw new ResourceNotFoundException("Product not found: " + id);
+        }
         return ResponseEntity.ok(ProductMapper.toResponse(p));
     }
 
@@ -77,6 +100,9 @@ public class MarketplaceController {
             throw new IllegalArgumentException(
                     "A shop is required to create a listing. Please re-open the app so your shop loads, then try again.");
         }
+        // The body's shopId is only trusted for a shop the caller may manage
+        // (the token's active shop, another shop they own, or any shop for admins).
+        shopAccess.requireManage(httpReq, shopId);
         MarketplaceProduct p = MarketplaceProduct.builder()
                 .shopId(shopId)
                 .sellerUserId(sellerUserId)
@@ -105,17 +131,28 @@ public class MarketplaceController {
     }
 
     @PutMapping("/products/{id}")
-    public ResponseEntity<ProductResponse> updateProduct(@PathVariable UUID id, @RequestBody ProductRequest req) {
+    public ResponseEntity<ProductResponse> updateProduct(HttpServletRequest httpReq, @PathVariable UUID id,
+                                                         @RequestBody ProductRequest req) {
         MarketplaceProduct p = productRepo.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + id));
-        if (req.getShopId() != null) p.setShopId(req.getShopId());
+        shopAccess.requireManage(httpReq, p.getShopId());
+        if ("DELETED".equalsIgnoreCase(String.valueOf(p.getStatus()))) {
+            throw new ResourceNotFoundException("Product not found: " + id);
+        }
+        if (req.getShopId() != null && !req.getShopId().equals(p.getShopId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "A listing can't be moved to another shop.");
+        }
         if (req.getBrandId() != null) p.setBrandId(req.getBrandId());
         if (req.getModelId() != null) p.setModelId(req.getModelId());
         if (req.getTitle() != null) p.setTitle(req.getTitle());
         if (req.getDescription() != null) p.setDescription(req.getDescription());
         if (req.getType() != null) p.setType(req.getType().toUpperCase());
         if (req.getPrice() != null) p.setPrice(req.getPrice());
-        if (req.getStatus() != null) p.setStatus(req.getStatus().toUpperCase());
+        if (req.getStatus() != null) {
+            String st = req.getStatus().trim().toUpperCase();
+            if (!LEGACY_STATUSES.contains(st)) throw new IllegalArgumentException("Unsupported status: " + req.getStatus());
+            p.setStatus(st);
+        }
         if (req.getConditionLabel() != null) p.setConditionLabel(req.getConditionLabel());
         if (req.getColor() != null) p.setColor(req.getColor());
         if (req.getRamLabel() != null) p.setRamLabel(req.getRamLabel());
@@ -133,9 +170,13 @@ public class MarketplaceController {
     }
 
     @DeleteMapping("/products/{id}")
-    public ResponseEntity<Void> deleteProduct(@PathVariable UUID id) {
-        if (!productRepo.existsById(id)) return ResponseEntity.notFound().build();
-        productRepo.deleteById(id);
+    public ResponseEntity<Void> deleteProduct(HttpServletRequest httpReq, @PathVariable UUID id) {
+        Optional<MarketplaceProduct> row = productRepo.findById(id);
+        if (row.isEmpty()) return ResponseEntity.notFound().build();
+        shopAccess.requireManage(httpReq, row.get().getShopId());
+        // Soft delete (status DELETED, open enquiries cancelled): enquiries and
+        // order history reference the row, so it is never removed outright.
+        sellListings.delete(row.get().getShopId(), id);
         return ResponseEntity.noContent().build();
     }
 }
