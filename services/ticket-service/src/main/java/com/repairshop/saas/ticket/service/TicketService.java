@@ -532,7 +532,7 @@ public class TicketService {
         ticket.setCustomerApproval(approvedNow ? Boolean.TRUE : null);
         recomputeBalance(ticket);
         ticket = ticketRepository.save(ticket);
-        customerOrderMirrorService.mirrorOnUpsert(ticket);
+        customerOrderMirrorService.mirrorOnUpsertInline(ticket);
 
         String note = "Re-estimated: ₹" + oldTotal.stripTrailingZeros().toPlainString()
                 + " + ₹" + extra.stripTrailingZeros().toPlainString()
@@ -1577,7 +1577,7 @@ public class TicketService {
         ticketRepository.save(t);
         // Re-mirror: update() already mirrored above with the pre-re-estimate
         // status, so repair_bookings.status would otherwise stay behind.
-        customerOrderMirrorService.mirrorOnUpsert(t);
+        customerOrderMirrorService.mirrorOnUpsertInline(t);
     }
 
     // Note text written when the caller sends none. These deliberately MATCH the
