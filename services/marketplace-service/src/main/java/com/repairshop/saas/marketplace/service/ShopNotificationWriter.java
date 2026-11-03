@@ -21,7 +21,7 @@ import java.util.UUID;
  * Call only AFTER the enquiry transaction has committed (the controllers do), so
  * a failed insert can never roll back or abort the enquiry change.
  */
-@Component
+@Component("marketplaceShopNotificationWriter") // named: common.notify has a same-named bean
 @RequiredArgsConstructor
 public class ShopNotificationWriter {
 
