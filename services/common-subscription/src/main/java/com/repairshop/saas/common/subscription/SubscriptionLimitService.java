@@ -6,6 +6,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -95,47 +97,102 @@ public class SubscriptionLimitService {
                     """
                     SELECT subscription_type, plan_code, status, shop_count,
                            active_date, started_at, trial_start_date, subscription_start_date,
-                           inactive_date, trial_end_date, subscription_end_date
+                           inactive_date, trial_end_date, subscription_end_date,
+                           shop_limit, employee_limit, sell_limit, pickup_service_enabled
                       FROM subscriptions
                      WHERE owner_user_id = ?
                      ORDER BY created_at DESC NULLS LAST
                      LIMIT 1
                     """,
-                    (rs, i) -> {
-                        // subscription_type is the migration-66 column and the one
-                        // the service writes; plan_code is the older base column.
-                        SubscriptionPlan plan = SubscriptionPlan.from(rs.getString("subscription_type"));
-                        if (plan == null) plan = SubscriptionPlan.from(rs.getString("plan_code"));
-
-                        String status = rs.getString("status");
-                        Integer shopCount = (Integer) rs.getObject("shop_count");
-
-                        Instant startsAt = firstNonNull(
-                                toInstant(rs.getTimestamp("active_date")),
-                                toInstant(rs.getTimestamp("subscription_start_date")),
-                                toInstant(rs.getTimestamp("trial_start_date")),
-                                toInstant(rs.getTimestamp("started_at")));
-                        Instant endsAt = firstNonNull(
-                                toInstant(rs.getTimestamp("inactive_date")),
-                                toInstant(rs.getTimestamp("subscription_end_date")),
-                                toInstant(rs.getTimestamp("trial_end_date")));
-
-                        boolean expired =
-                                "EXPIRED".equalsIgnoreCase(status)
-                                        || "CANCELLED".equalsIgnoreCase(status)
-                                        || (endsAt != null && endsAt.isBefore(Instant.now()));
-
-                        return new OwnerSubscription(
-                                ownerUserId, plan, status, startsAt, endsAt, expired, shopCount, true);
-                    },
+                    (rs, i) -> fromRow(rs, ownerUserId),
                     ownerUserId);
-            return rows.isEmpty() ? OwnerSubscription.absent(ownerUserId) : rows.get(0);
+            return rows.isEmpty() ? OwnerSubscription.absent(ownerUserId) : resolveStoredPlan(rows.get(0));
         } catch (Exception e) {
             // Same reasoning as the client-side gating: a subscription lookup
             // failure must never be the thing that stops a shop working.
             log.warn("Subscription lookup failed for owner {} — allowing through: {}", ownerUserId, e.toString());
             return OwnerSubscription.absent(ownerUserId);
         }
+    }
+
+    /**
+     * Interpret one subscriptions row. Enum plans (FREE_TRIAL / BASIC) resolve
+     * exactly as before v2. Any other non-blank code becomes a candidate
+     * {@link StoredPlan} built from the row's own limit columns; it is kept only
+     * if {@link #resolveStoredPlan} finds the code in the plan master, so a
+     * typo'd code still fails open as it always has.
+     */
+    OwnerSubscription fromRow(ResultSet rs, UUID ownerUserId) throws SQLException {
+        // subscription_type is the migration-66 column and the one
+        // the service writes; plan_code is the older base column.
+        SubscriptionPlan plan = SubscriptionPlan.from(rs.getString("subscription_type"));
+        if (plan == null) plan = SubscriptionPlan.from(rs.getString("plan_code"));
+
+        String status = rs.getString("status");
+        Integer shopCount = (Integer) rs.getObject("shop_count");
+
+        Instant startsAt = firstNonNull(
+                toInstant(rs.getTimestamp("active_date")),
+                toInstant(rs.getTimestamp("subscription_start_date")),
+                toInstant(rs.getTimestamp("trial_start_date")),
+                toInstant(rs.getTimestamp("started_at")));
+        Instant endsAt = firstNonNull(
+                toInstant(rs.getTimestamp("inactive_date")),
+                toInstant(rs.getTimestamp("subscription_end_date")),
+                toInstant(rs.getTimestamp("trial_end_date")));
+
+        boolean expired =
+                "EXPIRED".equalsIgnoreCase(status)
+                        || "CANCELLED".equalsIgnoreCase(status)
+                        || (endsAt != null && endsAt.isBefore(Instant.now()));
+
+        StoredPlan stored = null;
+        if (plan == null) {
+            String code = firstNonBlank(rs.getString("plan_code"), rs.getString("subscription_type"));
+            if (code != null) {
+                stored = new StoredPlan(
+                        code.trim().toUpperCase(),
+                        StoredPlan.prettify(code),
+                        (Integer) rs.getObject("shop_limit"),
+                        (Integer) rs.getObject("employee_limit"),
+                        (Integer) rs.getObject("sell_limit"),
+                        Boolean.TRUE.equals(rs.getObject("pickup_service_enabled")),
+                        true);
+            }
+        }
+
+        return new OwnerSubscription(
+                ownerUserId, plan, status, startsAt, endsAt, expired, shopCount, true, stored);
+    }
+
+    /**
+     * Confirm a candidate v2 plan against {@code subscription_plans} and take
+     * its display name and booking flag from there. Unknown code, or a database
+     * without the plan master yet, drops the candidate — the row is then
+     * "unrecognised" and fails open exactly as it did before v2.
+     */
+    OwnerSubscription resolveStoredPlan(OwnerSubscription sub) {
+        StoredPlan candidate = sub.storedPlan();
+        if (candidate == null) return sub;
+        StoredPlan resolved = null;
+        try {
+            List<StoredPlan> master = jdbc.query(
+                    "SELECT name, service_booking_enabled FROM subscription_plans WHERE UPPER(code) = ?",
+                    (rs, i) -> new StoredPlan(
+                            candidate.code(),
+                            firstNonBlank(rs.getString("name"), candidate.displayName()),
+                            candidate.shopLimit(),
+                            candidate.employeeLimitPerShop(),
+                            candidate.sellOrderLimit(),
+                            candidate.pickupEnabled(),
+                            !Boolean.FALSE.equals(rs.getObject("service_booking_enabled"))),
+                    candidate.code());
+            resolved = master.isEmpty() ? null : master.get(0);
+        } catch (Exception e) {
+            log.warn("Plan master lookup failed for {}: {}", candidate.code(), e.toString());
+        }
+        return new OwnerSubscription(sub.ownerUserId(), sub.plan(), sub.status(), sub.startsAt(), sub.endsAt(),
+                sub.expired(), sub.purchasedShopCount(), sub.present(), resolved);
     }
 
     /** Convenience: the subscription that governs a given shop. */
@@ -247,7 +304,7 @@ public class SubscriptionLimitService {
         if (!enforcementEnabled) {
             return LimitCheck.unlimited(currentUsage, sub, feature, LimitCheck.REASON_ENFORCEMENT_DISABLED);
         }
-        if (!sub.present() || sub.plan() == null) {
+        if (!sub.present() || !sub.resolved()) {
             if (sub.present()) {
                 log.warn("Owner {} has a subscription row with an unrecognised plan ({}) — allowing through",
                         sub.ownerUserId(), sub.status());
@@ -255,7 +312,10 @@ public class SubscriptionLimitService {
             return LimitCheck.unlimited(currentUsage, sub, feature, LimitCheck.REASON_NO_SUBSCRIPTION);
         }
 
-        SubscriptionPlan plan = sub.plan();
+        // Same values as plan.getCode()/getDisplayName() for the enum plans;
+        // the stored v2 plan's code and master name otherwise.
+        String planCode = sub.planCode();
+        String planName = sub.planName();
         Integer limit = sub.limitFor(feature);
 
         // A lapsed plan blocks additions regardless of headroom: the allowance
@@ -264,10 +324,10 @@ public class SubscriptionLimitService {
         if (sub.expired()) {
             return new LimitCheck(
                     false, currentUsage, limit, remainingOf(limit, currentUsage),
-                    plan.getCode(), plan.getDisplayName(), feature.name(),
+                    planCode, planName, feature.name(),
                     limit == null, true, sub.status(),
                     LimitCheck.REASON_SUBSCRIPTION_EXPIRED,
-                    "Your " + plan.getDisplayName() + " has expired. "
+                    "Your " + planName + " has expired. "
                             + "Please upgrade your subscription to continue.");
         }
 
@@ -278,10 +338,10 @@ public class SubscriptionLimitService {
         boolean allowed = currentUsage < limit;
         return new LimitCheck(
                 allowed, currentUsage, limit, remainingOf(limit, currentUsage),
-                plan.getCode(), plan.getDisplayName(), feature.name(),
+                planCode, planName, feature.name(),
                 false, false, sub.status(),
                 allowed ? LimitCheck.REASON_OK : LimitCheck.REASON_LIMIT_REACHED,
-                allowed ? null : limitMessage(plan, feature, limit));
+                allowed ? null : limitMessage(planName, feature, limit));
     }
 
     /**
@@ -320,7 +380,7 @@ public class SubscriptionLimitService {
     public boolean hasCapability(OwnerSubscription sub, SubscriptionCapability capability) {
         // Fail open on the same three cases the metered path does, so a legacy
         // account or a disabled kill switch does not lose features either.
-        if (!enforcementEnabled || !sub.present() || sub.plan() == null) return true;
+        if (!enforcementEnabled || !sub.present() || !sub.resolved()) return true;
         return sub.grants(capability);
     }
 
@@ -387,18 +447,18 @@ public class SubscriptionLimitService {
      * One place to phrase a refusal, so the sentence the API returns and the
      * sentence the app shows are the same sentence.
      */
-    private String limitMessage(SubscriptionPlan plan, SubscriptionFeature feature, int limit) {
+    private String limitMessage(String planName, SubscriptionFeature feature, int limit) {
         return switch (feature) {
             case EMPLOYEES -> "You have reached the maximum of " + limit + " employees allowed for the "
-                    + plan.getDisplayName() + " plan. "
+                    + planName + " plan. "
                     + "Upgrade your subscription to add more employees.";
             case SHOPS -> "You have reached the maximum of " + limit + " shops allowed for the "
-                    + plan.getDisplayName() + " plan. "
+                    + planName + " plan. "
                     + "Upgrade your subscription to add more shops.";
             case SELL_ORDERS -> "You have reached the maximum of " + limit + " sell orders allowed for the "
-                    + plan.getDisplayName() + " plan. "
+                    + planName + " plan. "
                     + "Upgrade your subscription to take more sell orders.";
-            default -> "Your " + plan.getDisplayName() + " plan allows up to " + limit + " "
+            default -> "Your " + planName + " plan allows up to " + limit + " "
                     + feature.getNoun() + (feature.isPerShop() ? " per shop" : "") + ". "
                     + "Upgrade your subscription to add more.";
         };
@@ -418,6 +478,13 @@ public class SubscriptionLimitService {
 
     private static Instant toInstant(Timestamp ts) {
         return ts != null ? ts.toInstant() : null;
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String v : values) {
+            if (v != null && !v.isBlank()) return v;
+        }
+        return null;
     }
 
     @SafeVarargs

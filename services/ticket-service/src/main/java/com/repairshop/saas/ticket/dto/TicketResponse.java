@@ -157,6 +157,14 @@ public class TicketResponse {
     @Schema(description = "Short uppercase technician code (first 8 chars of technician id)")
     private String assignedTechnicianCode;
 
+    // ---- Re-estimate workflow (GET /tickets/{id} only; null on lists) ----
+
+    @Schema(description = "Open re-estimate (REQUESTED / AWAITING_APPROVAL); null when none")
+    private ReEstimateRevisionDtos.Revision activeReEstimate;
+
+    @Schema(description = "Most recent re-estimate of any status; null when never re-estimated")
+    private ReEstimateRevisionDtos.Revision latestReEstimate;
+
     // ---- Latest customer-visible "Issue Verified & Updated" note ----
     // Populated from repair_notes by TicketService.toResponse, taking the
     // most recent row with is_internal=false. Customer + owner detail

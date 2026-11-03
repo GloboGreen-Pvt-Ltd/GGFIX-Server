@@ -92,6 +92,87 @@ ensure_env_file() {
     google_vision_key="$(read_env_value GOOGLE_VISION_API_KEY)"
   fi
 
+  # Razorpay (subscription-service UPI checkout). Same rule: the workflow
+  # secret when passed, else the value already on the box. Empty keys are fine
+  # — the service then answers "Payments are not configured".
+  rzp_key_id="${RAZORPAY_KEY_ID:-}"
+  if [[ -z "$rzp_key_id" ]]; then
+    rzp_key_id="$(read_env_value RAZORPAY_KEY_ID)"
+  fi
+  rzp_key_secret="${RAZORPAY_KEY_SECRET:-}"
+  if [[ -z "$rzp_key_secret" ]]; then
+    rzp_key_secret="$(read_env_value RAZORPAY_KEY_SECRET)"
+  fi
+  rzp_webhook_secret="${RAZORPAY_WEBHOOK_SECRET:-}"
+  if [[ -z "$rzp_webhook_secret" ]]; then
+    rzp_webhook_secret="$(read_env_value RAZORPAY_WEBHOOK_SECRET)"
+  fi
+  # TEST | LIVE; must match the key prefix (rzp_test_ / rzp_live_) or payments stay off.
+  rzp_mode="${RAZORPAY_MODE:-}"
+  if [[ -z "$rzp_mode" ]]; then
+    rzp_mode="$(read_env_value RAZORPAY_MODE)"
+  fi
+  rzp_mode="${rzp_mode:-TEST}"
+
+  # Partner app push (common-notify, via Expo). Both optional and carried the
+  # same way: the workflow's value when it passes one, else what is already on
+  # the box. An empty EXPO_ACCESS_TOKEN still sends (Expo only requires it when
+  # enhanced push security is on); PUSH_ENABLED=false is the kill switch.
+  expo_access_token="${EXPO_ACCESS_TOKEN:-}"
+  if [[ -z "$expo_access_token" ]]; then
+    expo_access_token="$(read_env_value EXPO_ACCESS_TOKEN)"
+  fi
+  push_enabled="${PUSH_ENABLED:-}"
+  if [[ -z "$push_enabled" ]]; then
+    push_enabled="$(read_env_value PUSH_ENABLED)"
+  fi
+  push_enabled="${push_enabled:-false}"
+  # A false already on the box is a kill switch the workflow cannot undo.
+  [[ "$(read_env_value PUSH_ENABLED)" == "false" ]] && push_enabled=false
+
+  # FCM (Firebase Admin SDK, common-notify). The service-account key never
+  # touches this box's disk or .env: the services read it from AWS Secrets
+  # Manager with the EC2 instance role. Only the secret's NAME is carried here.
+  # Blank secret id = FCM sends are skipped (Expo tokens still work).
+  firebase_secret_id="${FIREBASE_CREDENTIALS_SECRET_ID:-}"
+  if [[ -z "$firebase_secret_id" ]]; then
+    firebase_secret_id="$(read_env_value FIREBASE_CREDENTIALS_SECRET_ID)"
+  fi
+  firebase_secret_region="${FIREBASE_CREDENTIALS_SECRET_REGION:-}"
+  if [[ -z "$firebase_secret_region" ]]; then
+    firebase_secret_region="$(read_env_value FIREBASE_CREDENTIALS_SECRET_REGION)"
+  fi
+  firebase_secret_region="${firebase_secret_region:-${aws_region:-ap-south-1}}"
+  fcm_enabled="${FCM_ENABLED:-}"
+  if [[ -z "$fcm_enabled" ]]; then
+    fcm_enabled="$(read_env_value FCM_ENABLED)"
+  fi
+  fcm_enabled="${fcm_enabled:-false}"
+  [[ "$(read_env_value FCM_ENABLED)" == "false" ]] && fcm_enabled=false
+
+  # BotBee WhatsApp booking confirmations (ticket-service). Same rule: the
+  # workflow's value when passed, else what is already on the box. Sending
+  # stays off unless BOTBEE_WHATSAPP_ENABLED=true (after Meta template approval).
+  botbee_api_key="${BOTBEE_API_KEY:-}"
+  if [[ -z "$botbee_api_key" ]]; then
+    botbee_api_key="$(read_env_value BOTBEE_API_KEY)"
+  fi
+  botbee_base_url="${BOTBEE_BASE_URL:-}"
+  if [[ -z "$botbee_base_url" ]]; then
+    botbee_base_url="$(read_env_value BOTBEE_BASE_URL)"
+  fi
+  botbee_base_url="${botbee_base_url:-https://nexa.botbee.io}"
+  botbee_channel_id="${BOTBEE_CHANNEL_ID:-}"
+  if [[ -z "$botbee_channel_id" ]]; then
+    botbee_channel_id="$(read_env_value BOTBEE_CHANNEL_ID)"
+  fi
+  botbee_enabled="${BOTBEE_WHATSAPP_ENABLED:-}"
+  if [[ -z "$botbee_enabled" ]]; then
+    botbee_enabled="$(read_env_value BOTBEE_WHATSAPP_ENABLED)"
+  fi
+  botbee_enabled="${botbee_enabled:-false}"
+  [[ "$(read_env_value BOTBEE_WHATSAPP_ENABLED)" == "false" ]] && botbee_enabled=false
+
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
 DB_HOST=$RDS_DB_HOST
 DB_PORT=$RDS_DB_PORT
@@ -108,6 +189,20 @@ AWS_REGION=$aws_region
 AWS_S3_BUCKET=$aws_bucket
 AWS_S3_BASE_URL=$aws_base_url
 GOOGLE_VISION_API_KEY=$google_vision_key
+RAZORPAY_KEY_ID=$rzp_key_id
+RAZORPAY_KEY_SECRET=$rzp_key_secret
+RAZORPAY_WEBHOOK_SECRET=$rzp_webhook_secret
+RAZORPAY_MODE=$rzp_mode
+
+EXPO_ACCESS_TOKEN=$expo_access_token
+PUSH_ENABLED=$push_enabled
+FIREBASE_CREDENTIALS_SECRET_ID=$firebase_secret_id
+FIREBASE_CREDENTIALS_SECRET_REGION=$firebase_secret_region
+FCM_ENABLED=$fcm_enabled
+BOTBEE_API_KEY=$botbee_api_key
+BOTBEE_BASE_URL=$botbee_base_url
+BOTBEE_CHANNEL_ID=$botbee_channel_id
+BOTBEE_WHATSAPP_ENABLED=$botbee_enabled
 JAVA_OPTS="-Xms64m -Xmx160m"
 SERVICES="$SERVICES_DEFAULT"
 EOF

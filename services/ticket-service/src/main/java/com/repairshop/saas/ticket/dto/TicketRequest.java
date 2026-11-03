@@ -126,4 +126,8 @@ public class TicketRequest {
     @Schema(description = "Create only: add this device to an existing booking (e.g. GTS-001). It gets " +
             "the next free suffix (GTS-001-B …) without consuming a new booking number.")
     private String bookingNumber;
+
+    @Schema(description = "Create only: the customer agreed to receive the booking confirmation on WhatsApp. " +
+            "Absent / false = no WhatsApp message (older app builds).")
+    private Boolean whatsappOptIn;
 }

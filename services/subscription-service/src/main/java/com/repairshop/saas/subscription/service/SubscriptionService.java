@@ -112,6 +112,13 @@ public class SubscriptionService {
         sub.setPriceAmount(total);
         sub.setStartedAt(sub.getStartedAt() != null ? sub.getStartedAt() : now);
         sub.setCurrentPeriodEnd(end);
+        // Back to a legacy (enum-governed) row: drop any Subscription v2 plan link.
+        sub.setPlanId(null);
+        sub.setPlanSnapshot(null);
+        sub.setOrderId(null);
+        sub.setSource("MANUAL");
+        sub.setCancelledAt(null);
+        sub.setCancelReason(null);
 
         return SubscriptionResponse.from(repository.save(sub));
     }

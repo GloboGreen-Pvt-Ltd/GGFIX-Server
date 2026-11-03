@@ -9,3 +9,8 @@ data/
 .env.*
 !.env.example
 *.log
+
+# Service-account keys never go into images.
+*firebase-adminsdk*.json
+*-adminsdk-*.json
+*service-account*.json

@@ -38,6 +38,14 @@ public interface MasterModelRepository extends JpaRepository<MasterModel, UUID> 
      */
     boolean existsByBrandIdAndNameIgnoreCase(UUID brandId, String name);
 
+    /** Same check on edit, excluding the model being edited. */
+    boolean existsByBrandIdAndNameIgnoreCaseAndIdNot(UUID brandId, String name, UUID id);
+
+    /** Slug uniqueness within a series, matching the uq_model_series_slug constraint. */
+    boolean existsBySeriesIdAndSlug(UUID seriesId, String slug);
+
+    boolean existsBySeriesIdAndSlugAndIdNot(UUID seriesId, String slug, UUID id);
+
     /**
      * How many models still point at one image URL. Read after a replacement commits,
      * to decide whether the superseded object can be deleted: an upload produces a

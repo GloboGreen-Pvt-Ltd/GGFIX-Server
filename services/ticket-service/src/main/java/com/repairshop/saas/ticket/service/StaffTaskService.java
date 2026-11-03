@@ -2,10 +2,14 @@ package com.repairshop.saas.ticket.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.repairshop.saas.common.notify.PushApp;
+import com.repairshop.saas.common.notify.PushService;
 import com.repairshop.saas.ticket.dto.StaffTaskDtos.*;
 import com.repairshop.saas.ticket.entity.StaffTask;
 import com.repairshop.saas.ticket.entity.StaffTaskAssignee;
+import com.repairshop.saas.ticket.entity.Technician;
 import com.repairshop.saas.ticket.repository.StaffTaskRepository;
+import com.repairshop.saas.ticket.repository.TechnicianRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -40,6 +44,10 @@ public class StaffTaskService {
 
     private final StaffTaskRepository repository;
     private final ObjectMapper objectMapper;
+    private final TechnicianRepository technicianRepository;
+    private final PushService pushService;
+    private final com.repairshop.saas.common.notify.ShopNotificationWriter shopNotifications;
+    private final com.repairshop.saas.common.notify.ShopPushService shopPush;
 
     // ---- Reads -----------------------------------------------------------------
 
@@ -100,12 +108,14 @@ public class StaffTaskService {
                 .build();
         replaceAssignees(t, assignees);
         appendHistory(t, "CREATED", "Assigned to " + names(t), "OWNER");
-        return toResponse(repository.save(t));
+        StaffTask saved = repository.save(t);
+        pushAssigned(saved, assigneeIds(saved), userId);
+        return toResponse(saved);
     }
 
     /** Only the fields sent change; schedule and assignee changes are logged as such. */
     @Transactional
-    public TaskResponse update(UUID shopId, UUID id, TaskRequest req) {
+    public TaskResponse update(UUID shopId, UUID id, UUID userId, TaskRequest req) {
         StaffTask t = load(shopId, id, null);
         boolean edited = false;
 
@@ -139,13 +149,19 @@ public class StaffTaskService {
             appendHistory(t, "RESCHEDULED", date + " " + start.format(HHMM) + " - " + end.format(HHMM), "OWNER");
         }
 
+        Set<UUID> newlyAssigned = new HashSet<>();
         if (req.getAssignees() != null) {
             if (req.getAssignees().isEmpty()) throw bad("Assign at least one employee.");
             String before = names(t);
+            Set<UUID> previous = assigneeIds(t);
             replaceAssignees(t, req.getAssignees());
             appendHistory(t, "REASSIGNED", before + " -> " + names(t), "OWNER");
+            newlyAssigned = assigneeIds(t);
+            newlyAssigned.removeAll(previous);
         }
-        return toResponse(repository.save(t));
+        StaffTask saved = repository.save(t);
+        pushAssigned(saved, newlyAssigned, userId);
+        return toResponse(saved);
     }
 
     @Transactional
@@ -169,7 +185,38 @@ public class StaffTaskService {
         t.setStatus(status);
         t.setIncompleteReason("INCOMPLETE".equals(status) ? note : null);
         appendHistory(t, status, note, technicianId == null ? "OWNER" : "EMPLOYEE");
-        return toResponse(repository.save(t));
+        TaskResponse saved = toResponse(repository.save(t));
+        if (technicianId != null) notifyShopOfEmployeeStatus(t, technicianId, status, note);
+        return saved;
+    }
+
+    // Partner App: an employee moved a task on (started / completed / could not
+    // complete) — the owner hears about it: a feed row (Team tab) and a push
+    // (kind STAFF_TASK, opens the task). After commit, on the push thread, so it
+    // can never undo the employee's status change.
+    private void notifyShopOfEmployeeStatus(StaffTask t, UUID technicianId, String status, String note) {
+        String who = technicianRepository.findByShopIdAndId(t.getShopId(), technicianId)
+                .map(Technician::getName).filter(n -> n != null && !n.isBlank()).map(String::trim)
+                .orElse("An employee");
+        String title = switch (status) {
+            case "IN_PROGRESS" -> "Task started";
+            case "COMPLETED" -> "Task completed";
+            case "INCOMPLETE" -> "Task not completed";
+            default -> "Task updated";
+        };
+        String body = who + " · " + t.getTitle() + ("INCOMPLETE".equals(status) && note != null ? " — " + note : "");
+        UUID shopId = t.getShopId();
+        String taskId = String.valueOf(t.getId());
+        shopPush.afterCommit(() -> {
+            UUID notificationId = shopNotifications.insert(shopId, "team", "STAFF_TASK_" + status, title, body,
+                    null, null, null);
+            Map<String, Object> data = new HashMap<>();
+            data.put("kind", "STAFF_TASK");
+            data.put("taskId", taskId);
+            data.put("notificationId", notificationId.toString());
+            data.put("statusKey", "STAFF_TASK_" + status);
+            shopPush.pushToShop(shopId, title, body, data);
+        });
     }
 
     @Transactional
@@ -195,6 +242,29 @@ public class StaffTaskService {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found.");
         }
         return t;
+    }
+
+    private static Set<UUID> assigneeIds(StaffTask t) {
+        return t.getAssignees().stream().map(StaffTaskAssignee::getTechnicianId)
+                .collect(Collectors.toCollection(HashSet::new));
+    }
+
+    // Employee app: each newly assigned employee hears about the task. Assignees
+    // hold technicians.id; technicians.user_id is the auth user id the device is
+    // registered under. Never the owner who made the change. Sent after commit.
+    private void pushAssigned(StaffTask t, Set<UUID> technicianIds, UUID actorUserId) {
+        if (technicianIds.isEmpty()) return;
+        List<UUID> userIds = new ArrayList<>();
+        for (UUID techId : technicianIds) {
+            technicianRepository.findByShopIdAndId(t.getShopId(), techId)
+                    .map(Technician::getUserId)
+                    .filter(u -> !u.equals(actorUserId))
+                    .ifPresent(userIds::add);
+        }
+        Map<String, Object> data = new HashMap<>();
+        data.put("kind", "TASK_ASSIGNED");
+        data.put("taskId", t.getId());
+        pushService.pushToUsers(PushApp.EMPLOYEE, userIds, "New task assigned", t.getTitle(), data);
     }
 
     private void replaceAssignees(StaffTask t, List<Assignee> list) {

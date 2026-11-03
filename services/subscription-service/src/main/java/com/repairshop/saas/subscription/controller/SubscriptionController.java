@@ -5,11 +5,14 @@ import com.repairshop.saas.subscription.dto.ActivateRequest;
 import com.repairshop.saas.subscription.dto.PlanCatalog;
 import com.repairshop.saas.subscription.dto.QuoteResponse;
 import com.repairshop.saas.subscription.dto.SubscriptionResponse;
+import com.repairshop.saas.subscription.security.CurrentUser;
+import com.repairshop.saas.subscription.service.AuditService;
 import com.repairshop.saas.subscription.service.SubscriptionService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -20,6 +23,8 @@ import java.util.UUID;
 public class SubscriptionController {
 
     private final SubscriptionService service;
+    private final CurrentUser currentUser;
+    private final AuditService audit;
 
     /** All subscriptions (admin list). */
     @GetMapping("")
@@ -70,10 +75,20 @@ public class SubscriptionController {
         return service.quote(shops);
     }
 
-    /** Record-only BASIC activation (no payment gateway). */
+    /**
+     * Record-only BASIC activation (no payment gateway). Platform admins only
+     * since Subscription v2: owners now pay through /purchase + Razorpay.
+     */
     @PostMapping("/activate")
     public SubscriptionResponse activate(@RequestBody ActivateRequest request) {
-        return service.activateBasic(request.getOwnerUserId(), request.getShopCount());
+        CurrentUser.Actor actor = currentUser.requireAdmin();
+        SubscriptionResponse response = service.activateBasic(request.getOwnerUserId(), request.getShopCount());
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("ownerUserId", request.getOwnerUserId());
+        details.put("shopCount", request.getShopCount());
+        audit.log(actor, "LEGACY_BASIC_ACTIVATED", "SUBSCRIPTION",
+                response.getId() == null ? null : response.getId().toString(), details);
+        return response;
     }
 
     /** Record-only phase: no payments captured. Kept so the admin payments tab loads. */

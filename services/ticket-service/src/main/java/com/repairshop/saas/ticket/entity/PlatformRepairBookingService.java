@@ -17,6 +17,8 @@ public class PlatformRepairBookingService {
     @Column(name = "service_code", length = 50) private String serviceCode;
     @Column(name = "service_name", length = 255) private String serviceName;
     @Column(name = "estimated_price", precision = 12, scale = 2) private BigDecimal estimatedPrice;
+    /** Per-service warranty text, e.g. "3 Months" (migration 25). */
+    @Column(name = "warranty", length = 20) private String warranty;
     @Column(name = "created_at", nullable = false, updatable = false) private Instant createdAt;
 
     @PrePersist void prePersist() { if (createdAt == null) createdAt = Instant.now(); }

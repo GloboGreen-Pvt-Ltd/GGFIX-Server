@@ -2,6 +2,8 @@ package com.repairshop.saas.subscription.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -87,6 +89,31 @@ public class Subscription {
 
     @Column(name = "current_period_end")
     private Instant currentPeriodEnd;
+
+    // ── Subscription v2 (migration 106; all nullable, null on legacy rows) ──
+
+    /** subscription_plans.id of the plan this term was bought on. */
+    @Column(name = "plan_id")
+    private UUID planId;
+
+    /** subscription_orders.id that produced the current term. */
+    @Column(name = "order_id")
+    private UUID orderId;
+
+    /** The Plan JSON at purchase time; later plan edits never touch it. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "plan_snapshot")
+    private String planSnapshot;
+
+    /** RAZORPAY | TRIAL | MANUAL. */
+    @Column(name = "source", length = 20)
+    private String source;
+
+    @Column(name = "cancelled_at")
+    private Instant cancelledAt;
+
+    @Column(name = "cancel_reason", columnDefinition = "TEXT")
+    private String cancelReason;
 
     @Column(name = "created_at", updatable = false)
     private Instant createdAt;

@@ -29,6 +29,9 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/swagger-ui/**", "/api-docs/**", "/v3/api-docs/**").permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                        // Invoice PDF for BotBee's WhatsApp document header: no JWT, the
+                        // HMAC signature + ≤60-minute expiry in the query string is the auth.
+                        .requestMatchers(HttpMethod.GET, "/subscriptions/invoices/public/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/subscriptions/**").permitAll()
                         // Keep the surface permissive for this record-only phase so
                         // admin + mobile POST /activate calls work without a strict

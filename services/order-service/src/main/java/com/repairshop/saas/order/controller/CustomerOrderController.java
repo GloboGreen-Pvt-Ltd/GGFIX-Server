@@ -2,6 +2,8 @@ package com.repairshop.saas.order.controller;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.repairshop.saas.common.notify.PushApp;
+import com.repairshop.saas.common.notify.PushService;
 import com.repairshop.saas.order.dto.CustomerOrderResponse;
 import com.repairshop.saas.order.entity.CustomerNotification;
 import com.repairshop.saas.order.entity.CustomerOrder;
@@ -33,6 +35,7 @@ public class CustomerOrderController {
     private final CustomerNotificationRepository notificationRepo;
     private final RepairBookingEventRepository eventRepo;
     private final ObjectMapper objectMapper;
+    private final PushService pushService;
 
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -162,7 +165,7 @@ public class CustomerOrderController {
                 .payloadJson(payloadJson)
                 .build());
 
-        notificationRepo.save(CustomerNotification.builder()
+        CustomerNotification n = notificationRepo.save(CustomerNotification.builder()
                 .customerUserId(userId)
                 .bookingNumber(orderNumber)
                 .statusKey("ORDER_PLACED")
@@ -171,6 +174,14 @@ public class CustomerOrderController {
                 .type("orders")
                 .read(false)
                 .build());
+        // Same title/body on the customer's phone.
+        Map<String, Object> pushData = new HashMap<>();
+        pushData.put("kind", "ORDER");
+        pushData.put("notificationId", n.getId());
+        pushData.put("orderId", o.getId());
+        pushData.put("orderNumber", orderNumber);
+        pushData.put("statusKey", "ORDER_PLACED");
+        pushService.pushToUser(PushApp.CUSTOMER, userId, n.getTitle(), n.getBody(), pushData);
 
         return ResponseEntity.ok(toResponse(o));
     }

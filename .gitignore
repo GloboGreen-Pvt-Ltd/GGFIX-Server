@@ -4,6 +4,13 @@
 
 # env & secrets
 .env
+# Firebase / Google service-account keys — never commit; use
+# GOOGLE_APPLICATION_CREDENTIALS locally and AWS Secrets Manager in production.
+*firebase-adminsdk*.json
+*-adminsdk-*.json
+*service-account*.json
+*serviceAccount*.json
+google-application-credentials*.json
 
 # local H2 data
 data/

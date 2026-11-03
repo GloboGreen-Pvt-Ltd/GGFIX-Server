@@ -3,11 +3,13 @@ package com.repairshop.saas.ticket.controller;
 import com.repairshop.saas.ticket.dto.CreateRepairNoteRequest;
 import com.repairshop.saas.ticket.dto.CreateSolutionPackRequest;
 import com.repairshop.saas.ticket.dto.ImeiAvailabilityResponse;
+import com.repairshop.saas.ticket.dto.ReEstimateRevisionDtos;
 import com.repairshop.saas.ticket.dto.RepairNoteResponse;
 import com.repairshop.saas.ticket.dto.SolutionPackResponse;
 import com.repairshop.saas.ticket.dto.TicketEventResponse;
 import com.repairshop.saas.ticket.dto.TicketRequest;
 import com.repairshop.saas.ticket.dto.TicketResponse;
+import com.repairshop.saas.ticket.service.ReEstimateWorkflowService;
 import com.repairshop.saas.ticket.service.TicketService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -34,15 +36,34 @@ import java.util.UUID;
 public class TicketController {
 
     private final TicketService ticketService;
+    private final ReEstimateWorkflowService reEstimateWorkflow;
+    private final com.repairshop.saas.ticket.whatsapp.WhatsAppNotificationService whatsApp;
 
     private UUID shopIdFrom(HttpServletRequest request) {
         String sid = (String) request.getAttribute("shopId");
         return sid != null ? UUID.fromString(sid) : null;
     }
 
+    private static List<?> rolesFrom(HttpServletRequest request) {
+        Object raw = request.getAttribute("roles");
+        return raw instanceof List<?> roles ? roles : List.of();
+    }
+
     private UUID userIdFrom(HttpServletRequest request) {
         String uid = (String) request.getAttribute("userId");
         return uid != null ? UUID.fromString(uid) : null;
+    }
+
+    // OWNER when the caller is the shop owner — an owner or SHOP-login token,
+    // both of which carry the SHOP_OWNER role. The service keeps the steps such
+    // a change implies off the owner's own notification feed and phone; an
+    // employee-app (technician) caller still notifies the owner as before.
+    private String ownerActorFrom(HttpServletRequest request) {
+        Object raw = request.getAttribute("roles");
+        boolean owner = raw instanceof List<?> roles
+                && roles.stream().anyMatch(r -> "SHOP_OWNER".equals(
+                        String.valueOf(r).trim().toUpperCase(Locale.ROOT).replaceFirst("^ROLE_", "")));
+        return owner ? "OWNER" : null;
     }
 
     @GetMapping("/counts")
@@ -58,7 +79,8 @@ public class TicketController {
     public TicketResponse getById(@PathVariable UUID id, HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        return ticketService.getById(shopId, id);
+        reconcileQuietly(shopId, id);
+        return reEstimateWorkflow.decorate(ticketService.getById(shopId, id));
     }
 
     @GetMapping("/customer/{id}")
@@ -75,6 +97,7 @@ public class TicketController {
     public List<TicketEventResponse> getEvents(@PathVariable UUID id, HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        reconcileQuietly(shopId, id);
         return ticketService.getEventsForShop(shopId, id);
     }
 
@@ -112,7 +135,11 @@ public class TicketController {
     public TicketResponse create(@Valid @RequestBody TicketRequest body, HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        return ticketService.create(shopId, body);
+        TicketResponse created = ticketService.create(shopId, body);
+        // The booking has committed: queue its WhatsApp confirmation (one per
+        // booking, sent later by the outbox worker). Never fails the booking.
+        whatsApp.enqueueBookingConfirmed(shopId, created.getId(), body.getWhatsappOptIn());
+        return created;
     }
 
     @PutMapping("/{id}")
@@ -134,7 +161,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        return ticketService.patch(shopId, id, body);
+        return ticketService.patch(shopId, id, body, ownerActorFrom(request), userIdFrom(request));
     }
 
     @PostMapping("/{id}/re-estimate")
@@ -145,7 +172,8 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        return ticketService.reEstimate(shopId, id, body);
+        ReEstimateWorkflowService.requireShopRole(rolesFrom(request));
+        return ticketService.reEstimate(shopId, id, body, userIdFrom(request));
     }
 
     @PostMapping("/{id}/price-revision")
@@ -167,7 +195,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        ticketService.updateStatus(shopId, id, status);
+        ticketService.updateStatus(shopId, id, status, ownerActorFrom(request));
     }
 
     @PostMapping("/{id}/reopen")
@@ -281,6 +309,70 @@ public class TicketController {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         ticketService.emitProgressStepEvent(shopId, id, body.getStatusKey(), body.getNote(), body.getActor());
+    }
+
+    // ---------- Re-estimate workflow (ReEstimateWorkflowService) ---------
+
+    /** Read paths must not fail on the approval self-heal — the next read retries it. */
+    private void reconcileQuietly(UUID shopId, UUID id) {
+        try { reEstimateWorkflow.reconcile(shopId, id); }
+        catch (Exception e) { org.slf4j.LoggerFactory.getLogger(TicketController.class)
+                .warn("re-estimate reconcile failed for ticket {}: {}", id, e.getMessage()); }
+    }
+
+    @PostMapping("/{id}/re-estimate-requests")
+    @ResponseStatus(HttpStatus.CREATED)
+    @Operation(summary = "Assigned technician requests a re-estimate (additional issue / proposed amount)")
+    public ReEstimateRevisionDtos.Revision requestReEstimate(
+            @PathVariable UUID id,
+            @RequestBody ReEstimateRevisionDtos.TechnicianRequest body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return reEstimateWorkflow.requestReEstimate(shopId, userIdFrom(request), rolesFrom(request), id, body);
+    }
+
+    @GetMapping("/{id}/re-estimates")
+    @Operation(summary = "Re-estimate history (all revisions, newest first) — owner/shop or the assigned technician")
+    public List<ReEstimateRevisionDtos.Revision> listReEstimates(@PathVariable UUID id, HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return reEstimateWorkflow.list(shopId, userIdFrom(request), rolesFrom(request), id);
+    }
+
+    @PostMapping("/{id}/re-estimates/{revisionId}/decision")
+    @Operation(summary = "Record the customer's decision on a re-estimate awaiting approval (APPROVED | REJECTED) — owner/shop only")
+    public ReEstimateRevisionDtos.Revision decideReEstimate(
+            @PathVariable UUID id,
+            @PathVariable UUID revisionId,
+            @RequestBody ReEstimateRevisionDtos.Decision body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return reEstimateWorkflow.decide(shopId, userIdFrom(request), rolesFrom(request), id, revisionId, body);
+    }
+
+    @PostMapping("/{id}/re-estimate-requests/{revisionId}/dismiss")
+    @Operation(summary = "Decline a technician's re-estimate request without re-estimating — owner/shop only")
+    public ReEstimateRevisionDtos.Revision dismissReEstimateRequest(
+            @PathVariable UUID id,
+            @PathVariable UUID revisionId,
+            @RequestBody(required = false) ReEstimateRevisionDtos.Reason body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return reEstimateWorkflow.dismiss(shopId, userIdFrom(request), rolesFrom(request), id, revisionId, body);
+    }
+
+    @PostMapping("/{id}/re-estimates/{revisionId}/acknowledge")
+    @Operation(summary = "Assigned technician acknowledges the re-estimate outcome (idempotent)")
+    public ReEstimateRevisionDtos.Revision acknowledgeReEstimate(
+            @PathVariable UUID id,
+            @PathVariable UUID revisionId,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return reEstimateWorkflow.acknowledge(shopId, userIdFrom(request), id, revisionId);
     }
 
     @lombok.Data

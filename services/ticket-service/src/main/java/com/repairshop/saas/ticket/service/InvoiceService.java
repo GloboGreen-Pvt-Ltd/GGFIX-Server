@@ -55,11 +55,14 @@ public class InvoiceService {
     private final ShopLedgerPartyRepository ledgerPartyRepository;
     private final ShopLedgerEntryRepository ledgerEntryRepository;
     private final TicketService ticketService;
+    private final ReEstimateWorkflowService reEstimateWorkflow;
 
     @Transactional
     public InvoiceResponse upsert(UUID ticketId, InvoiceRequest req, UUID generatedBy) {
         Ticket ticket = ticketRepository.findById(ticketId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Ticket not found"));
+        // No bill while a re-estimate is open — the price isn't settled yet (409 REESTIMATE_PENDING).
+        reEstimateWorkflow.assertNoOpenRevision(ticket);
 
         Invoice inv = invoiceRepository.findByTicketId(ticketId).orElseGet(Invoice::new);
         inv.setTicketId(ticketId);

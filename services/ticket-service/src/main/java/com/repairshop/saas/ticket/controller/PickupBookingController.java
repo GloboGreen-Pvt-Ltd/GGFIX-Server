@@ -1,5 +1,7 @@
 package com.repairshop.saas.ticket.controller;
 
+import com.repairshop.saas.common.notify.PushApp;
+import com.repairshop.saas.common.notify.PushService;
 import com.repairshop.saas.ticket.entity.Technician;
 import com.repairshop.saas.ticket.repository.TechnicianRepository;
 import com.repairshop.saas.ticket.service.TicketNumberService;
@@ -52,6 +54,9 @@ public class PickupBookingController {
     private final TechnicianRepository technicianRepository;
     private final JdbcTemplate jdbc;
     private final TicketNumberService ticketNumberService;
+    private final PushService pushService;
+    private final com.repairshop.saas.common.notify.ShopNotificationWriter shopNotifications;
+    private final com.repairshop.saas.common.notify.ShopPushService shopPush;
 
     // Diagnostic ping — hit this in the browser to confirm the new controller
     // is loaded into the JVM. If this 200s but /me/pickup-bookings 500s, the
@@ -597,20 +602,45 @@ public class PickupBookingController {
             // this throws (e.g. table missing in some dev DB).
             if (customerUserStr != null) {
                 try {
+                    UUID notificationId = UUID.randomUUID();
+                    String notifBody = "Booking " + bookingNumber + " — " + labelFor(target);
                     jdbc.update(
                             "INSERT INTO customer_notifications " +
                                     "(id, customer_user_id, booking_id, booking_number, status_key, title, body, type, is_read, created_at) " +
                                     "VALUES (CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), ?, ?, ?, ?, 'orders', false, now())",
-                            UUID.randomUUID().toString(),
+                            notificationId.toString(),
                             customerUserStr,
                             id.toString(),
                             bookingNumber,
                             target,
                             labelFor(target),
-                            "Booking " + bookingNumber + " — " + labelFor(target));
+                            notifBody);
+                    pushToCustomer(customerUserStr, notificationId, id, bookingNumber, mintedTicketId,
+                            target, labelFor(target), notifBody);
                 } catch (Exception e) {
                     log.warn("pickup-status: notification INSERT failed for {}: {}", id, e.getMessage());
                 }
+            }
+
+            // Shop owner — the pickup person moved this booking on: a feed row
+            // (Pickup tab) + a push to the Partner App (kind PICKUP). Best-effort.
+            try {
+                String who = me.getName() == null || me.getName().isBlank() ? "Pickup person" : me.getName().trim();
+                String shopTitle = labelFor(target);
+                String shopBody = who + " · Booking " + bookingNumber + " — " + labelFor(target);
+                UUID ticketUuid = mintedTicketId == null ? null : UUID.fromString(mintedTicketId);
+                UUID shopNotificationId = shopNotifications.insert(shopId, "pickups", target, shopTitle, shopBody,
+                        id, bookingNumber, ticketUuid);
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("kind", "PICKUP");
+                data.put("notificationId", shopNotificationId.toString());
+                data.put("bookingId", id.toString());
+                if (mintedTicketId != null) data.put("ticketId", mintedTicketId);
+                data.put("bookingNumber", bookingNumber);
+                data.put("statusKey", target);
+                shopPush.pushToShop(shopId, shopTitle, shopBody, data);
+            } catch (Exception e) {
+                log.warn("pickup-status: shop notification failed for {}: {}", id, e.getMessage());
             }
 
             log.info("pickup-status: shop={} tech={} booking={} {} -> {} (distance={}m)",
@@ -1450,7 +1480,7 @@ public class PickupBookingController {
         List<Map<String, Object>> rows;
         try {
             rows = jdbc.query(
-                    "SELECT id, service_code, service_name, repair_service_id, estimated_price " +
+                    "SELECT id, service_code, service_name, repair_service_id, estimated_price, warranty " +
                             "FROM repair_booking_services WHERE booking_id = CAST(? AS UUID) ORDER BY created_at ASC",
                     (rs, rn) -> {
                         Map<String, Object> r = new LinkedHashMap<>();
@@ -1460,6 +1490,10 @@ public class PickupBookingController {
                         r.put("repairServiceId", rs.getString("repair_service_id"));
                         BigDecimal price = rs.getBigDecimal("estimated_price");
                         if (price != null) r.put("amount", price);
+                        // The pickup estimate's per-service warranty — the invoice /
+                        // receipt lines read it from the ticket's price items.
+                        String warranty = rs.getString("warranty");
+                        if (warranty != null && !warranty.isBlank()) r.put("warranty", warranty);
                         return r;
                     },
                     bookingId.toString());
@@ -1595,20 +1629,38 @@ public class PickupBookingController {
         String customerUserStr = stringFrom(booking, "customer_user_id");
         if (customerUserStr == null) return;
         try {
+            UUID notificationId = UUID.randomUUID();
             jdbc.update(
                     "INSERT INTO customer_notifications " +
                             "(id, customer_user_id, booking_id, booking_number, status_key, title, body, type, is_read, created_at) " +
                             "VALUES (CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), ?, ?, ?, ?, 'orders', false, now())",
-                    UUID.randomUUID().toString(),
+                    notificationId.toString(),
                     customerUserStr,
                     bookingId.toString(),
                     stringFrom(booking, "booking_number"),
                     status,
                     title,
                     body);
+            pushToCustomer(customerUserStr, notificationId, bookingId, stringFrom(booking, "booking_number"),
+                    null, status, title, body);
         } catch (Exception e) {
             log.warn("pickup-notification: insert failed for {}: {}", bookingId, e.getMessage());
         }
+    }
+
+    // Same title/body as the customer_notifications row, on the customer's
+    // phone (customer_user_id is the auth user id). Sent after commit.
+    // Package-private — see ShopPickupBookingController.
+    void pushToCustomer(String customerUserStr, UUID notificationId, UUID bookingId, String bookingNumber,
+                        String ticketId, String statusKey, String title, String body) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("kind", "BOOKING_STATUS");
+        data.put("notificationId", notificationId);
+        data.put("bookingId", bookingId);
+        data.put("bookingNumber", bookingNumber);
+        data.put("ticketId", ticketId);
+        data.put("statusKey", statusKey);
+        pushService.pushToUser(PushApp.CUSTOMER, UUID.fromString(customerUserStr), title, body, data);
     }
 
     private Map<String, Object> loadBookingSnapshot(UUID id) {

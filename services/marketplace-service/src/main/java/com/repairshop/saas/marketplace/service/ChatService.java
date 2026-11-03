@@ -1,5 +1,7 @@
 package com.repairshop.saas.marketplace.service;
 
+import com.repairshop.saas.common.notify.ShopNotificationWriter;
+import com.repairshop.saas.common.notify.ShopPushService;
 import com.repairshop.saas.marketplace.dto.ChatMessageResponse;
 import com.repairshop.saas.marketplace.dto.ChatSendRequest;
 import com.repairshop.saas.marketplace.dto.ChatThreadResponse;
@@ -16,8 +18,13 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Single source of truth for chat behaviour, shared by ChatController
@@ -34,9 +41,17 @@ public class ChatService {
     // Counterpart is "online" if last_seen_at within this window.
     private static final Duration ONLINE_WINDOW = Duration.ofSeconds(60);
 
+    // First line of a Customer-app buy order message ("🛒 New order #ORD123").
+    // Same rule as the Partner app's utils/buyOrders.js (ORDER_HEAD) — keep the
+    // two in step, or a message the app lists as an order is pushed as chat.
+    private static final Pattern ORDER_HEAD = Pattern.compile(
+            "^\uD83D\uDED2\\s*New order\\s*(#\\S+)?", Pattern.UNICODE_CHARACTER_CLASS);
+
     private final CustomerChatThreadRepository threadRepo;
     private final CustomerChatMessageRepository msgRepo;
     private final ChatSnapshotService snapshots;
+    private final ShopPushService shopPush;
+    private final ShopNotificationWriter shopNotifications;
 
     // -------------------------------------------------------------- thread ops
 
@@ -108,6 +123,13 @@ public class ChatService {
 
     @Transactional
     public CustomerChatMessage send(UUID threadId, Side from, ChatSendRequest body) {
+        return send(threadId, from, body, null);
+    }
+
+    /** {@code senderShopId}: the sending account's own shop, when its token
+     *  carries one — that shop is never notified about its own message. */
+    @Transactional
+    public CustomerChatMessage send(UUID threadId, Side from, ChatSendRequest body, UUID senderShopId) {
         if ((body.getBody() == null || body.getBody().isBlank())
             && (body.getAttachmentUrl() == null || body.getAttachmentUrl().isBlank())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Empty message");
@@ -134,7 +156,57 @@ public class ChatService {
             t.setShopTypingUntil(null);
         }
         threadRepo.save(t);
+        if (from == Side.CUSTOMER) notifyShop(t, m, body, senderShopId);
         return m;
+    }
+
+    /**
+     * Partner app alert for a message the shop received. A buy order message
+     * (see ORDER_HEAD) gets a "buy" feed row plus a BUY_ORDER push; anything
+     * else is a CHAT push only — the Chats tab's unread badge already covers
+     * plain messages in-app. Both go out after this transaction commits; the
+     * feed row is written then too, so it can never fail the message itself.
+     */
+    private void notifyShop(CustomerChatThread t, CustomerChatMessage m, ChatSendRequest body, UUID senderShopId) {
+        UUID shopId = t.getShopId();
+        if (shopId == null || shopId.equals(senderShopId)) return;
+        String sender = t.getCustomerName() != null && !t.getCustomerName().isBlank()
+                ? t.getCustomerName().trim() : "Customer";
+        Map<String, Object> data = new HashMap<>();
+        data.put("threadId", String.valueOf(t.getId()));
+        data.put("messageId", String.valueOf(m.getId()));
+        data.put("senderName", sender);
+
+        List<String> lines = Arrays.stream(String.valueOf(m.getBody()).split("\n")).map(String::trim).toList();
+        Matcher head = ORDER_HEAD.matcher(lines.get(0));
+        if (!head.find()) {
+            data.put("kind", "CHAT");
+            String preview = buildPreview(body);
+            if (preview.length() > 100) preview = preview.substring(0, 99) + "…";
+            shopPush.pushToShop(shopId, "New message from " + sender, preview, data);
+            return;
+        }
+
+        String orderNo = head.group(1);
+        List<String> titles = lines.stream().filter(l -> l.startsWith("•"))
+                .map(l -> l.replaceFirst("^•\\s*", "").replaceFirst("\\s×\\s.*$", "").trim())
+                .filter(x -> !x.isEmpty()).toList();
+        String buyer = lines.stream().filter(l -> l.startsWith("Buyer:"))
+                .map(l -> l.substring("Buyer:".length()).trim()).filter(x -> !x.isEmpty())
+                .findFirst().orElse(sender);
+        String item = titles.isEmpty() ? "an item"
+                : titles.get(0) + (titles.size() > 1 ? " +" + (titles.size() - 1) + " more" : "");
+        String title = "New order placed";
+        String text = buyer + " ordered " + item + (orderNo != null ? " (" + orderNo + ")" : "") + ".";
+        data.put("kind", "BUY_ORDER");
+        if (orderNo != null) data.put("orderNumber", orderNo);
+        if (!titles.isEmpty()) data.put("productTitle", titles.get(0));
+        shopPush.afterCommit(() -> {
+            UUID notificationId = shopNotifications.insert(shopId, "buy", "BUY_ORDER_PLACED",
+                    title, text, null, orderNo, null);
+            data.put("notificationId", notificationId.toString());
+            shopPush.pushToShop(shopId, title, text, data);
+        });
     }
 
     /** Mark messages from the other side as read; zero this side's unread. */

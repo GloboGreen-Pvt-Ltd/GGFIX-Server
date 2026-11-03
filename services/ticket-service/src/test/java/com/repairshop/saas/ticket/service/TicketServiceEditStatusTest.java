@@ -46,6 +46,7 @@ class TicketServiceEditStatusTest {
     @Mock com.repairshop.saas.ticket.repository.InvoiceRepository invoiceRepository;
     @Mock CustomerOrderMirrorService customerOrderMirrorService;
     @Mock TicketNumberService ticketNumberService;
+    @Mock ReEstimateWorkflowService reEstimateWorkflow;
 
     @InjectMocks TicketService service;
 

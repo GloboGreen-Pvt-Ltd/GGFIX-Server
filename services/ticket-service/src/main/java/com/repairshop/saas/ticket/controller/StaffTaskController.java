@@ -112,7 +112,8 @@ public class StaffTaskController {
     @PatchMapping("/{id}")
     public TaskResponse update(@PathVariable UUID id, @RequestBody TaskRequest body, HttpServletRequest request) {
         requireOwner(request);
-        return service.update(shopIdFrom(request), id, body);
+        String uid = (String) request.getAttribute("userId");
+        return service.update(shopIdFrom(request), id, uid == null ? null : UUID.fromString(uid), body);
     }
 
     @Operation(summary = "Set status (owner any; assigned employee IN_PROGRESS / COMPLETED / INCOMPLETE)")

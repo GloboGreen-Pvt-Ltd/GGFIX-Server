@@ -63,6 +63,9 @@ public class TicketService {
     private final InvoiceRepository invoiceRepository;
     private final CustomerOrderMirrorService customerOrderMirrorService;
     private final TicketNumberService ticketNumberService;
+    private final ReEstimateWorkflowService reEstimateWorkflow;
+    private final com.repairshop.saas.common.notify.ShopPushService shopPush;
+    private final com.repairshop.saas.common.notify.PushService pushService;
 
     @Transactional
     public TicketResponse getById(UUID shopId, UUID id) {
@@ -78,10 +81,15 @@ public class TicketService {
         // read in parallel with getEventsForShop, and both call mirrorOnUpsert
         // in REQUIRES_NEW transactions. A transient race (optimistic lock)
         // must not break the primary read — the next mirror run will heal it.
-        try { customerOrderMirrorService.mirrorOnUpsert(t); }
-        catch (Exception e) { log.error("mirrorOnUpsert failed for ticket {}", id, e); }
-        try { syncStepEventsFromTicketState(t); }
-        catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", id, e); }
+        //
+        // quiet(): whatever this self-heal back-fills already happened, possibly
+        // days ago — it still gets its feed row, but no phone push.
+        try (var quiet = shopPush.quiet()) {
+            try { customerOrderMirrorService.mirrorOnUpsert(t); }
+            catch (Exception e) { log.error("mirrorOnUpsert failed for ticket {}", id, e); }
+            try { syncStepEventsFromTicketState(t); }
+            catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", id, e); }
+        }
         return toResponse(t);
     }
 
@@ -99,11 +107,14 @@ public class TicketService {
         // Same self-heal as getById: create the booking mirror if missing so
         // walk-in tickets gain a timeline on first view. Errors here are
         // caught + logged so a bad mirror state doesn't 500 the whole events
-        // endpoint — we still try to return whatever events exist.
-        try { customerOrderMirrorService.mirrorOnUpsert(t); }
-        catch (Exception e) { log.error("mirrorOnUpsert failed for ticket {}", ticketId, e); }
-        try { syncStepEventsFromTicketState(t); }
-        catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", ticketId, e); }
+        // endpoint — we still try to return whatever events exist. Quiet for the
+        // same reason as getById: back-filled steps are not news.
+        try (var quiet = shopPush.quiet()) {
+            try { customerOrderMirrorService.mirrorOnUpsert(t); }
+            catch (Exception e) { log.error("mirrorOnUpsert failed for ticket {}", ticketId, e); }
+            try { syncStepEventsFromTicketState(t); }
+            catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", ticketId, e); }
+        }
         return platformRepairBookingRepository.findByTicketId(t.getId())
                 .map(b -> platformRepairBookingEventRepository
                         .findCurrentCycle(b.getId())
@@ -448,6 +459,12 @@ public class TicketService {
      */
     @Transactional
     public TicketResponse reEstimate(UUID shopId, UUID id, com.repairshop.saas.ticket.dto.ReEstimateRequest req) {
+        return reEstimate(shopId, id, req, null);
+    }
+
+    /** As above, recording who submitted it on the re-estimate revision (ReEstimateWorkflowService). */
+    @Transactional
+    public TicketResponse reEstimate(UUID shopId, UUID id, com.repairshop.saas.ticket.dto.ReEstimateRequest req, UUID submittedBy) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
         if (hasCurrentInvoice(ticket.getId())) {
@@ -457,6 +474,9 @@ public class TicketService {
         if (reason.length() < 3) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Add the reason for the extra work");
         }
+        // Re-estimate workflow: 409 while another revision awaits approval; snapshot the price + scope
+        // a rejection restores; link the technician's open request (req.requestId).
+        ReEstimateWorkflowService.PendingRevision revision = reEstimateWorkflow.openPartnerRevision(ticket, req.getRequestId());
         java.util.List<java.util.Map<String, Object>> items = parsePriceItemList(ticket.getPriceItemsJson());
         java.util.Set<String> keys = new java.util.HashSet<>();
         for (java.util.Map<String, Object> it : items) keys.add(priceItemIdentity(it));
@@ -512,7 +532,7 @@ public class TicketService {
         ticket.setCustomerApproval(approvedNow ? Boolean.TRUE : null);
         recomputeBalance(ticket);
         ticket = ticketRepository.save(ticket);
-        customerOrderMirrorService.mirrorOnUpsert(ticket);
+        customerOrderMirrorService.mirrorOnUpsertInline(ticket);
 
         String note = "Re-estimated: ₹" + oldTotal.stripTrailingZeros().toPlainString()
                 + " + ₹" + extra.stripTrailingZeros().toPlainString()
@@ -528,6 +548,7 @@ public class TicketService {
                 .isInternal(true)
                 .imagesJson(images)
                 .build());
+        reEstimateWorkflow.recordPartnerSubmission(revision, ticket, submittedBy, added, extra, newTotal, reason, images);
         markReEstimated(ticket);
         if (approvedNow) {
             onCustomerApproved(ticket, "SHOP");
@@ -578,6 +599,7 @@ public class TicketService {
         if (hasCurrentInvoice(ticket.getId())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Invoice already generated — revise the price on the invoice");
         }
+        reEstimateWorkflow.assertNoPendingApproval(ticket);
         String reason = req == null || req.getReason() == null ? "" : req.getReason().trim();
         String notes = req == null || req.getNotes() == null ? "" : req.getNotes().trim();
         if (reason.isEmpty()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Select the reason for the revision");
@@ -679,14 +701,18 @@ public class TicketService {
         return n.stripTrailingZeros().toPlainString();
     }
 
+    /** {@code actor} is OWNER when the shop owner (or a SHOP login) set the
+     *  status from their own app, so the step it implies is not announced back
+     *  to them in their feed or as a push; null otherwise. */
     @Transactional
-    public void updateStatus(UUID shopId, UUID id, String status) {
+    public void updateStatus(UUID shopId, UUID id, String status, String actor) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        reEstimateWorkflow.onProgressStep(ticket, status);
         ticket.setStatus(status);
         ticket = ticketRepository.save(ticket);
-        customerOrderMirrorService.mirrorOnUpsert(ticket);
-        emitStepEventsForTicketStatus(ticket.getId(), status);
+        customerOrderMirrorService.mirrorOnUpsert(ticket, actor);
+        emitStepEventsForTicketStatus(ticket.getId(), status, actor);
     }
 
     /**
@@ -731,6 +757,21 @@ public class TicketService {
      */
     @Transactional
     public TicketResponse patch(UUID shopId, UUID id, Map<String, Object> body) {
+        return patch(shopId, id, body, null);
+    }
+
+    /** {@code actor} as in {@link #updateStatus}: OWNER keeps the steps this
+     *  patch implies off the owner's own feed and phone. */
+    @Transactional
+    public TicketResponse patch(UUID shopId, UUID id, Map<String, Object> body, String actor) {
+        return patch(shopId, id, body, actor, null);
+    }
+
+    /** {@code callerUserId}: who sent the patch, so a technician is never
+     *  pushed about an assignment they made themselves. */
+    @Transactional
+    public TicketResponse patch(UUID shopId, UUID id, Map<String, Object> body, String actor,
+                                UUID callerUserId) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
 
@@ -757,6 +798,7 @@ public class TicketService {
         // delivery schedule are NOT in this list — those have their own actions.
         patchText(body, "customerName", ticket::setCustomerName);
         patchText(body, "customerPhone", ticket::setCustomerPhone);
+        patchText(body, "customerAddress", ticket::setCustomerAddress);
         patchUuid(body, "brandId", ticket::setBrandId);
         patchUuid(body, "modelId", ticket::setModelId);
         patchUuid(body, "ramOptionId", ticket::setRamOptionId);
@@ -851,7 +893,7 @@ public class TicketService {
         // that has never been through a payment-aware write.
         recomputeBalance(ticket);
         ticket = ticketRepository.save(ticket);
-        customerOrderMirrorService.mirrorOnUpsert(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket, actor);
 
         // After the mirror has ensured the booking row exists, drop a
         // TECH_UPLOADED_IMAGES event so the customer/owner Service History
@@ -860,13 +902,13 @@ public class TicketService {
         // is rendered the same way on the owner side.
         if (photosBecameNonEmpty) {
             emitBookingEvent(ticket.getId(), "TECHNICIAN_UPLOADED_DEVICE_IMAGES",
-                    "Technician Uploaded Device Images", "TECHNICIAN");
+                    "Technician Uploaded Device Images", "TECHNICIAN", actor);
         }
         // If the patch carried a status change, emit the matching step event(s)
         // (work-started / waiting-for-approval). Use the prior status as a guard
         // so a no-op repaint doesn't churn events.
         if (ticket.getStatus() != null && !ticket.getStatus().equalsIgnoreCase(statusBeforePatch)) {
-            emitStepEventsForTicketStatus(ticket.getId(), ticket.getStatus());
+            emitStepEventsForTicketStatus(ticket.getId(), ticket.getStatus(), actor);
         }
         // Technician assignment changed — light up the customer/owner timeline
         // rows for it.
@@ -902,6 +944,7 @@ public class TicketService {
             // assignment's "awaiting" timestamp.
             emitOrUpdateBookingEvent(ticket.getId(), "AWAITING_TECHNICIAN_ACCEPTANCE",
                     "Awaiting Technician Acceptance", "SHOP");
+            pushJobAssigned(ticket, assignedTechAfterPatch, callerUserId);
         }
         // Owner ticked "Customer Repair Approval" in the Edit Booking screen —
         // same handler as update() and as the customer's own Approve tap, so the
@@ -912,6 +955,22 @@ public class TicketService {
             onCustomerApproved(ticket, "SHOP");
         }
         return toResponse(ticket);
+    }
+
+    // Employee app: the newly (re)assigned technician hears about the job on
+    // their phone — technicians.user_id is their auth user id. Skipped when
+    // the technician assigned it to themselves. Sent after commit.
+    private void pushJobAssigned(Ticket ticket, Technician tech, UUID callerUserId) {
+        if (tech == null || tech.getUserId() == null || tech.getUserId().equals(callerUserId)) return;
+        String device = ticket.getDeviceDisplayName() != null && !ticket.getDeviceDisplayName().isBlank()
+                ? ticket.getDeviceDisplayName() : "Device";
+        String body = ticket.getTrackingId() != null ? device + " · " + ticket.getTrackingId() : device;
+        Map<String, Object> data = new HashMap<>();
+        data.put("kind", "JOB_ASSIGNED");
+        data.put("ticketId", ticket.getId());
+        data.put("trackingId", ticket.getTrackingId());
+        pushService.pushToUser(com.repairshop.saas.common.notify.PushApp.EMPLOYEE, tech.getUserId(),
+                "New job assigned", body, data);
     }
 
     private static java.time.Instant parseInstantOrNull(Object raw) {
@@ -1145,6 +1204,8 @@ public class TicketService {
         emitOrUpdateBookingEvent(ticket.getId(), "CUSTOMER_APPROVED",
                 afterReEstimate ? NOTE_APPROVED_RE_ESTIMATE : NOTE_APPROVED,
                 actor, null, null, java.time.Instant.now());
+        // An approval also settles a re-estimate awaiting it (approved + back to repair).
+        reEstimateWorkflow.onCustomerApproval(ticket, actor);
     }
 
     private boolean hasBookingEvent(UUID ticketId, String statusKey) {
@@ -1160,6 +1221,14 @@ public class TicketService {
     // up the booking mirrored against the ticket; skips if an event with the
     // same status key already exists so re-saves don't double-emit.
     private void emitBookingEvent(UUID ticketId, String statusKey, String note, String actor) {
+        emitBookingEvent(ticketId, statusKey, note, actor, actor);
+    }
+
+    // `actor` is what the timeline row records (SHOP / TECHNICIAN); `notifyActor`
+    // is who actually made the change, for the shop feed — OWNER when the owner
+    // did it from their own app, so they are not notified about their own tap.
+    private void emitBookingEvent(UUID ticketId, String statusKey, String note, String actor,
+                                  String notifyActor) {
         platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
             boolean alreadyEmitted = platformRepairBookingEventRepository
                     .findCurrentCycle(booking.getId())
@@ -1181,7 +1250,7 @@ public class TicketService {
             // proxied invocations so each keeps its own REQUIRES_NEW — one feed
             // failing must not roll back the other or this event save.
             customerOrderMirrorService.emitCustomerNotificationForStatus(booking.getId(), statusKey);
-            customerOrderMirrorService.emitShopNotificationForStatus(booking.getId(), statusKey);
+            customerOrderMirrorService.emitShopNotificationForStatus(booking.getId(), statusKey, notifyActor);
         });
     }
 
@@ -1226,7 +1295,9 @@ public class TicketService {
             // BOOKING_EDITED is the shop's "booking details changed" marker
             // (Edit Booking). History only — not a lifecycle or master work
             // code, so ticket.status is left as it was.
-            "BOOKING_EDITED");
+            "BOOKING_EDITED",
+            // Re-estimate workflow: the decision emits it; the technician may also tap it.
+            "REPAIR_WORK_RESUMED");
 
     // Who may be recorded as having performed a step. The endpoint is shop-scoped
     // rather than role-gated, so an owner token and an employee token can both
@@ -1247,6 +1318,9 @@ public class TicketService {
         if (!ALLOWED_PROGRESS_STEP_KEYS.contains(key)) {
             throw new IllegalArgumentException("Status key not allowed: " + key);
         }
+        // Repair Completed / QC / Ready / invoice wait for an open re-estimate (409 REESTIMATE_PENDING);
+        // Customer Rejected / Cancelled / Return Delivery close it instead.
+        reEstimateWorkflow.onProgressStep(t, key);
         // A delivered or cancelled booking is closed: the device is with the
         // customer (or the job was called off) and there is no further status to
         // record. The owner app already hides the picker at that point, but the
@@ -1503,7 +1577,7 @@ public class TicketService {
         ticketRepository.save(t);
         // Re-mirror: update() already mirrored above with the pre-re-estimate
         // status, so repair_bookings.status would otherwise stay behind.
-        customerOrderMirrorService.mirrorOnUpsert(t);
+        customerOrderMirrorService.mirrorOnUpsertInline(t);
     }
 
     // Note text written when the caller sends none. These deliberately MATCH the
@@ -1527,6 +1601,10 @@ public class TicketService {
             case "READY":                  return "Ready for Delivery";
             case "DELIVERED":              return "Delivered to Customer";
             case "CANCELLED":              return "Repair Cancelled";
+            case "TECHNICIAN_REESTIMATE_REQUESTED": return "Technician Re-Estimate Requested";
+            case "RE_ESTIMATE_APPROVED":   return "Re-Estimate Approved by Customer";
+            case "RE_ESTIMATE_REJECTED":   return "Re-Estimate Rejected by Customer";
+            case "REPAIR_WORK_RESUMED":    return "Repair Work in Progress (Resumed)";
             default:                       return key;
         }
     }
@@ -1626,18 +1704,20 @@ public class TicketService {
     // — moved the badge and left the rail behind. emitBookingEvent is idempotent
     // per (booking, statusKey), so a status that also arrives through
     // /progress-events writes one row, not two, whichever lands first.
-    private void emitStepEventsForTicketStatus(UUID ticketId, String status) {
+    //
+    // `notifyActor` is passed through to the shop feed (see emitBookingEvent).
+    private void emitStepEventsForTicketStatus(UUID ticketId, String status, String notifyActor) {
         if (status == null) return;
         String s = status.trim().toUpperCase();
         switch (s) {
             case "IN_REPAIR":
             case "APPROVED":
                 emitBookingEvent(ticketId, "TECHNICIAN_WORK_STARTED",
-                        "Technician Work Started", "TECHNICIAN");
+                        "Technician Work Started", "TECHNICIAN", notifyActor);
                 break;
             case "QUOTED":
                 emitBookingEvent(ticketId, "WAITING_FOR_CUSTOMER_APPROVAL",
-                        "Waiting for Customer Approval", "TECHNICIAN");
+                        "Waiting for Customer Approval", "TECHNICIAN", notifyActor);
                 break;
             default:
                 break;
@@ -1647,7 +1727,7 @@ public class TicketService {
             // status sheet. defaultProgressLabel is the same wording
             // /progress-events would have written, so the row reads identically
             // whichever door the status came through.
-            emitBookingEvent(ticketId, s, defaultProgressLabel(s), "SHOP");
+            emitBookingEvent(ticketId, s, defaultProgressLabel(s), "SHOP", notifyActor);
         }
     }
 

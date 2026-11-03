@@ -31,6 +31,9 @@ public class ReEstimateRequest {
     @Schema(description = "true = the customer approved the revised estimate at the counter; otherwise it waits for approval")
     private Boolean customerApproved;
 
+    @Schema(description = "Technician re-estimate request this answers (REQUESTED revision id); omit when re-estimating on the shop's own")
+    private java.util.UUID requestId;
+
     @Data
     public static class Item {
         @Schema(description = "Catalogue service id (null for a custom issue)")

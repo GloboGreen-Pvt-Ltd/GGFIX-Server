@@ -45,6 +45,10 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 if (shopId != null) request.setAttribute("shopId", shopId.toString());
                 request.setAttribute("userId", userId.toString());
                 request.setAttribute("roles", roles);
+                // OWNER | SHOP (shop-mobile login). Recorded with a push token so
+                // a registration says which kind of session made it.
+                String loginScope = claims.get("loginScope", String.class);
+                if (StringUtils.hasText(loginScope)) request.setAttribute("loginScope", loginScope);
                 SecurityContextHolder.getContext().setAuthentication(auth);
             } catch (Exception e) {
                 // Match ticket-service / shop-service behavior: silently ignore

@@ -169,17 +169,21 @@ public class ShopPickupBookingController {
 
             if (customerUserStr != null) {
                 try {
+                    UUID notificationId = UUID.randomUUID();
+                    String notifBody = "Booking " + bookingNumber + " — device is on the bench at the shop.";
                     jdbc.update(
                             "INSERT INTO customer_notifications " +
                                     "(id, customer_user_id, booking_id, booking_number, status_key, title, body, type, is_read, created_at) " +
                                     "VALUES (CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), ?, ?, ?, ?, 'orders', false, now())",
-                            UUID.randomUUID().toString(),
+                            notificationId.toString(),
                             customerUserStr,
                             id.toString(),
                             bookingNumber,
                             "RECEIVED_AT_SHOP",
                             "Device received at shop",
-                            "Booking " + bookingNumber + " — device is on the bench at the shop.");
+                            notifBody);
+                    pickupBookingController.pushToCustomer(customerUserStr, notificationId, id, bookingNumber,
+                            mintedTicketId, "RECEIVED_AT_SHOP", "Device received at shop", notifBody);
                 } catch (Exception e) {
                     log.warn("receive-at-shop: notification insert failed for {}: {}", id, e.getMessage());
                 }

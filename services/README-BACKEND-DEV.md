@@ -55,3 +55,30 @@ Then open the admin app, log in with **barani** / **barani**, and use Master Dat
 ## Later: PostgreSQL
 
 When you switch to PostgreSQL, remove the dev profile and set DB env vars (or use default `localhost:5432/repairshop`). Seeders only insert when the DB is empty.
+
+## Push notifications (FCM / Firebase Admin SDK)
+
+`common-notify` sends pushes to the NearGFix Customer, Partner and Employee apps
+over FCM (native Android tokens) or Expo (Expo push tokens). Apps register with
+`POST /order/push-tokens` `{ token, platform, app }` (Partner also keeps
+`POST /order/shop/push-tokens`). Table: `push_device_tokens` (migration 105).
+
+**The service-account JSON is never committed, copied into the repo, a jar, an
+image, a mobile app or `.env`** (`.gitignore` blocks `*-adminsdk-*.json`).
+
+- **Local:** keep the key file outside the repo and point Application Default
+  Credentials at it, e.g. PowerShell
+  `[Environment]::SetEnvironmentVariable('GOOGLE_APPLICATION_CREDENTIALS','C:\path\to\neargfix-firebase-adminsdk-....json','User')`,
+  then open a new terminal. Check with
+  `mvn -f services/pom.xml -pl common-notify -am test -Dtest=FcmCredentialsCheckTest -Dsurefire.failIfNoSpecifiedTests=false`
+  (a dry-run send — nothing reaches any device; skipped when no credentials are set).
+- **Production (EC2):** the JSON lives in AWS Secrets Manager; services read it
+  with the instance role. Set repo variables `FIREBASE_CREDENTIALS_SECRET_ID`
+  (e.g. `neargfix/firebase-admin`) and optionally `FIREBASE_CREDENTIALS_SECRET_REGION`
+  (default `AWS_REGION`). Do not set `GOOGLE_APPLICATION_CREDENTIALS` on the box.
+- **Workload identity federation:** instead of a key, point
+  `GOOGLE_APPLICATION_CREDENTIALS` at a WIF `external_account` config file (it
+  contains no secret); Application Default Credentials picks it up.
+- `FCM_ENABLED=false` turns FCM off; `PUSH_ENABLED=false` stops all sends.
+  Missing/broken credentials never stop a service from booting — FCM sends are
+  skipped and logged (no credential content is ever logged).

@@ -32,6 +32,8 @@
     <packaging>jar</packaging>
 
     <dependencies>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+
         <!-- JdbcTemplate. The DataSource itself comes from the consuming service. -->
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>
 

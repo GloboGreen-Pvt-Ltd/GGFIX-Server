@@ -4,11 +4,17 @@ import com.repairshop.saas.masterdata.dto.*;
 import com.repairshop.saas.masterdata.entity.*;
 import com.repairshop.saas.masterdata.repository.*;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Instant;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -16,6 +22,8 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/master")
 public class MasterDataController {
+
+    private static final Logger log = LoggerFactory.getLogger(MasterDataController.class);
 
     private final MasterBrandRepository brandRepo;
     private final MasterModelRepository modelRepo;
@@ -144,7 +152,9 @@ public class MasterDataController {
     }
 
     @PostMapping("/models")
-    public ResponseEntity<MasterModel> createModel(@RequestBody ModelRequest req) {
+    public ResponseEntity<?> createModel(@RequestBody ModelRequest req) {
+        ResponseEntity<Map<String, Object>> invalid = validateModel(req, null);
+        if (invalid != null) return invalid;
         MasterModel e = MasterModel.builder()
                 .brandId(req.getBrandId())
                 .categoryId(req.getCategoryId())
@@ -159,13 +169,16 @@ public class MasterDataController {
                 .colors(req.getColors() != null ? req.getColors() : new java.util.ArrayList<>())
                 .ramStorage(req.getRamStorage() != null ? req.getRamStorage() : new java.util.ArrayList<>())
                 .build();
-        return ResponseEntity.ok(modelRepo.save(e));
+        return saveModel(e);
     }
 
     @PutMapping("/models/{id}")
-    public ResponseEntity<MasterModel> updateModel(@PathVariable UUID id, @RequestBody ModelRequest req) {
+    public ResponseEntity<?> updateModel(@PathVariable UUID id, @RequestBody ModelRequest req) {
+        if (!modelRepo.existsById(id)) return ResponseEntity.notFound().build();
+        ResponseEntity<Map<String, Object>> invalid = validateModel(req, id);
+        if (invalid != null) return invalid;
         return modelRepo.findById(id)
-                .map(e -> {
+                .<ResponseEntity<?>>map(e -> {
                     e.setBrandId(req.getBrandId());
                     if (req.getCategoryId() != null) e.setCategoryId(req.getCategoryId());
                     if (req.getSeriesId() != null) e.setSeriesId(req.getSeriesId());
@@ -178,9 +191,60 @@ public class MasterDataController {
                     if (req.getSellActive() != null) e.setSellActive(req.getSellActive());
                     if (req.getColors() != null) e.setColors(req.getColors());
                     if (req.getRamStorage() != null) e.setRamStorage(req.getRamStorage());
-                    return ResponseEntity.ok(modelRepo.save(e));
+                    return saveModel(e);
                 })
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * 400 for a missing brand/name, 409 when the name is already used in the brand
+     * (uq_model_brand_name) or the slug in the series (uq_model_series_slug). Checked
+     * up front so the admin gets a readable message instead of a bare 500 from the
+     * constraint. {@code selfId} is the model being edited (null on create).
+     */
+    private ResponseEntity<Map<String, Object>> validateModel(ModelRequest req, UUID selfId) {
+        String name = req.getName() == null ? "" : req.getName().trim();
+        if (req.getBrandId() == null || name.isEmpty()) {
+            return problem(HttpStatus.BAD_REQUEST, "Brand and model name are required.");
+        }
+        req.setName(name);
+        boolean nameTaken = selfId == null
+                ? modelRepo.existsByBrandIdAndNameIgnoreCase(req.getBrandId(), name)
+                : modelRepo.existsByBrandIdAndNameIgnoreCaseAndIdNot(req.getBrandId(), name, selfId);
+        if (nameTaken) {
+            return problem(HttpStatus.CONFLICT,
+                    "A model named \"" + name + "\" already exists for this brand. Edit the existing model instead.");
+        }
+        String slug = req.getSlug();
+        if (req.getSeriesId() != null && slug != null && !slug.isBlank()) {
+            boolean slugTaken = selfId == null
+                    ? modelRepo.existsBySeriesIdAndSlug(req.getSeriesId(), slug)
+                    : modelRepo.existsBySeriesIdAndSlugAndIdNot(req.getSeriesId(), slug, selfId);
+            if (slugTaken) {
+                return problem(HttpStatus.CONFLICT, "A model with this name already exists in the selected series.");
+            }
+        }
+        return null;
+    }
+
+    /** Save, mapping a constraint race (two saves at once) to 409; details stay in the log. */
+    private ResponseEntity<?> saveModel(MasterModel e) {
+        try {
+            return ResponseEntity.ok(modelRepo.saveAndFlush(e));
+        } catch (DataIntegrityViolationException ex) {
+            log.warn("Model save rejected by a constraint (brand={}, name={}, series={}): {}",
+                    e.getBrandId(), e.getName(), e.getSeriesId(), ex.getMostSpecificCause().getMessage());
+            return problem(HttpStatus.CONFLICT, "This model conflicts with an existing model (same name or series).");
+        }
+    }
+
+    private static ResponseEntity<Map<String, Object>> problem(HttpStatus status, String message) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("timestamp", Instant.now().toString());
+        body.put("status", status.value());
+        body.put("error", status.getReasonPhrase());
+        body.put("message", message);
+        return ResponseEntity.status(status).body(body);
     }
 
     /** Toggle only the Sell-flow visibility flag — used by the admin Models table switch. */
