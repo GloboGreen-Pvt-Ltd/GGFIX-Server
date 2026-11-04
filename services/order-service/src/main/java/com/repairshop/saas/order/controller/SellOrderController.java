@@ -299,6 +299,11 @@ public class SellOrderController {
     // "editable" (no shop has committed to a quotation yet). Replaces device
     // fields and the child rows (screening answers / conditions / issues /
     // accessories) when those arrays are present in the body.
+    private static final java.util.Set<String> CUSTOMER_LOCKED = java.util.Set.of(
+            "PICKED_UP", "DEVICE_RECEIVED", "INSPECTED", "PRICE_REVISION_PENDING", "REVISION_REJECTED",
+            "PRICE_CONFIRMED", "PAYMENT_PENDING", "PAID", "COMPLETED"
+    );
+
     private static final java.util.Set<String> EDITABLE_STATUSES = java.util.Set.of(
             "PENDING", "AWAITING_QUOTATION", "DRAFT"
     );
@@ -399,12 +404,23 @@ public class SellOrderController {
         UUID userId = callerId(req);
         SellOrder s = sellRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Sell order not found"));
         if (!s.getCustomerUserId().equals(userId)) throw new ForbiddenException("Not your sell order");
+        // Once the shop has the device (or money moved), the shop handles it (Partner purchase workflow).
+        if (CUSTOMER_LOCKED.contains(String.valueOf(s.getStatus()).toUpperCase())) {
+            throw new com.repairshop.saas.order.exception.ConflictException("Your device is already with the shop — contact the shop to cancel");
+        }
+        boolean wasCancelled = "CANCELLED".equalsIgnoreCase(s.getStatus());
         s.setStatus("CANCELLED");
         sellRepo.save(s);
         customerOrderRepo.findByOrderNumber(s.getSellNumber()).ifPresent(co -> {
             co.setStatus("CANCELLED");
             customerOrderRepo.save(co);
         });
+        if (!wasCancelled && s.getShopId() != null) {
+            shopNotificationRepo.save(ShopNotification.builder()
+                    .shopId(s.getShopId()).bookingId(s.getId()).bookingNumber(s.getSellNumber())
+                    .statusKey("SELL_CANCELLED_BY_CUSTOMER").title("Sale cancelled by the customer")
+                    .body(String.format("The customer cancelled %s.", s.getSellNumber())).type("purchase").read(false).build());
+        }
         return ResponseEntity.ok(toResponseWithQuotes(s));
     }
 

@@ -78,8 +78,14 @@ public class ListingQuotationController {
         out.put("sellOrderId", l.sellOrderId);
         SellOrder so = l.sellOrderId == null ? null : sellRepo.findById(l.sellOrderId).orElse(null);
         out.put("orderStatus", so == null ? null : so.getStatus());
-        out.put("quotation", so == null ? null : quoteRepo.findBySellOrderId(so.getId()).stream()
-                .filter(q -> shopId.equals(q.getShopId())).findFirst().map(this::view).orElse(null));
+        out.put("sellNumber", so == null ? null : so.getSellNumber());
+        QuoteView mine = so == null ? null : quoteRepo.findBySellOrderId(so.getId()).stream()
+                .filter(q -> shopId.equals(q.getShopId())).findFirst().map(this::view).orElse(null);
+        out.put("quotation", mine);
+        // The customer's contact goes only to the shop whose quote they accepted (Partner purchase workflow).
+        boolean won = so != null && shopId.equals(so.getShopId()) && mine != null && "ACCEPTED".equalsIgnoreCase(mine.status());
+        out.put("purchaseOrderId", won ? so.getId() : null);
+        out.put("customer", won ? customerContact(so.getCustomerUserId()) : null);
         return ResponseEntity.ok(out);
     }
 
@@ -253,6 +259,15 @@ public class ListingQuotationController {
             // shop details are optional on the quote
         }
         return Map.of();
+    }
+
+    private Map<String, Object> customerContact(UUID customerUserId) {
+        Map<String, Object> c = new LinkedHashMap<>();
+        jdbc.queryForList("SELECT * FROM customer_users WHERE id = ?", customerUserId).stream().findFirst().ifPresent(r -> {
+            c.put("name", r.get("full_name"));
+            c.put("phone", r.get("mobile"));
+        });
+        return c;
     }
 
     private QuoteView view(SellOrderQuotation q) {
