@@ -8,8 +8,10 @@
 -- confirms receipt) and completion. order-service also adds these columns at
 -- startup (DatabaseSchemaInitializer).
 --
--- Idempotent; nullable columns only, no data changes.
+-- One transaction; idempotent; nullable columns only, no data changes.
 -- =============================================================================
+BEGIN;
+
 ALTER TABLE sell_orders ADD COLUMN IF NOT EXISTS assigned_pickup_person_id UUID;
 ALTER TABLE sell_orders ADD COLUMN IF NOT EXISTS pickup_person_name VARCHAR(120);
 ALTER TABLE sell_orders ADD COLUMN IF NOT EXISTS pickup_person_phone VARCHAR(30);
@@ -39,3 +41,5 @@ ALTER TABLE sell_orders ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(20);
 CREATE INDEX IF NOT EXISTS idx_sell_orders_pickup_person
     ON sell_orders (assigned_pickup_person_id)
     WHERE assigned_pickup_person_id IS NOT NULL;
+
+COMMIT;
