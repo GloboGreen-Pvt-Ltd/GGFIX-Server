@@ -1,0 +1,15 @@
+# Python 3.10+ (the Docker image uses 3.12). These pins install cleanly on
+# Python 3.12-3.14, Windows and Linux. On Linux, install torch/torchvision from
+# the CPU-only index first (as the Dockerfile does) — the default PyPI wheels
+# pull in several GB of CUDA libraries this CPU service never uses:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.0 torchvision==0.29.0
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+httpx==0.27.2
+pillow==12.3.0
+pillow-heif==1.8.0
+numpy==2.5.3
+torch==2.14.0
+torchvision==0.29.0
+open_clip_torch==2.26.1

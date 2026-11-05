@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Built index + image cache (scripts/index_all.py rebuilds them).
+data/

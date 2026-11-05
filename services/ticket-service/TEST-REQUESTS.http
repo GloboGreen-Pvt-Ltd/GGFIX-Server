@@ -1,0 +1,18 @@
+### Create ticket (E2E demo)
+### Replace <TOKEN> with accessToken from auth-service login (owner/technician).
+
+POST http://localhost:8082/tickets
+Authorization: Bearer <TOKEN>
+Content-Type: application/json
+
+{
+  "customerId": "00000000-0000-0000-0000-000000000002",
+  "brandId": "aebaabdf-28d8-4813-b788-f5b26e50e7c4",
+  "modelId": "599b19fa-bdca-4ec4-a5df-1ec621b6823d",
+  "storageOptionId": "ba9408cc-a7a8-4a53-8df5-326142843ca8",
+  "color": "blue",
+  "imei": "3224324324324",
+  "issueDescription": "Screen cracked, demo ticket",
+  "estimatedPrice": 12000
+}
+

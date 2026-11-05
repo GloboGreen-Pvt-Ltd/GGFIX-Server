@@ -1,0 +1,19 @@
+# H2 in-memory for E2E (no PostgreSQL)
+spring:
+  datasource:
+    url: jdbc:h2:mem:pickups;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    database-platform: org.hibernate.dialect.H2Dialect
+    show-sql: false
+
+server:
+  port: ${PORT:8088}
+
+app:
+  jwt:
+    secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}

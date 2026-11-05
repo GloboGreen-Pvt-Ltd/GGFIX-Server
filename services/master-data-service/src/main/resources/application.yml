@@ -1,0 +1,55 @@
+spring:
+  application:
+    name: master-data-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:repairshop}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 1
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
+server:
+  port: ${PORT:8091}
+app:
+  jwt:
+    secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
+  media:
+    # S3 behind the media.ggfix.in CloudFront distribution. No credentials here:
+    # the SDK's default chain resolves them from the EC2 instance role in prod and
+    # from the environment or ~/.aws locally. Leaving bucket blank disables S3
+    # uploads and leaves the rest of master-data working.
+    bucket: ${AWS_S3_BUCKET:${MEDIA_S3_BUCKET:}}
+    region: ${AWS_REGION:${MEDIA_S3_REGION:ap-south-1}}
+    public-base-url: ${AWS_S3_BASE_URL:${MEDIA_PUBLIC_BASE_URL:https://media.ggfix.in}}
+    max-image-bytes: ${MEDIA_MAX_IMAGE_BYTES:5242880}
+    # Safe to cache forever: every upload writes a NEW key, so a replacement is
+    # never a rewrite of an existing object and needs no CDN invalidation.
+    cache-control: ${MEDIA_CACHE_CONTROL:public,max-age=31536000,immutable}
+  cloudinary:
+    # If any of cloud-name / api-key / api-secret is blank, MediaController
+    # falls back to inline base64 data URIs.
+    cloud-name: ${CLOUDINARY_CLOUD_NAME:}
+    api-key: ${CLOUDINARY_API_KEY:}
+    api-secret: ${CLOUDINARY_API_SECRET:}
+    folder: ${CLOUDINARY_FOLDER:ggfix/master}
+  vision:
+    # Google Cloud Vision for POST /master/device-identify — the Partner App's
+    # Visual Device Scanner ("what phone is this?"). Key from env so no secret
+    # is committed; blank → the endpoint answers configured=false and the app
+    # falls back to reading the text on the device.
+    api-key: ${GOOGLE_VISION_API_KEY:}
+    endpoint: ${GOOGLE_VISION_ENDPOINT:https://vision.googleapis.com/v1/images:annotate}
+  imei:
+    # IMEI.info device-lookup proxy (GET /master/imei-lookup). The token + the
+    # numeric service id come from env so no secret is committed. When either is
+    # blank the endpoint returns matched=false and the app falls back to the
+    # manual "Choose a Device" picker. Prod host has a valid cert; the dev host
+    # (dash.dev.imei.info) serves an untrusted chain. Path uses a trailing slash.
+    base-url: ${IMEI_API_BASE_URL:https://dash.imei.info/api}
+    token: ${IMEI_API_TOKEN:}
+    # 0 = "Basic IMEI Check" (brand/model/model-numbers, token based).
+    service-id: ${IMEI_API_SERVICE_ID:0}

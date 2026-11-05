@@ -1,0 +1,100 @@
+package com.repairshop.saas.auth.dto;
+
+import com.repairshop.saas.auth.entity.KycDocument;
+import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * Owner-centric view used by the admin Shop Owner List and detail page.
+ * Combines a User row (role=SHOP_OWNER) with the shops that reference it
+ * via shops.owner_user_id, plus a derived profile-completeness score.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+@Schema(description = "Shop owner with derived profile completeness and linked shops")
+public class ShopOwnerView {
+    private UUID id;
+    private String name;
+    private String email;
+    private String phone;            // primary mobile
+    private String secondaryMobile;
+    private String avatarUrl;
+    private String idProofUrl;
+    /** Owner KYC documents (Aadhar front/back + PAN) + review status. NULL when never submitted. */
+    private KycDocument kycDocument;
+    private String personalAddress;
+    private String addrState;
+    private String addrDistrict;
+    private String addrTaluk;
+    private String addrArea;
+    private String addrStreet;
+    private String addrPincode;
+    private String role;
+    private Boolean isActive;
+
+    /** Role of the creator — ADMIN or MARKET_PERSON. NULL for legacy rows. */
+    private String createdBy;
+    private UUID createdPersonId;
+    private String createdPersonName;
+
+    /** Role of the currently assigned person, and who that is. NULL when unassigned. */
+    private String activeRole;
+    private UUID activePersonId;
+    private String activePersonName;
+
+    private Boolean emailVerified;
+    private Integer profileCompletePercent;
+    private Integer sectionsComplete;
+    private Integer sectionsTotal;
+    private Instant createdAt;
+    // Subscription window (from the owner's subscriptions row; null if none).
+    private Instant activeDate;
+    private Instant inactiveDate;
+    private List<ShopLocationView> locations;
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Builder
+    public static class ShopLocationView {
+        private UUID id;
+        private String name;
+        private String slug;
+        private String mobile;
+        private String address;
+        private String district;
+        private String state;
+        private String pincode;
+        private String taluk;
+        private String area;
+        private String street;
+        private String gstNumber;
+        private java.math.BigDecimal latitude;
+        private java.math.BigDecimal longitude;
+        private String frontImageUrl;
+        private String bannerImageUrl;
+        private String gstCertificateUrl;
+        private String udyamCertificateUrl;
+        private String pickupFromTime;
+        private String pickupToTime;
+        private Integer pickupDistanceKm;
+        private Boolean pickupEnabled;
+        private String workingDays;
+        private String openingTime;
+        private String closingTime;
+        private Boolean isActive;
+        /** Persisted JSON snapshot of selected Android / Apple services. NULL until first save. */
+        private String serviceCategoriesJson;
+        private Integer progressPercent;   // derived: % of documents/fields supplied
+        private Instant createdAt;
+    }
+}

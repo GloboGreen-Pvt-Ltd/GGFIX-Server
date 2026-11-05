@@ -1,0 +1,38 @@
+# File-backed H2 — data PERSISTS across restarts. DB file lives at
+# ./data/masterdata.mv.db relative to the master-data-service working dir.
+# Run with: spring.profiles.active=dev
+# To wipe and start fresh: delete ./data/ folder, then restart.
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/masterdata;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  h2:
+    console:
+      enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: update
+    database-platform: org.hibernate.dialect.H2Dialect
+    show-sql: false
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 10MB
+      max-request-size: 12MB
+
+server:
+  port: ${PORT:8091}
+
+# Set CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET
+# in the environment to enable hosted uploads. When blank, media upload falls
+# back to inline base64 data URIs for local development.
+app:
+  cloudinary:
+    cloud-name: ${CLOUDINARY_CLOUD_NAME:}
+    api-key: ${CLOUDINARY_API_KEY:}
+    api-secret: ${CLOUDINARY_API_SECRET:}
+    # Base folder. Admin pages append a subfolder like "categories", "brands",
+    # "models" so uploads land in ggifx/categories etc.
+    folder: ${CLOUDINARY_FOLDER:ggfix/master}

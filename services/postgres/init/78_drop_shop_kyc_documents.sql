@@ -1,0 +1,11 @@
+-- Retire the per-shop KYC table.
+--
+-- Owner KYC (Aadhar front/back + PAN) was unified onto users.kyc_document
+-- (migration 77_users_kyc_document.sql). The old per-shop shop_kyc_documents
+-- table (migrations 33/34) is no longer read or written by any service or app,
+-- so drop it. Idempotent — safe to run more than once.
+--
+-- NOTE: this permanently deletes any rows still in shop_kyc_documents. There is
+-- intentionally no back-fill into users.kyc_document (old data was per-shop, the
+-- new model is per-owner) — owners re-submit KYC through the new flow.
+DROP TABLE IF EXISTS shop_kyc_documents;

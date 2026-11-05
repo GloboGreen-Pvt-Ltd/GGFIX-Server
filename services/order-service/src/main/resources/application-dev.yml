@@ -1,0 +1,20 @@
+# File-backed H2 for dev so bookings/orders survive a service restart
+# (in-memory would wipe all data every time the service is restarted).
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/orders;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    database-platform: org.hibernate.dialect.H2Dialect
+    show-sql: false
+
+server:
+  port: ${PORT:8092}
+
+app:
+  jwt:
+    secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}

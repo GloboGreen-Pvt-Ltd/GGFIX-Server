@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+data/
+.env
+.env.*
+!.env.example
+*.log
+
+# Service-account keys never go into images.
+*firebase-adminsdk*.json
+*-adminsdk-*.json
+*service-account*.json
