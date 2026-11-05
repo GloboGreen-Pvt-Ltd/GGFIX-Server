@@ -72,7 +72,7 @@ ensure_env_file() {
   cloud_folder="$(read_env_value CLOUDINARY_FOLDER)"
   cloud_folder="${cloud_folder:-ggfix/master}"
 
-  # S3 media (media.ggfix.in). Read back from the existing .env first so a value set
+  # S3 media (cdn.neargfix.com). Read back from the existing .env first so a value set
   # on the box survives — this heredoc REWRITES .env on every deploy, so anything not
   # carried through here is silently lost and uploads start failing again.
   # Credentials are deliberately absent: the SDK resolves them from the EC2 instance
@@ -80,9 +80,9 @@ ensure_env_file() {
   aws_region="$(read_env_value AWS_REGION)"
   aws_region="${aws_region:-ap-south-1}"
   aws_bucket="$(read_env_value AWS_S3_BUCKET)"
-  aws_bucket="${aws_bucket:-ggfix-media-1762}"
+  aws_bucket="${aws_bucket:-neargfix-platform-media-files}"
   aws_base_url="$(read_env_value AWS_S3_BASE_URL)"
-  aws_base_url="${aws_base_url:-https://media.ggfix.in}"
+  aws_base_url="${aws_base_url:-https://cdn.neargfix.com}"
 
   # Google Cloud Vision (master-data /master/device-identify). From the
   # GOOGLE_VISION_API_KEY secret when the workflow passes one, else the value
