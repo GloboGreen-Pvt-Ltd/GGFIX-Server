@@ -25,9 +25,12 @@ import java.util.*;
 
 /**
  * The customer's side of a shop purchase (see {@link ShopPurchaseController}):
- * progress after a quote is accepted, approving or rejecting a revised price,
- * and confirming (or disputing) the shop's payout. Payment counts as done only
- * when the customer confirms it here.
+ * progress after a quote is accepted, approving or rejecting a revised price
+ * (after the shop's inspection, or the final offer the owner approved after the
+ * pickup person's doorstep inspection — status OUT_FOR_PICKUP, revision
+ * SHOP_APPROVED), asking to negotiate it, the pickup PIN, and confirming (or
+ * disputing) the shop's payout. Payment counts as done only when the customer
+ * confirms it here.
  */
 @RestController
 @RequestMapping("/sell-orders")
@@ -41,6 +44,7 @@ public class CustomerSellPurchaseController {
     private final ObjectMapper objectMapper;
 
     public record NoteRequest(String note) {}
+    public record NegotiateRequest(String note, BigDecimal amount) {}
 
     @GetMapping("/{id}/purchase")
     public ResponseEntity<Map<String, Object>> view(HttpServletRequest req, @PathVariable UUID id) {
@@ -54,8 +58,19 @@ public class CustomerSellPurchaseController {
         SellOrder s = lock(req, id);
         Map<String, Object> w = jdbc.queryForMap("SELECT * FROM sell_orders WHERE id = ?", id);
         if ("APPROVED".equals(w.get("revision_status")) && !"PRICE_REVISION_PENDING".equals(s.getStatus())) return ResponseEntity.ok(view(id));
-        if (!"PRICE_REVISION_PENDING".equals(s.getStatus())) throw new ConflictException("There's no revised price waiting for you");
         BigDecimal price = (BigDecimal) w.get("revised_price");
+        if (doorstepOffer(s, w)) {
+            // The final offer after the doorstep inspection: the pickup person pays this amount next.
+            jdbc.update("UPDATE sell_orders SET final_price = revised_price, revision_status = 'APPROVED', updated_at = now() WHERE id = ?", id);
+            customerOrderRepo.findByOrderNumber(s.getSellNumber()).ifPresent(co -> {
+                co.setTotalAmount(price);
+                customerOrderRepo.save(co);
+            });
+            notifyShop(s, "SELL_PICKUP_REVISION_AGREED", "Customer accepted the final price",
+                    String.format("The customer accepted %s for %s. The pickup person can pay now.", ShopPurchaseController.rupees(price), s.getSellNumber()));
+            return ResponseEntity.ok(view(id));
+        }
+        if (!"PRICE_REVISION_PENDING".equals(s.getStatus())) throw new ConflictException("There's no revised price waiting for you");
         jdbc.update("UPDATE sell_orders SET final_price = ?, revision_status = 'APPROVED', status = 'PRICE_CONFIRMED', updated_at = now() WHERE id = ?", price, id);
         customerOrderRepo.findByOrderNumber(s.getSellNumber()).ifPresent(co -> {
             co.setTotalAmount(price);
@@ -71,12 +86,45 @@ public class CustomerSellPurchaseController {
     public ResponseEntity<Map<String, Object>> rejectRevision(HttpServletRequest req, @PathVariable UUID id, @RequestBody(required = false) NoteRequest body) {
         SellOrder s = lock(req, id);
         if ("REVISION_REJECTED".equals(s.getStatus())) return ResponseEntity.ok(view(id));
-        if (!"PRICE_REVISION_PENDING".equals(s.getStatus())) throw new ConflictException("There's no revised price waiting for you");
+        Map<String, Object> w = jdbc.queryForMap("SELECT * FROM sell_orders WHERE id = ?", id);
         String note = trim(body == null ? null : body.note(), 500);
+        if ("OUT_FOR_PICKUP".equals(s.getStatus()) && "REJECTED".equals(w.get("revision_status"))) return ResponseEntity.ok(view(id));
+        if (doorstepOffer(s, w)) {
+            jdbc.update("UPDATE sell_orders SET revision_status = 'REJECTED', revision_note = ?, updated_at = now() WHERE id = ?", note, id);
+            notifyShop(s, "SELL_PICKUP_REVISION_DECLINED", "Customer declined the final price",
+                    String.format("The customer declined %s for %s%s. Keep the quote, offer another price or cancel.",
+                            ShopPurchaseController.rupees((BigDecimal) w.get("revised_price")), s.getSellNumber(), note == null ? "" : " (" + note + ")"));
+            return ResponseEntity.ok(view(id));
+        }
+        if (!"PRICE_REVISION_PENDING".equals(s.getStatus())) throw new ConflictException("There's no revised price waiting for you");
         jdbc.update("UPDATE sell_orders SET revision_status = 'REJECTED', revision_note = ?, status = 'REVISION_REJECTED', updated_at = now() WHERE id = ?", note, id);
         notifyShop(s, "SELL_REVISION_REJECTED", "Revised price rejected",
                 String.format("The customer rejected the revised price for %s%s. Keep the original quote, offer another price or cancel and return the device.",
                         s.getSellNumber(), note == null ? "" : " (" + note + ")"));
+        return ResponseEntity.ok(view(id));
+    }
+
+    /** Asks the shop to reconsider a revised / final price (with an optional counter amount); the shop answers with a new price or the quote. */
+    @PostMapping("/{id}/revision/negotiate")
+    @Transactional
+    public ResponseEntity<Map<String, Object>> negotiateRevision(HttpServletRequest req, @PathVariable UUID id, @RequestBody NegotiateRequest body) {
+        SellOrder s = lock(req, id);
+        Map<String, Object> w = jdbc.queryForMap("SELECT * FROM sell_orders WHERE id = ?", id);
+        if ("NEGOTIATION".equals(w.get("revision_status"))) return ResponseEntity.ok(view(id));
+        String note = trim(body == null ? null : body.note(), 500);
+        BigDecimal ask = body == null ? null : body.amount();
+        if (ask != null && (ask.signum() <= 0 || ask.compareTo(new BigDecimal("10000000")) > 0)) throw new IllegalArgumentException("Enter a valid amount");
+        if (note == null && ask == null) throw new IllegalArgumentException("Tell the shop what price you expect");
+        String text = ask == null ? note : "Asks " + ShopPurchaseController.rupees(ask) + (note == null ? "" : ": " + note);
+        if (doorstepOffer(s, w)) {
+            jdbc.update("UPDATE sell_orders SET revision_status = 'NEGOTIATION', revision_note = ?, updated_at = now() WHERE id = ?", text, id);
+        } else if ("PRICE_REVISION_PENDING".equals(s.getStatus())) {
+            jdbc.update("UPDATE sell_orders SET revision_status = 'NEGOTIATION', revision_note = ?, status = 'REVISION_REJECTED', updated_at = now() WHERE id = ?", text, id);
+        } else {
+            throw new ConflictException("There's no revised price waiting for you");
+        }
+        notifyShop(s, "SELL_REVISION_NEGOTIATION", "Customer wants to negotiate",
+                String.format("The customer asked to negotiate the price for %s: %s", s.getSellNumber(), text));
         return ResponseEntity.ok(view(id));
     }
 
@@ -122,6 +170,9 @@ public class CustomerSellPurchaseController {
         pickup.put("startedAt", iso(w.get("pickup_started_at")));
         pickup.put("pickedUpAt", iso(w.get("picked_up_at")));
         pickup.put("receivedAt", iso(w.get("received_at")));
+        pickup.put("otpVerifiedAt", iso(w.get("pickup_otp_verified_at")));
+        // The pickup PIN: shown only here (never in a notification), until the pickup person verifies it at the door.
+        pickup.put("pin", "OUT_FOR_PICKUP".equals(status) && w.get("pickup_otp_verified_at") == null ? w.get("pickup_otp") : null);
         out.put("pickup", pickup);
         Map<String, Object> inspection = null;
         if (w.get("inspection_json") != null) {
@@ -161,10 +212,16 @@ public class CustomerSellPurchaseController {
         out.put("cancelReason", w.get("cancel_reason"));
         out.put("cancelledBy", w.get("cancelled_by"));
         List<String> actions = new ArrayList<>();
-        if ("PRICE_REVISION_PENDING".equals(status)) { actions.add("APPROVE_REVISION"); actions.add("REJECT_REVISION"); }
+        boolean doorstepOffer = "OUT_FOR_PICKUP".equals(status) && "SHOP_APPROVED".equals(w.get("revision_status")) && w.get("payout_recorded_at") == null;
+        if ("PRICE_REVISION_PENDING".equals(status) || doorstepOffer) { actions.add("APPROVE_REVISION"); actions.add("REJECT_REVISION"); actions.add("NEGOTIATE_REVISION"); }
         if ("PAYMENT_PENDING".equals(status)) { actions.add("CONFIRM_PAYOUT"); actions.add("DISPUTE_PAYOUT"); }
         out.put("allowedActions", actions);
         return out;
+    }
+
+    /** The owner-approved final offer after the doorstep inspection, waiting for this customer's answer. */
+    private static boolean doorstepOffer(SellOrder s, Map<String, Object> w) {
+        return "OUT_FOR_PICKUP".equals(s.getStatus()) && "SHOP_APPROVED".equals(w.get("revision_status")) && w.get("payout_recorded_at") == null;
     }
 
     private SellOrder owned(HttpServletRequest req, UUID id) {

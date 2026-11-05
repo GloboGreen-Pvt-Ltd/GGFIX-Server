@@ -408,6 +408,11 @@ public class SellOrderController {
         if (CUSTOMER_LOCKED.contains(String.valueOf(s.getStatus()).toUpperCase())) {
             throw new com.repairshop.saas.order.exception.ConflictException("Your device is already with the shop — contact the shop to cancel");
         }
+        // Paid at the door (Employee App, still OUT_FOR_PICKUP): the money already moved.
+        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'sell_orders' AND column_name = 'payout_recorded_at')", Boolean.class))
+                && Boolean.TRUE.equals(jdbc.queryForObject("SELECT payout_recorded_at IS NOT NULL FROM sell_orders WHERE id = ?", Boolean.class, id))) {
+            throw new com.repairshop.saas.order.exception.ConflictException("You've already been paid for this device — contact the shop to cancel");
+        }
         boolean wasCancelled = "CANCELLED".equalsIgnoreCase(s.getStatus());
         s.setStatus("CANCELLED");
         sellRepo.save(s);

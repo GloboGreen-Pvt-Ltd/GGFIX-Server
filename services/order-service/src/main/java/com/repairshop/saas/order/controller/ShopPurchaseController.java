@@ -44,6 +44,15 @@ import java.util.stream.Collectors;
  * (owner recorded the UPI / bank payout) → PAID (the customer confirmed receipt)
  * → COMPLETED. CANCELLED at any point before the payout. The customer's phone
  * and address are shown only to the shop that won the order.
+ *
+ * <p>Pickup at the customer's door (OUT_FOR_PICKUP, Employee App): PIN verified →
+ * inspection → the owner decides the price here: keeps the quote
+ * (revision_status SHOP_CONFIRMED), approves the employee's suggestion or sets
+ * a price (SHOP_APPROVED → the customer accepts APPROVED / declines REJECTED /
+ * asks to negotiate NEGOTIATION), or asks for a re-check (REINSPECT). The
+ * employee can pay only once the price is SHOP_CONFIRMED or APPROVED → PICKED_UP
+ * → handed over → the owner verifies the IMEI / order / condition and confirms
+ * receipt (PAYMENT_PENDING, a stock entry is added) → PAID → COMPLETED.
  */
 @RestController
 @RequestMapping("/sell-orders/shop-purchases")
@@ -87,6 +96,10 @@ public class ShopPurchaseController {
     public record PayoutRequest(String method, String account, String reference) {}
     public record ReasonRequest(String reason) {}
     public record FulfilmentRequest(String fulfilment) {}
+    public record ReceiveRequest(String imei, Boolean orderVerified, Boolean conditionVerified) {}
+
+    /** Doorstep revision states in which the customer has (or is answering) the price: the owner can't change it. */
+    private static final Set<String> PRICE_WITH_CUSTOMER = Set.of("SHOP_APPROVED", "APPROVED");
 
     @GetMapping
     public ResponseEntity<List<Map<String, Object>>> list(HttpServletRequest req) {
@@ -94,6 +107,18 @@ public class ShopPurchaseController {
         List<Map<String, Object>> rows = jdbc.queryForList(BASE_SELECT + "ORDER BY COALESCE(q.updated_at, s.updated_at) DESC LIMIT 300", shopId);
         Map<UUID, Map<String, Object>> listings = listingsFor(rows.stream().map(r -> uuid(r.get("id"))).toList());
         return ResponseEntity.ok(rows.stream().map(r -> summary(r, listings.get(uuid(r.get("id"))))).toList());
+    }
+
+    /**
+     * Read-only stock list for the owner's Inventory page (inventory_items of this shop, by name),
+     * including the devices bought here. inventory-service has no endpoints yet; empty when the table is missing.
+     */
+    @GetMapping("/inventory")
+    public ResponseEntity<List<Map<String, Object>>> inventory(HttpServletRequest req) {
+        UUID shopId = sellerShop(req);
+        if (!hasInventory()) return ResponseEntity.ok(List.of());
+        return ResponseEntity.ok(jdbc.queryForList("SELECT id, sku, name, category, quantity, unit_price AS \"unitPrice\" "
+                + "FROM inventory_items WHERE shop_id = ? ORDER BY name LIMIT 500", shopId));
     }
 
     @GetMapping("/{id}")
@@ -160,9 +185,13 @@ public class ShopPurchaseController {
         Map<String, Object> cur = workflow(id);
         boolean reassign = cur.get("assigned_pickup_person_id") != null;
         if (body.technicianId().equals(uuid(cur.get("assigned_pickup_person_id")))) return ResponseEntity.ok(details(shopId, id)); // double tap
-        // A new pickup person accepts afresh; the previous one loses access.
+        // Paid at the door: the employee who paid collects the device.
+        if (cur.get("payout_recorded_at") != null) throw new ConflictException("The customer is already paid — the pickup can't be reassigned");
+        // A new pickup person accepts afresh and verifies the customer's PIN again; the previous one loses access.
+        // The doorstep inspection and any agreed price stay with the order.
         jdbc.update("UPDATE sell_orders SET assigned_pickup_person_id = ?, pickup_person_name = ?, pickup_person_phone = ?, "
                         + "pickup_assigned_at = now(), pickup_accepted_at = NULL, pickup_started_at = NULL, pickup_issue = NULL, "
+                        + "pickup_otp = NULL, pickup_otp_sent_at = NULL, pickup_otp_verified_at = NULL, pickup_otp_attempts = 0, pickup_arrived_at = NULL, "
                         + "status = 'PICKUP_ASSIGNED', updated_at = now() WHERE id = ?",
                 body.technicianId(), str(tech.get("name")), str(tech.get("phone")), id);
         notifyCustomer(s, "SELL_PICKUP_ASSIGNED", reassign ? "Pickup person changed" : "Pickup person assigned",
@@ -209,20 +238,152 @@ public class ShopPurchaseController {
         return ResponseEntity.ok(out);
     }
 
-    /** The shop has the device: handed over by the pickup person, or brought in on a shop visit. */
+    /**
+     * The shop has the device: brought in on a shop visit, or handed over by the
+     * pickup person — then the owner verifies the order, the IMEI (must match the
+     * doorstep inspection) and the condition. Accepted once; a paid pickup moves
+     * to PAYMENT_PENDING (the customer confirms) and gets its stock entry.
+     */
     @PostMapping("/{id}/receive")
     @Transactional
-    public ResponseEntity<Map<String, Object>> receive(HttpServletRequest req, @PathVariable UUID id) {
+    public ResponseEntity<Map<String, Object>> receive(HttpServletRequest req, @PathVariable UUID id, @RequestBody(required = false) ReceiveRequest body) {
         UUID shopId = sellerShop(req);
-        lockOwned(shopId, id);
+        SellOrder s = lockOwned(shopId, id);
         Map<String, Object> d = details(shopId, id);
-        String status = up(d.get("status"));
-        if ("DEVICE_RECEIVED".equals(status)) return ResponseEntity.ok(d);
+        Map<String, Object> w = workflow(id);
+        if (w.get("received_at") != null) return ResponseEntity.ok(d); // double tap
         if (!actions(d).contains("RECEIVE")) throw new ConflictException("Confirm receipt after the device is collected");
-        jdbc.update("UPDATE sell_orders SET received_at = now(), status = 'DEVICE_RECEIVED', updated_at = now() WHERE id = ?", id);
-        notifyCustomer(sellRepo.findById(id).orElseThrow(), "SELL_DEVICE_RECEIVED", "Device received",
-                String.format("%s received your %s and will inspect it now.", shopName(shopId), d.get("productName")));
+        String handover = null;
+        if (!"SHOP_VISIT".equals(d.get("fulfilment"))) {
+            if (body == null || !Boolean.TRUE.equals(body.orderVerified()) || !Boolean.TRUE.equals(body.conditionVerified())) {
+                throw new IllegalArgumentException("Verify the order ID and the device condition first");
+            }
+            String expected = digits(first(d.get("pickupInspection") instanceof Map<?, ?> pin ? pin.get("imei") : null, d.get("imei")));
+            String given = digits(body.imei());
+            if (expected != null && given == null) throw new IllegalArgumentException("Enter the IMEI on the device to verify the handover");
+            if (expected != null && !expected.equals(given)) throw new ConflictException("The IMEI doesn't match the device inspected at the customer's place");
+            Map<String, Object> rec = new LinkedHashMap<>();
+            rec.put("imei", given);
+            rec.put("imeiMatched", expected != null);
+            rec.put("orderVerified", true);
+            rec.put("conditionVerified", true);
+            rec.put("verifiedAt", Instant.now().toString());
+            try { handover = objectMapper.writeValueAsString(rec); } catch (Exception e) { throw new IllegalStateException("Could not save the handover"); }
+        }
+        boolean paid = w.get("payout_recorded_at") != null;
+        jdbc.update("UPDATE sell_orders SET received_at = now(), handover_json = ?, status = ?, updated_at = now() WHERE id = ?",
+                handover, paid ? "PAYMENT_PENDING" : "DEVICE_RECEIVED", id);
+        if (paid) {
+            addToInventory(shopId, id);
+            notifyCustomer(s, "SELL_PAYOUT_SENT", "Confirm your payment",
+                    String.format("%s received your %s. Confirm in the app that you got %s.", shopName(shopId), d.get("productName"), rupees((BigDecimal) w.get("payout_amount"))));
+        } else {
+            notifyCustomer(s, "SELL_DEVICE_RECEIVED", "Device received",
+                    String.format("%s received your %s and will inspect it now.", shopName(shopId), d.get("productName")));
+        }
         return ResponseEntity.ok(details(shopId, id));
+    }
+
+    // ── doorstep price (pickup, OUT_FOR_PICKUP, after the employee's inspection) ──
+
+    /** Keeps the accepted quote after reviewing the doorstep inspection: the employee may pay the customer. */
+    @PostMapping("/{id}/pickup-price/confirm")
+    @Transactional
+    public ResponseEntity<Map<String, Object>> confirmPickupQuote(HttpServletRequest req, @PathVariable UUID id) {
+        UUID shopId = sellerShop(req);
+        SellOrder s = lockOwned(shopId, id);
+        Map<String, Object> w = workflow(id);
+        if ("SHOP_CONFIRMED".equals(w.get("revision_status"))) return ResponseEntity.ok(details(shopId, id));
+        doorstepPriceGate(s, w);
+        jdbc.update("UPDATE sell_orders SET revision_status = 'SHOP_CONFIRMED', revised_price = NULL, revision_reason = NULL, "
+                + "revision_shop_note = NULL, revision_note = NULL, updated_at = now() WHERE id = ?", id);
+        notifyCustomer(s, "SELL_PRICE_CONFIRMED", "Price confirmed",
+                String.format("%s confirmed %s for your device after the inspection. The pickup person will pay you now.", shopName(shopId), rupees(s.getFinalPrice())));
+        return ResponseEntity.ok(details(shopId, id));
+    }
+
+    /** The owner's own final price after the doorstep inspection: sent to the customer to accept. */
+    @PostMapping("/{id}/pickup-price/revise")
+    @Transactional
+    public ResponseEntity<Map<String, Object>> revisePickupPrice(HttpServletRequest req, @PathVariable UUID id, @RequestBody ReviseRequest body) {
+        UUID shopId = sellerShop(req);
+        SellOrder s = lockOwned(shopId, id);
+        Map<String, Object> w = workflow(id);
+        doorstepPriceGate(s, w);
+        BigDecimal amount = body == null ? null : body.amount();
+        if (amount == null || amount.signum() <= 0) throw new IllegalArgumentException("Enter the final price");
+        if (amount.compareTo(new BigDecimal("10000000")) > 0) throw new IllegalArgumentException("That price looks too high");
+        if (s.getFinalPrice() != null && amount.compareTo(s.getFinalPrice()) == 0) throw new IllegalArgumentException("That's the accepted quote — approve the quote instead");
+        String reason = trim(body.reason());
+        if (reason == null || reason.length() < 5) throw new IllegalArgumentException("Explain the price (at least 5 characters)");
+        reason = reason.substring(0, Math.min(reason.length(), 1000));
+        jdbc.update("UPDATE sell_orders SET revised_price = ?, revision_reason = ?, revision_shop_note = NULL, revision_note = NULL, "
+                + "revision_status = 'SHOP_APPROVED', updated_at = now() WHERE id = ?", amount, reason, id);
+        notifyCustomer(s, "SELL_PRICE_REVISED", "Final price — your approval needed",
+                String.format("%s offers %s instead of %s after inspecting your device: %s. Accept or reject it in the app.", shopName(shopId), rupees(amount), rupees(s.getFinalPrice()), reason));
+        return ResponseEntity.ok(details(shopId, id));
+    }
+
+    /** Asks the pickup person to inspect the device again (the price decision starts over). */
+    @PostMapping("/{id}/pickup-reinspect")
+    @Transactional
+    public ResponseEntity<Map<String, Object>> requestReinspection(HttpServletRequest req, @PathVariable UUID id, @RequestBody ReasonRequest body) {
+        UUID shopId = sellerShop(req);
+        SellOrder s = lockOwned(shopId, id);
+        Map<String, Object> w = workflow(id);
+        if ("REINSPECT".equals(w.get("revision_status")) && w.get("pickup_inspected_at") == null) return ResponseEntity.ok(details(shopId, id));
+        doorstepPriceGate(s, w);
+        String reason = trim(body == null ? null : body.reason());
+        if (reason == null || reason.length() < 3) throw new IllegalArgumentException("Tell the pickup person what to re-check");
+        // The last inspection stays visible (and pre-fills the re-check); it has to be saved again.
+        jdbc.update("UPDATE sell_orders SET pickup_inspected_at = NULL, pickup_inspection_started_at = NULL, revised_price = NULL, revision_reason = NULL, revision_pickup_note = NULL, "
+                + "revision_note = NULL, revision_status = 'REINSPECT', revision_shop_note = ?, updated_at = now() WHERE id = ?",
+                reason.substring(0, Math.min(reason.length(), 500)), id);
+        return ResponseEntity.ok(details(shopId, id));
+    }
+
+    /** The pickup person's suggested price: the owner approves it before the customer is asked. */
+    @PostMapping("/{id}/pickup-revision/approve")
+    @Transactional
+    public ResponseEntity<Map<String, Object>> approvePickupRevision(HttpServletRequest req, @PathVariable UUID id) {
+        UUID shopId = sellerShop(req);
+        SellOrder s = lockOwned(shopId, id);
+        Map<String, Object> w = workflow(id);
+        if ("SHOP_APPROVED".equals(w.get("revision_status"))) return ResponseEntity.ok(details(shopId, id)); // double tap
+        if (!"OUT_FOR_PICKUP".equals(up(s.getStatus())) || !"SHOP_PENDING".equals(w.get("revision_status")) || w.get("payout_recorded_at") != null) {
+            throw new ConflictException("There is no revised price waiting for your approval");
+        }
+        jdbc.update("UPDATE sell_orders SET revision_status = 'SHOP_APPROVED', revision_shop_note = NULL, revision_note = NULL, updated_at = now() WHERE id = ?", id);
+        notifyCustomer(s, "SELL_PRICE_REVISED", "Final price — your approval needed",
+                String.format("%s offers %s instead of %s after inspecting your device: %s. Accept or reject it in the app.",
+                        shopName(shopId), rupees((BigDecimal) w.get("revised_price")), rupees(s.getFinalPrice()), Objects.toString(w.get("revision_reason"), "")));
+        return ResponseEntity.ok(details(shopId, id));
+    }
+
+    /** Sends the pickup person's suggested price back with the owner's reason (they suggest again, or the owner decides). */
+    @PostMapping("/{id}/pickup-revision/reject")
+    @Transactional
+    public ResponseEntity<Map<String, Object>> rejectPickupRevision(HttpServletRequest req, @PathVariable UUID id, @RequestBody ReasonRequest body) {
+        UUID shopId = sellerShop(req);
+        SellOrder s = lockOwned(shopId, id);
+        Map<String, Object> w = workflow(id);
+        if ("SHOP_REJECTED".equals(w.get("revision_status"))) return ResponseEntity.ok(details(shopId, id));
+        if (!"OUT_FOR_PICKUP".equals(up(s.getStatus())) || !"SHOP_PENDING".equals(w.get("revision_status")) || w.get("payout_recorded_at") != null) {
+            throw new ConflictException("There is no revised price waiting for your approval");
+        }
+        String reason = trim(body == null ? null : body.reason());
+        if (reason == null || reason.length() < 3) throw new IllegalArgumentException("Tell the pickup person why");
+        jdbc.update("UPDATE sell_orders SET revision_status = 'SHOP_REJECTED', revision_shop_note = ?, updated_at = now() WHERE id = ?",
+                reason.substring(0, Math.min(reason.length(), 500)), id);
+        return ResponseEntity.ok(details(shopId, id));
+    }
+
+    /** Doorstep price decisions: on the way, inspected, not paid, and the price not already with the customer. */
+    private void doorstepPriceGate(SellOrder s, Map<String, Object> w) {
+        if (!"OUT_FOR_PICKUP".equals(up(s.getStatus()))) throw new ConflictException("The price is decided at the customer's place, after the inspection");
+        if (w.get("payout_recorded_at") != null) throw new ConflictException("The customer is already paid");
+        if (w.get("pickup_inspected_at") == null) throw new ConflictException("Wait for the pickup person's inspection");
+        if (PRICE_WITH_CUSTOMER.contains(String.valueOf(w.get("revision_status")))) throw new ConflictException("The final price is already with the customer");
     }
 
     /** IMEI / serial, model, condition, functional checks and photos. Unlocked once the device is received. */
@@ -360,6 +521,7 @@ public class ShopPurchaseController {
         if (hasListings()) {
             jdbc.update("UPDATE marketplace_listings SET status = 'SOLD', updated_at = now() WHERE sell_order_id = ? AND status = 'AVAILABLE'", id);
         }
+        addToInventory(shopId, id); // once per order (a pickup already got it on the verified handover)
         Map<String, Object> d = details(shopId, id);
         notifyCustomer(s, "SELL_COMPLETED", "Device sold",
                 String.format("Your sale of %s to %s for %s is complete.", d.get("productName"), shopName(shopId), rupees(s.getFinalPrice())));
@@ -374,7 +536,9 @@ public class ShopPurchaseController {
         SellOrder s = lockOwned(shopId, id);
         String status = up(s.getStatus());
         if ("CANCELLED".equals(status)) return ResponseEntity.ok(details(shopId, id));
-        if (NOT_CANCELLABLE.contains(status)) throw new ConflictException("A purchase with a recorded payment can't be cancelled");
+        if (NOT_CANCELLABLE.contains(status) || workflow(id).get("payout_recorded_at") != null) {
+            throw new ConflictException("A purchase with a recorded payment can't be cancelled");
+        }
         String reason = trim(body == null ? null : body.reason());
         if (reason == null || reason.length() < 5) throw new IllegalArgumentException("Give a reason for cancelling");
         Map<String, Object> w = workflow(id);
@@ -448,7 +612,18 @@ public class ShopPurchaseController {
         pickup.put("pickedUpAt", iso(r.get("picked_up_at")));
         pickup.put("receivedAt", iso(r.get("received_at")));
         pickup.put("issue", r.get("pickup_issue"));
+        // Doorstep progress (Employee App): PIN verified at the door, inspection saved, handed over at the shop.
+        pickup.put("otpSentAt", iso(r.get("pickup_otp_sent_at")));
+        pickup.put("otpVerifiedAt", iso(r.get("pickup_otp_verified_at")));
+        pickup.put("arrivedAt", iso(r.get("pickup_arrived_at")));
+        pickup.put("inspectionStartedAt", iso(r.get("pickup_inspection_started_at")));
+        pickup.put("inspectedAt", iso(r.get("pickup_inspected_at")));
+        pickup.put("handedOverAt", iso(r.get("handed_over_at")));
         out.put("pickup", pickup);
+        // The pickup person's doorstep inspection (listing vs actual, checklist, photos) and the owner's handover check.
+        out.put("pickupInspection", readInspection(str(r.get("pickup_inspection_json"))));
+        out.put("handover", readInspection(str(r.get("handover_json"))));
+        out.put("customerAnswers", customerAnswers(r));
 
         out.put("inspection", readInspection(str(r.get("inspection_json"))));
         out.put("inspectedAt", iso(r.get("inspected_at")));
@@ -458,6 +633,8 @@ public class ShopPurchaseController {
         revision.put("reason", r.get("revision_reason"));
         revision.put("status", r.get("revision_status"));
         revision.put("customerNote", r.get("revision_note"));
+        revision.put("pickupNote", r.get("revision_pickup_note"));
+        revision.put("shopNote", r.get("revision_shop_note"));
         out.put("revision", r.get("revision_status") == null ? null : revision);
 
         String status = up(r.get("status"));
@@ -472,7 +649,15 @@ public class ShopPurchaseController {
         payment.put("recordedAt", iso(r.get("payout_recorded_at")));
         payment.put("paidAt", iso(r.get("payout_confirmed_at")));
         payment.put("disputeNote", r.get("payout_dispute_note"));
+        payment.put("proofUrl", r.get("payout_proof_url"));
         out.put("payment", payment);
+        Map<String, Object> inventory = null;
+        if (r.get("inventory_item_id") != null) {
+            inventory = new LinkedHashMap<>();
+            inventory.put("itemId", r.get("inventory_item_id"));
+            inventory.put("sku", inventorySku(r.get("sell_number")));
+        }
+        out.put("inventory", inventory);
         out.put("completedAt", iso(r.get("completed_at")));
         out.put("cancelReason", r.get("cancel_reason"));
         out.put("cancelledBy", r.get("cancelled_by"));
@@ -484,14 +669,26 @@ public class ShopPurchaseController {
         String status = up(d.get("status"));
         boolean visit = "SHOP_VISIT".equals(d.get("fulfilment"));
         List<String> a = new ArrayList<>();
+        boolean paid = d.get("payment") instanceof Map<?, ?> p && p.get("recordedAt") != null;
+        boolean doorInspected = d.get("pickup") instanceof Map<?, ?> pk && pk.get("inspectedAt") != null;
+        String rv = d.get("revision") instanceof Map<?, ?> r ? up(r.get("status")) : "";
         if (BEFORE_JOURNEY.contains(status)) a.add("SCHEDULE");
-        if (!visit && (BEFORE_JOURNEY.contains(status) || "OUT_FOR_PICKUP".equals(status))) a.add("ASSIGN");
+        if (!visit && !paid && (BEFORE_JOURNEY.contains(status) || "OUT_FOR_PICKUP".equals(status))) a.add("ASSIGN");
+        // Doorstep price: the owner decides after the employee's inspection, before the payment.
+        if (!visit && "OUT_FOR_PICKUP".equals(status) && !paid && doorInspected) {
+            if ("SHOP_PENDING".equals(rv)) { a.add("APPROVE_PICKUP_REVISION"); a.add("REJECT_PICKUP_REVISION"); }
+            if (!PRICE_WITH_CUSTOMER.contains(rv)) {
+                if (!"SHOP_CONFIRMED".equals(rv)) a.add("CONFIRM_PICKUP_QUOTE");
+                a.add("REVISE_PICKUP_PRICE");
+                a.add("REQUEST_REINSPECTION");
+            }
+        }
         if ("PICKED_UP".equals(status) || (visit && Set.of("SELL_CONFIRMED", "PICKUP_SCHEDULED").contains(status))) a.add("RECEIVE");
         if ("DEVICE_RECEIVED".equals(status) || "INSPECTED".equals(status)) a.add("INSPECT");
         if (PRICE_DECIDABLE.contains(status)) { a.add("CONFIRM_PRICE"); a.add("REVISE_PRICE"); }
         if ("PRICE_CONFIRMED".equals(status)) a.add("RECORD_PAYOUT");
         if ("PAID".equals(status)) a.add("COMPLETE");
-        if (!NOT_CANCELLABLE.contains(status)) a.add("CANCEL");
+        if (!NOT_CANCELLABLE.contains(status) && !paid) a.add("CANCEL");
         return a;
     }
 
@@ -533,6 +730,72 @@ public class ShopPurchaseController {
                             + "address, city, latitude, longitude FROM marketplace_listings WHERE sell_order_id IN (" + in + ")",
                     sellOrderIds.toArray()).stream()
                     .collect(Collectors.toMap(m -> uuid(m.get("sell_order_id")), m -> m, (a, b) -> a));
+    }
+
+    /** What the customer answered when selling: condition, problems, screening and accessories. */
+    private Map<String, Object> customerAnswers(Map<String, Object> r) {
+        UUID id = uuid(r.get("id"));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("workingCondition", r.get("working_condition"));
+        out.put("conditionSummary", r.get("device_condition_summary"));
+        out.put("conditions", jdbc.queryForList("SELECT group_name AS \"group\", option_label AS \"option\" FROM sell_order_conditions WHERE sell_order_id = ?", id));
+        out.put("issues", jdbc.queryForList("SELECT issue_code FROM sell_order_issues WHERE sell_order_id = ?", id).stream()
+                .map(m -> str(m.get("issue_code"))).filter(Objects::nonNull).toList());
+        out.put("screening", jdbc.queryForList("SELECT question, answer FROM sell_order_screening_answers WHERE sell_order_id = ?", id));
+        out.put("accessories", jdbc.queryForList("SELECT label, accessory_code FROM sell_order_accessories WHERE sell_order_id = ?", id).stream()
+                .map(m -> str(first(m.get("label"), m.get("accessory_code")))).filter(Objects::nonNull).toList());
+        return out;
+    }
+
+    /**
+     * One stock entry per purchased device (sku BUY-&lt;sell number&gt;, quantity 1, cost = final price),
+     * linked back on sell_orders.inventory_item_id; never a second one for the same order.
+     */
+    private void addToInventory(UUID shopId, UUID id) {
+        if (!hasInventory()) return;
+        // The receipt must never fail because of the stock table: a category the table doesn't accept is left empty
+        // (or the entry skipped when the column is required).
+        String category = inventoryCategory();
+        if (category == null && !inventoryColumnNullable("category")) return;
+        Map<String, Object> w = workflow(id);
+        if (w.get("inventory_item_id") != null) return;
+        String sku = inventorySku(w.get("sell_number"));
+        Map<String, Object> d = details(shopId, id);
+        Object imei = first(d.get("handover") instanceof Map<?, ?> h ? h.get("imei") : null,
+                d.get("pickupInspection") instanceof Map<?, ?> pin ? pin.get("imei") : null, w.get("imei"));
+        String name = joinNonBlank(" · ", d.get("productName"), d.get("storage"), d.get("color"), imei == null ? null : "IMEI " + imei);
+        name = name == null ? "Purchased device" : name.substring(0, Math.min(name.length(), 255));
+        jdbc.update("INSERT INTO inventory_items (id, shop_id, sku, name, category, quantity, unit_price) "
+                + "SELECT ?, ?, ?, ?, ?, 1, ? WHERE NOT EXISTS (SELECT 1 FROM inventory_items WHERE shop_id = ? AND sku = ?)",
+                UUID.randomUUID(), shopId, sku, name, category, w.get("final_price"), shopId, sku);
+        jdbc.queryForList("SELECT id FROM inventory_items WHERE shop_id = ? AND sku = ?", shopId, sku).stream().findFirst()
+                .ifPresent(m -> jdbc.update("UPDATE sell_orders SET inventory_item_id = ? WHERE id = ?", uuid(m.get("id")), id));
+    }
+
+    private static String inventorySku(Object sellNumber) {
+        return "BUY-" + sellNumber;
+    }
+
+    /** Checked first, not caught: a failed statement would abort the surrounding transaction. */
+    private boolean hasInventory() {
+        // The columns this insert fills exist, and no other required column (NOT NULL, no default) would be left empty.
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT COUNT(*) = 7 FROM information_schema.columns WHERE table_schema = 'public' "
+                + "AND table_name = 'inventory_items' AND column_name IN ('id', 'shop_id', 'sku', 'name', 'category', 'quantity', 'unit_price')", Boolean.class))
+                && Boolean.TRUE.equals(jdbc.queryForObject("SELECT COUNT(*) = 0 FROM information_schema.columns WHERE table_schema = 'public' "
+                + "AND table_name = 'inventory_items' AND is_nullable = 'NO' AND column_default IS NULL "
+                + "AND column_name NOT IN ('id', 'shop_id', 'sku', 'name', 'category', 'quantity', 'unit_price')", Boolean.class));
+    }
+
+    /** 'DEVICE', unless a CHECK constraint on inventory_items.category doesn't allow it (then null). */
+    private String inventoryCategory() {
+        List<String> checks = jdbc.queryForList("SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid "
+                + "JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public' AND t.relname = 'inventory_items' AND c.contype = 'c'", String.class);
+        return checks.stream().anyMatch(d -> d != null && d.contains("category") && !d.contains("'DEVICE'")) ? null : "DEVICE";
+    }
+
+    private boolean inventoryColumnNullable(String column) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_nullable = 'YES' FROM information_schema.columns WHERE table_schema = 'public' "
+                + "AND table_name = 'inventory_items' AND column_name = ?", Boolean.class, column));
     }
 
     /** Checked first, not caught: a failed statement would abort the surrounding transaction. */
@@ -610,6 +873,11 @@ public class ShopPurchaseController {
         String s = Arrays.stream(parts).map(ShopPurchaseController::str).filter(p -> p != null && !p.isBlank())
                 .map(String::trim).distinct().collect(Collectors.joining(sep));
         return s.isEmpty() ? null : s;
+    }
+
+    private static String digits(Object o) {
+        String d = o == null ? "" : o.toString().replaceAll("\\D", "");
+        return d.isEmpty() ? null : d;
     }
 
     private static String up(Object o) {

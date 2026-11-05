@@ -38,6 +38,14 @@ public class DatabaseSchemaInitializer {
                     {"payout_method", "VARCHAR(20)"}, {"payout_account", "VARCHAR(120)"}, {"payout_reference", "VARCHAR(80)"},
                     {"payout_amount", "NUMERIC(12, 2)"}, {"payout_recorded_at", "TIMESTAMPTZ"}, {"payout_confirmed_at", "TIMESTAMPTZ"},
                     {"payout_dispute_note", "TEXT"}, {"completed_at", "TIMESTAMPTZ"}, {"cancel_reason", "TEXT"}, {"cancelled_by", "VARCHAR(20)"},
+                    // Doorstep purchase (Employee App): pickup PIN, inspection at the customer's place,
+                    // owner / employee price notes, payment proof, handover and the stock entry.
+                    // Same types as migrations 111 / 112 / 113 (services/postgres/init).
+                    {"pickup_otp", "VARCHAR(6)"}, {"pickup_otp_sent_at", "TIMESTAMPTZ"}, {"pickup_otp_verified_at", "TIMESTAMPTZ"},
+                    {"pickup_otp_attempts", "INTEGER NOT NULL DEFAULT 0"}, {"pickup_inspection_json", "TEXT"}, {"pickup_inspected_at", "TIMESTAMPTZ"},
+                    {"revision_pickup_note", "TEXT"}, {"revision_shop_note", "TEXT"}, {"payout_proof_url", "VARCHAR(500)"},
+                    {"pickup_arrived_at", "TIMESTAMPTZ"}, {"pickup_inspection_started_at", "TIMESTAMPTZ"},
+                    {"handed_over_at", "TIMESTAMPTZ"}, {"handover_json", "TEXT"}, {"inventory_item_id", "UUID"},
             };
             for (String[] c : sell) addColumnIfMissing("sell_orders", c[0], c[1]);
         };
