@@ -41,7 +41,7 @@ app:
     fallback-header-image-url: ${BOTBEE_FALLBACK_HEADER_IMAGE_URL:}
     receipt-bucket: ${AWS_S3_BUCKET:${MEDIA_S3_BUCKET:}}
     receipt-region: ${AWS_REGION:${MEDIA_S3_REGION:ap-south-1}}
-    public-base-url: ${AWS_S3_BASE_URL:https://media.ggfix.in}
+    public-base-url: ${AWS_S3_BASE_URL:https://cdn.neargfix.com}
 
 springdoc:
   api-docs:

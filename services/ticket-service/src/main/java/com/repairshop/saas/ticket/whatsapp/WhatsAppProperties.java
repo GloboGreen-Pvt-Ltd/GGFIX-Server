@@ -42,7 +42,7 @@ public class WhatsAppProperties {
     private boolean publicMediaUrls = false;
     private String receiptBucket = "";
     private String receiptRegion = "ap-south-1";
-    private String publicBaseUrl = "https://media.ggfix.in";
+    private String publicBaseUrl = "https://cdn.neargfix.com";
     /** Used as the header image only when the receipt cannot be rendered/uploaded. */
     private String fallbackHeaderImageUrl = "";
 
