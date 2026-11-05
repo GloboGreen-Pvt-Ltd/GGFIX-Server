@@ -185,9 +185,13 @@ public class ShopPurchaseController {
         Map<String, Object> cur = workflow(id);
         boolean reassign = cur.get("assigned_pickup_person_id") != null;
         if (body.technicianId().equals(uuid(cur.get("assigned_pickup_person_id")))) return ResponseEntity.ok(details(shopId, id)); // double tap
-        // A new pickup person accepts afresh; the previous one loses access.
+        // Paid at the door: the employee who paid collects the device.
+        if (cur.get("payout_recorded_at") != null) throw new ConflictException("The customer is already paid — the pickup can't be reassigned");
+        // A new pickup person accepts afresh and verifies the customer's PIN again; the previous one loses access.
+        // The doorstep inspection and any agreed price stay with the order.
         jdbc.update("UPDATE sell_orders SET assigned_pickup_person_id = ?, pickup_person_name = ?, pickup_person_phone = ?, "
                         + "pickup_assigned_at = now(), pickup_accepted_at = NULL, pickup_started_at = NULL, pickup_issue = NULL, "
+                        + "pickup_otp = NULL, pickup_otp_sent_at = NULL, pickup_otp_verified_at = NULL, pickup_otp_attempts = 0, pickup_arrived_at = NULL, "
                         + "status = 'PICKUP_ASSIGNED', updated_at = now() WHERE id = ?",
                 body.technicianId(), str(tech.get("name")), str(tech.get("phone")), id);
         notifyCustomer(s, "SELL_PICKUP_ASSIGNED", reassign ? "Pickup person changed" : "Pickup person assigned",
@@ -532,7 +536,9 @@ public class ShopPurchaseController {
         SellOrder s = lockOwned(shopId, id);
         String status = up(s.getStatus());
         if ("CANCELLED".equals(status)) return ResponseEntity.ok(details(shopId, id));
-        if (NOT_CANCELLABLE.contains(status)) throw new ConflictException("A purchase with a recorded payment can't be cancelled");
+        if (NOT_CANCELLABLE.contains(status) || workflow(id).get("payout_recorded_at") != null) {
+            throw new ConflictException("A purchase with a recorded payment can't be cancelled");
+        }
         String reason = trim(body == null ? null : body.reason());
         if (reason == null || reason.length() < 5) throw new IllegalArgumentException("Give a reason for cancelling");
         Map<String, Object> w = workflow(id);
@@ -682,7 +688,7 @@ public class ShopPurchaseController {
         if (PRICE_DECIDABLE.contains(status)) { a.add("CONFIRM_PRICE"); a.add("REVISE_PRICE"); }
         if ("PRICE_CONFIRMED".equals(status)) a.add("RECORD_PAYOUT");
         if ("PAID".equals(status)) a.add("COMPLETE");
-        if (!NOT_CANCELLABLE.contains(status)) a.add("CANCEL");
+        if (!NOT_CANCELLABLE.contains(status) && !paid) a.add("CANCEL");
         return a;
     }
 
