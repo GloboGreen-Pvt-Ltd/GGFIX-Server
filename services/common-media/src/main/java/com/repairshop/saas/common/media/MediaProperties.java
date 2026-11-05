@@ -25,7 +25,7 @@ public class MediaProperties {
      * {@code https://media.ggfix.in} in every environment that has the CNAME; point
      * it at the distribution domain if the alias is not attached yet.
      */
-    private String publicBaseUrl = "https://media.ggfix.in";
+    private String publicBaseUrl = "https://cdn.neargfix.com";
 
     /** Per-image ceiling in bytes. Spring's multipart limit is the outer guard. */
     private long maxImageBytes = 5L * 1024 * 1024;

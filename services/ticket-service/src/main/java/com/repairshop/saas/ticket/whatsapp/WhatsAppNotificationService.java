@@ -49,7 +49,7 @@ public class WhatsAppNotificationService {
     static final String TURNED_OFF = "WhatsApp sending is turned off.";
     private static final int MAX_STORED_RESPONSE = 2000;
     private static final long MAX_PHOTO_BYTES = 3L * 1024 * 1024;
-    private static final Set<String> PHOTO_HOSTS = Set.of("media.ggfix.in", "res.cloudinary.com");
+    private static final Set<String> PHOTO_HOSTS = Set.of("cdn.neargfix.com", "media.ggfix.in", "res.cloudinary.com");
 
     private final WhatsAppNotificationRepository repo;
     private final BookingSnapshotLoader loader;
