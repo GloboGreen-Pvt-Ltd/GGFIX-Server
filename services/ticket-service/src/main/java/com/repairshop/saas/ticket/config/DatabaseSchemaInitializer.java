@@ -28,6 +28,17 @@ public class DatabaseSchemaInitializer {
             // The owner Booking Details "Customer Details" card reads this
             // column; without it the JPA save fails on every ticket mint.
             addColumnIfMissing("tickets", "customer_address", "TEXT");
+            // Doorstep device purchase (SellPickupController) — mirrors the order-service
+            // initializer so either service can boot first.
+            String[][] sell = {
+                    // Same types as migrations 111 / 112 / 113 (services/postgres/init).
+                    {"pickup_otp", "VARCHAR(6)"}, {"pickup_otp_sent_at", "TIMESTAMPTZ"}, {"pickup_otp_verified_at", "TIMESTAMPTZ"},
+                    {"pickup_otp_attempts", "INTEGER NOT NULL DEFAULT 0"}, {"pickup_inspection_json", "TEXT"}, {"pickup_inspected_at", "TIMESTAMPTZ"},
+                    {"revision_pickup_note", "TEXT"}, {"revision_shop_note", "TEXT"}, {"payout_proof_url", "VARCHAR(500)"},
+                    {"pickup_arrived_at", "TIMESTAMPTZ"}, {"pickup_inspection_started_at", "TIMESTAMPTZ"},
+                    {"handed_over_at", "TIMESTAMPTZ"}, {"handover_json", "TEXT"}, {"inventory_item_id", "UUID"},
+            };
+            for (String[] c : sell) addColumnIfMissing("sell_orders", c[0], c[1]);
         };
     }
 

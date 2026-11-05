@@ -68,6 +68,19 @@ public class ListingQuotationController {
     public record QuoteView(UUID id, UUID sellOrderId, UUID shopId, BigDecimal quotationPrice, String note,
                             String status, Instant createdAt, Instant updatedAt) {}
 
+    /** Every quote this shop sent on Customer Sell Leads: [{ listingId, quotationStatus, quotationPrice, orderStatus, updatedAt }] (Buy Home badges). */
+    @GetMapping("/mine")
+    public ResponseEntity<List<Map<String, Object>>> allMine(HttpServletRequest req) {
+        UUID shopId = sellerShop(req);
+        return ResponseEntity.ok(jdbc.queryForList(
+                "SELECT l.id AS \"listingId\", q.status AS \"quotationStatus\", q.quotation_price AS \"quotationPrice\", "
+                        + "s.status AS \"orderStatus\", q.updated_at AS \"updatedAt\" "
+                        + "FROM sell_order_quotations q "
+                        + "JOIN marketplace_listings l ON l.sell_order_id = q.sell_order_id "
+                        + "LEFT JOIN sell_orders s ON s.id = q.sell_order_id "
+                        + "WHERE q.shop_id = ? ORDER BY q.updated_at DESC LIMIT 500", shopId));
+    }
+
     /** { sellOrderId, orderStatus, quotation } — this shop's quote on the listing (quotation null when none). */
     @GetMapping("/{listingId}")
     public ResponseEntity<Map<String, Object>> mine(HttpServletRequest req, @PathVariable UUID listingId) {
