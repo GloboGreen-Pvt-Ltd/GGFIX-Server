@@ -24,7 +24,7 @@ app:
     # uploads and leaves the rest of master-data working.
     bucket: ${AWS_S3_BUCKET:${MEDIA_S3_BUCKET:}}
     region: ${AWS_REGION:${MEDIA_S3_REGION:ap-south-1}}
-    public-base-url: ${AWS_S3_BASE_URL:${MEDIA_PUBLIC_BASE_URL:https://media.ggfix.in}}
+    public-base-url: ${AWS_S3_BASE_URL:${MEDIA_PUBLIC_BASE_URL:https://cdn.neargfix.com}}
     max-image-bytes: ${MEDIA_MAX_IMAGE_BYTES:5242880}
     # Safe to cache forever: every upload writes a NEW key, so a replacement is
     # never a rewrite of an existing object and needs no CDN invalidation.
