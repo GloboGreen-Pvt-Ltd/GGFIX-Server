@@ -1,0 +1,17 @@
+-- Owner KYC unified onto the users row.
+--
+-- Previously owner identity documents (Aadhar Front/Back + PAN) were stored
+-- per-shop in shop_kyc_documents (shop-service). They are the shop OWNER's
+-- personal documents, so they now live once per owner in users.kyc_document
+-- as a jsonb blob:
+--   {
+--     "aadharFrontUrl": "...",
+--     "aadharBackUrl":  "...",
+--     "panUrl":         "...",
+--     "status":         "PENDING_REVIEW" | "APPROVED" | "REJECTED",
+--     "rejectReason":   "...",
+--     "submittedAt":    "2026-07-30T10:00:00Z",
+--     "reviewedAt":     "2026-07-30T11:00:00Z"
+--   }
+-- NULL until the owner (or admin) uploads their first document.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_document jsonb;

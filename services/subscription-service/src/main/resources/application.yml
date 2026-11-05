@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: subscription-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:repairshop}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 1
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    show-sql: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+server:
+  port: ${PORT:8090}
+app:
+  jwt:
+    secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
+  # Subscription invoices / receipts. The public PDF link (WhatsApp document
+  # header only) is HMAC-signed with link-secret (defaults to the JWT secret)
+  # and expires within link-ttl-minutes (max 60).
+  invoice:
+    link-secret: ${INVOICE_LINK_SECRET:${app.jwt.secret}}
+    public-base-url: ${INVOICE_PUBLIC_BASE_URL:https://api.ggfix.in/subscription}
+    link-ttl-minutes: 60
+    sweep:
+      enabled: ${INVOICE_SWEEP_ENABLED:true}
+      interval-ms: 300000
+      lookback-days: 30
+  # WhatsApp invoice delivery via BotBee (same env as ticket-service). OFF unless
+  # BOTBEE_WHATSAPP_ENABLED=true AND BOTBEE_API_KEY is set AND the admin setting
+  # invoiceWhatsappEnabled is on. Never put the key here.
+  whatsapp:
+    enabled: ${BOTBEE_WHATSAPP_ENABLED:false}
+    base-url: ${BOTBEE_BASE_URL:https://nexa.botbee.io}
+    api-key: ${BOTBEE_API_KEY:}
+    channel-id: ${BOTBEE_CHANNEL_ID:}
+    language: en
+# Razorpay (Subscription v2, UPI checkout). Values come ONLY from the
+# environment; empty keys keep every non-payment endpoint working and make the
+# payment endpoints answer 409 "Payments are not configured".
+razorpay:
+  key-id: ${RAZORPAY_KEY_ID:}
+  key-secret: ${RAZORPAY_KEY_SECRET:}
+  webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:}
+  # TEST | LIVE. The key id prefix (rzp_test_ / rzp_live_) must match, otherwise
+  # payments stay disabled ("Razorpay key does not match RAZORPAY_MODE").
+  mode: ${RAZORPAY_MODE:TEST}
