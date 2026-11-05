@@ -2,7 +2,7 @@
 
 Branch: `feat/sell-doorstep-purchase` (from `main@56c7554`). Nothing merged, deployed, restarted or applied to any shared database.
 
-**Verdict: code PASS on an isolated database (68/68 end-to-end checks). Not yet cleared for production** — the remaining blockers are release logistics: Maven/CI build on the real toolchain, app releases, database backup and migration approval (§6).
+**Verdict: code PASS on an isolated database (70/70 end-to-end checks). Not yet cleared for production** — the remaining blockers are release logistics: Maven/CI build on the real toolchain, app releases, database backup and migration approval (§6).
 
 ## 1. Baseline
 
@@ -37,7 +37,7 @@ Branch: `feat/sell-doorstep-purchase` (from `main@56c7554`). Nothing merged, dep
 | Column types vs startup initializers | **PASS** — identical (`pickup_otp VARCHAR(6)`, `pickup_otp_attempts INTEGER NOT NULL DEFAULT 0`, rest nullable) |
 | Data changes / drops | None — additive `ADD COLUMN IF NOT EXISTS` only |
 
-## 4. End-to-end validation — 68/68 PASS
+## 4. End-to-end validation — 70/70 PASS
 
 Isolated PostgreSQL 16.15 (scratch cluster, port 55432) + order-service and ticket-service built from the branch, started on test ports; JWTs minted with the dev default secret.
 
@@ -50,9 +50,10 @@ Isolated PostgreSQL 16.15 (scratch cluster, port 55432) + order-service and tick
 | Customer decision | Customer App gets Approve / Reject / Negotiate · negotiate · reject · accept → final price · payment locked while negotiating / after rejection · accept idempotent |
 | Payment | proof photo required · recorded amount = agreed price · duplicate payment ignored · Partner sees "awaiting customer confirmation" · **reassign, customer cancel and owner cancel blocked after payment** |
 | Hand-over + inventory | Employee hand-over leaves the order waiting for the owner · receipt needs order + condition verification · wrong IMEI refused · verified receipt → `PAYMENT_PENDING` + stock ref · second receipt no-op · exactly one stock entry · complete blocked until customer confirms · complete idempotent · inventory list shows the device · quote-badge endpoint |
+| Stricter stock table | `category` CHECK without 'DEVICE' → purchase completes, stock entry with empty category · extra required column → purchase completes, stock entry skipped |
 | Regression: shop visit | receive without body · shop inspection · confirm price · payout · customer confirm · complete with stock ref · two purchases → two stock entries |
 
-**Defects found and fixed during validation:** (1) the owner could reassign a pickup after the employee had paid the customer, which reset the order; (2) the owner could cancel after the doorstep payment. Both are now refused. A reassign before payment clears the previous employee's PIN/arrival.
+**Defects found and fixed during validation:** (1) the owner could reassign a pickup after the employee had paid the customer, which reset the order; (2) the owner could cancel after the doorstep payment. Both are now refused. A reassign before payment clears the previous employee's PIN/arrival. (3) A stricter production `inventory_items` (category CHECK, extra required column) would have failed the whole receipt — the stock entry now adapts or is skipped.
 
 ## 5. App compatibility
 
@@ -70,13 +71,13 @@ Not exercised: the mobile UIs themselves against this test server (they point at
 2. **Real build.** Validation used `javac` + the 2026-11-04 dependency jars; CI must run `mvn -pl services/order-service,services/ticket-service -am clean package` before merge.
 3. **In-flight orders.** Pickups already "on the way" have no PIN → employee taps *Generate new PIN*. Collecting now needs PIN + inspection + payment; employee hand-over no longer marks the device received.
 4. **Startup DDL.** Both services `ALTER TABLE sell_orders ADD COLUMN IF NOT EXISTS …` at boot (existing pattern); short lock, no table rewrite on PG ≥ 11. Apply the PROD script first.
-5. **Inventory.** `category = 'DEVICE'`; confirm prod has no CHECK constraint on `inventory_items.category`. inventory-service still has no endpoints; the Inventory page reads from order-service.
+5. **Inventory.** Stock entry uses `category = 'DEVICE'` (empty when a CHECK disallows it; skipped when the table needs other columns) — the receipt never fails because of it. inventory-service still has no endpoints; the Inventory page reads from order-service.
 6. **Arrival time** = PIN verification time (no GPS "arrived" step).
 
 ## 7. Safe deployment order (each step needs approval)
 
 1. Snapshot / back up the production database.
-2. Read-only checks: migration 110 present (`assigned_pickup_person_id`, `revision_status`, `payout_recorded_at` on `sell_orders`); no CHECK on `inventory_items.category`.
+2. Read-only check: migration 110 present (`assigned_pickup_person_id`, `revision_status`, `payout_recorded_at` on `sell_orders`).
 3. Open a PR `feat/sell-doorstep-purchase` → `main`; CI Maven build + review. **Do not merge yet.**
 4. Release the Partner App build, then the Employee App build (both work with the current server).
 5. Apply `deploy/db/2026-11-05_sell_doorstep_PROD.sql`; run its verify queries.

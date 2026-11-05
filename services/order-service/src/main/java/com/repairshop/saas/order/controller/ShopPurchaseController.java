@@ -753,6 +753,10 @@ public class ShopPurchaseController {
      */
     private void addToInventory(UUID shopId, UUID id) {
         if (!hasInventory()) return;
+        // The receipt must never fail because of the stock table: a category the table doesn't accept is left empty
+        // (or the entry skipped when the column is required).
+        String category = inventoryCategory();
+        if (category == null && !inventoryColumnNullable("category")) return;
         Map<String, Object> w = workflow(id);
         if (w.get("inventory_item_id") != null) return;
         String sku = inventorySku(w.get("sell_number"));
@@ -762,8 +766,8 @@ public class ShopPurchaseController {
         String name = joinNonBlank(" · ", d.get("productName"), d.get("storage"), d.get("color"), imei == null ? null : "IMEI " + imei);
         name = name == null ? "Purchased device" : name.substring(0, Math.min(name.length(), 255));
         jdbc.update("INSERT INTO inventory_items (id, shop_id, sku, name, category, quantity, unit_price) "
-                + "SELECT ?, ?, ?, ?, 'DEVICE', 1, ? WHERE NOT EXISTS (SELECT 1 FROM inventory_items WHERE shop_id = ? AND sku = ?)",
-                UUID.randomUUID(), shopId, sku, name, w.get("final_price"), shopId, sku);
+                + "SELECT ?, ?, ?, ?, ?, 1, ? WHERE NOT EXISTS (SELECT 1 FROM inventory_items WHERE shop_id = ? AND sku = ?)",
+                UUID.randomUUID(), shopId, sku, name, category, w.get("final_price"), shopId, sku);
         jdbc.queryForList("SELECT id FROM inventory_items WHERE shop_id = ? AND sku = ?", shopId, sku).stream().findFirst()
                 .ifPresent(m -> jdbc.update("UPDATE sell_orders SET inventory_item_id = ? WHERE id = ?", uuid(m.get("id")), id));
     }
@@ -774,8 +778,24 @@ public class ShopPurchaseController {
 
     /** Checked first, not caught: a failed statement would abort the surrounding transaction. */
     private boolean hasInventory() {
+        // The columns this insert fills exist, and no other required column (NOT NULL, no default) would be left empty.
         return Boolean.TRUE.equals(jdbc.queryForObject("SELECT COUNT(*) = 7 FROM information_schema.columns WHERE table_schema = 'public' "
-                + "AND table_name = 'inventory_items' AND column_name IN ('id', 'shop_id', 'sku', 'name', 'category', 'quantity', 'unit_price')", Boolean.class));
+                + "AND table_name = 'inventory_items' AND column_name IN ('id', 'shop_id', 'sku', 'name', 'category', 'quantity', 'unit_price')", Boolean.class))
+                && Boolean.TRUE.equals(jdbc.queryForObject("SELECT COUNT(*) = 0 FROM information_schema.columns WHERE table_schema = 'public' "
+                + "AND table_name = 'inventory_items' AND is_nullable = 'NO' AND column_default IS NULL "
+                + "AND column_name NOT IN ('id', 'shop_id', 'sku', 'name', 'category', 'quantity', 'unit_price')", Boolean.class));
+    }
+
+    /** 'DEVICE', unless a CHECK constraint on inventory_items.category doesn't allow it (then null). */
+    private String inventoryCategory() {
+        List<String> checks = jdbc.queryForList("SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid "
+                + "JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public' AND t.relname = 'inventory_items' AND c.contype = 'c'", String.class);
+        return checks.stream().anyMatch(d -> d != null && d.contains("category") && !d.contains("'DEVICE'")) ? null : "DEVICE";
+    }
+
+    private boolean inventoryColumnNullable(String column) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_nullable = 'YES' FROM information_schema.columns WHERE table_schema = 'public' "
+                + "AND table_name = 'inventory_items' AND column_name = ?", Boolean.class, column));
     }
 
     /** Checked first, not caught: a failed statement would abort the surrounding transaction. */

@@ -261,5 +261,28 @@ check('Visit: completed with stock ref', r[0] == 200 and r[1]['status'] == 'COMP
 n_inv = q('SELECT count(*) FROM inventory_items WHERE shop_id = %s', shopA)[0][0]
 check('Two purchases → two stock entries', n_inv == 2, n_inv)
 
+# ── stricter stock table (as production might have): the purchase must still complete ──
+def visit_purchase(tag):
+    so = sell_order(f'SO-{tag}-{shopA.hex[:6]}', now + timedelta(days=1))
+    q("UPDATE sell_order_quotations SET note = 'Customer will visit the shop' WHERE sell_order_id = %s", so)
+    call('POST', f'{P}/{so}/receive', OW)
+    call('POST', f'{P}/{so}/inspection', OW, {'imei': IMEI, 'modelVerified': True, 'condition': 'Good', 'checks': {'display': True}, 'photos': ['http://x/a', 'http://x/b']})
+    call('POST', f'{P}/{so}/price/confirm', OW)
+    call('POST', f'{P}/{so}/payout', OW, {'method': 'CASH'})
+    call('POST', f'{C}/{so}/payout/confirm', CU)
+    return so, call('POST', f'{P}/{so}/complete', OW)
+
+
+q("ALTER TABLE inventory_items ADD CONSTRAINT e2e_category_check CHECK (category IN ('PART', 'ACCESSORY', 'CONSUMABLE')) NOT VALID")
+so4, r = visit_purchase('T4')
+cat = q('SELECT i.category FROM inventory_items i JOIN sell_orders s ON s.inventory_item_id = i.id WHERE s.id = %s', so4)
+check('Category CHECK without DEVICE: completes, stock entry with empty category', r[0] == 200 and r[1]['status'] == 'COMPLETED' and cat == [(None,)], (r[0], cat))
+q('ALTER TABLE inventory_items DROP CONSTRAINT e2e_category_check')
+q("ALTER TABLE inventory_items ADD COLUMN e2e_required TEXT NOT NULL DEFAULT 'x'")
+q('ALTER TABLE inventory_items ALTER COLUMN e2e_required DROP DEFAULT')
+so5, r = visit_purchase('T5')
+check('Extra required stock column: completes, stock entry skipped', r[0] == 200 and r[1]['status'] == 'COMPLETED' and r[1].get('inventory') is None, r[0])
+q('ALTER TABLE inventory_items DROP COLUMN e2e_required')
+
 passed = sum(1 for _, ok in results if ok)
 print(f'\nRESULT: {passed}/{len(results)} passed')
