@@ -18,6 +18,8 @@ public final class SellRules {
     public static final String ACTIVE = "ACTIVE";
     public static final String INACTIVE = "INACTIVE";
     public static final String SOLD = "SOLD";
+    /** Stock fully held by open buy orders; becomes SOLD on hand-over, ACTIVE again if released. */
+    public static final String RESERVED = "RESERVED";
     public static final String DELETED = "DELETED";
 
     public static final Set<String> LISTING_TYPES = Set.of("DEVICE", "SPARE_PART", "ACCESSORY");
@@ -31,7 +33,7 @@ public final class SellRules {
     public static final int MAX_CLIENT_REF = 64;
 
     /** Raw statuses of a live listing (not sold, not deleted): the IMEI-uniqueness scope. */
-    public static final List<String> LIVE_STATUSES = List.of(DRAFT, ACTIVE, INACTIVE, "CANCELLED", "CANCELED");
+    public static final List<String> LIVE_STATUSES = List.of(DRAFT, ACTIVE, RESERVED, INACTIVE, "CANCELLED", "CANCELED");
 
     private static final Map<String, Set<String>> TRANSITIONS = Map.of(
             DRAFT, Set.of(ACTIVE),
@@ -51,6 +53,7 @@ public final class SellRules {
     public static List<String> rawStatuses(String bucket) {
         return switch (bucket) {
             case SOLD -> List.of(SOLD, "COMPLETED");
+            case ACTIVE -> List.of(ACTIVE, RESERVED); // shop view: reserved listings stay under Active
             case INACTIVE -> List.of(INACTIVE, "CANCELLED", "CANCELED");
             default -> List.of(bucket);
         };
