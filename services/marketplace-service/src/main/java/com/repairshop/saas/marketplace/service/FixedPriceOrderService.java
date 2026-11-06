@@ -39,6 +39,7 @@ public class FixedPriceOrderService {
     private final MarketplaceOrderEventRepository events;
     private final MarketplaceProductRepository products;
     private final ObjectMapper json;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     // ---------- customer ----------
 
@@ -137,6 +138,7 @@ public class FixedPriceOrderService {
                 UUID staff = uuid(body.get("staffUserId"), "staffUserId");
                 if (staff.equals(o.getAssignedStaffUserId()) && "ASSIGNED".equals(s)) return view(o, false);
                 require(o, "CONFIRMED", "ASSIGNED", "ACCEPTED", "DELIVERY_FAILED");
+                if (!isShopEmployee(staff, o.getShopId())) throw bad("Employee does not belong to this shop");
                 boolean re = o.getAssignedStaffUserId() != null;
                 o.setAssignedStaffUserId(staff);
                 return move(o, "ASSIGNED", actor, "SHOP", re ? "Reassigned" : null, false);
@@ -298,6 +300,12 @@ public class FixedPriceOrderService {
     private MarketplaceOrder staffOwned(UUID staff, UUID shopId, MarketplaceOrder o) {
         if (!staff.equals(o.getAssignedStaffUserId()) || shopId == null || !shopId.equals(o.getShopId())) throw notFound("Order not found");
         return o;
+    }
+
+    private boolean isShopEmployee(UUID userId, UUID shopId) {
+        Integer n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM users WHERE id = ? AND shop_id = ? AND COALESCE(is_active, TRUE)", Integer.class, userId, shopId);
+        return n != null && n > 0;
     }
 
     private static void require(MarketplaceOrder o, String... allowed) {

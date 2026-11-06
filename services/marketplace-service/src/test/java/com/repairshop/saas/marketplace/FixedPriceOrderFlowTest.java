@@ -37,9 +37,18 @@ class FixedPriceOrderFlowTest {
 
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
+    @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
+
+    @org.junit.jupiter.api.BeforeEach
+    void staffDirectory() {
+        jdbc.execute("CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY, shop_id UUID NOT NULL, is_active BOOLEAN)");
+        jdbc.update("MERGE INTO users (id, shop_id, is_active) KEY (id) VALUES (?, ?, TRUE)", staffId, shopA);
+        jdbc.update("MERGE INTO users (id, shop_id, is_active) KEY (id) VALUES (?, ?, TRUE)", foreignStaff, UUID.randomUUID());
+    }
 
     private final UUID shopA = UUID.randomUUID();
     private final UUID staffId = UUID.randomUUID();
+    private final UUID foreignStaff = UUID.randomUUID();
     private final String owner = token(UUID.randomUUID(), shopA, "SHOP_OWNER", "OWNER");
     private final String otherOwner = token(UUID.randomUUID(), UUID.randomUUID(), "SHOP_OWNER", "OWNER");
     private final String staff = token(staffId, shopA, "TECHNICIAN", null);
@@ -112,6 +121,8 @@ class FixedPriceOrderFlowTest {
         call(post("/staff/buy-orders/" + id + "/accept"), staff, null, 404); // not assigned yet
 
         call(post("/shop/buy-orders/" + id + "/confirm"), owner, null, 200);
+        // cross-shop employee cannot be assigned
+        call(post("/shop/buy-orders/" + id + "/assign"), owner, Map.of("staffUserId", foreignStaff.toString()), 400);
         call(post("/shop/buy-orders/" + id + "/assign"), owner, Map.of("staffUserId", staffId.toString()), 200);
         call(post("/staff/buy-orders/" + id + "/accept"), otherStaff, null, 404);
         assertEquals(1, call(get("/staff/buy-orders"), staff, null, 200).size());
