@@ -32,6 +32,9 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
               AND (:status IS NULL OR t.status = :status)
               AND (
                 LOWER(COALESCE(t.trackingId, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.bookingNumber, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.imei, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.serialNumber, '')) LIKE LOWER(CONCAT('%', :q, '%'))
                 OR LOWER(COALESCE(t.customerName, '')) LIKE LOWER(CONCAT('%', :q, '%'))
                 OR LOWER(COALESCE(t.customerPhone, '')) LIKE LOWER(CONCAT('%', :q, '%'))
                 OR LOWER(COALESCE(t.deviceDisplayName, '')) LIKE LOWER(CONCAT('%', :q, '%'))
