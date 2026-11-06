@@ -188,6 +188,8 @@ jobs:
             deploy-bundle/deploy/aws
 
           cp -R deploy/aws/. deploy-bundle/deploy/aws/
+          mkdir -p deploy-bundle/migrations
+          cp services/postgres/init/[0-9]*_*.sql deploy-bundle/migrations/
 
           for service in "${services[@]}"; do
             source_jar="services/$service/target/$service-1.0.0-SNAPSHOT.jar"
