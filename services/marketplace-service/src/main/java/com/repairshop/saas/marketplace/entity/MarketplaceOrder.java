@@ -37,6 +37,24 @@ public class MarketplaceOrder {
     @Column(name = "total_amount", nullable = false, precision = 12, scale = 2)
     private BigDecimal totalAmount;
 
+    // Fixed-price Buy flow (migration 114).
+    @Column(name = "customer_user_id") private UUID customerUserId;
+    @Column(name = "product_id") private UUID productId;
+    @Column(name = "quantity") private Integer quantity;
+    @Column(name = "unit_price", precision = 12, scale = 2) private BigDecimal unitPrice;
+    @Column(name = "fulfilment_type", length = 20) private String fulfilmentType; // HOME_DELIVERY | VISIT_SHOP
+    @Column(name = "payment_method", length = 20) private String paymentMethod;   // COD | PAY_AT_SHOP
+    @Column(name = "payment_status", length = 20) private String paymentStatus;   // PENDING | PAID
+    @Column(name = "payment_ref", length = 120) private String paymentRef;
+    @Column(name = "delivery_address", columnDefinition = "TEXT") private String deliveryAddress;
+    @Column(name = "customer_phone", length = 20) private String customerPhone;
+    @Column(name = "idempotency_key", length = 64) private String idempotencyKey;
+    @Column(name = "assigned_staff_user_id") private UUID assignedStaffUserId;
+    @Column(name = "handover_otp", length = 6) private String handoverOtp;
+    @Column(name = "stock_released") private Boolean stockReleased;
+    @Column(name = "photos_json", columnDefinition = "TEXT") private String photosJson;
+    @Column(name = "note", columnDefinition = "TEXT") private String note;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
