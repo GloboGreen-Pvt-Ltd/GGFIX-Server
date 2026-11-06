@@ -17,21 +17,8 @@
 -- (marketplace_order_items.product_id -> marketplace_products is ON DELETE
 -- RESTRICT, which would otherwise refuse a plain DROP).
 
-BEGIN;
-
--- 1. buy-order line items (FK -> marketplace_orders, marketplace_products)
-DROP TABLE IF EXISTS marketplace_order_items CASCADE;
-
--- 2. shopping cart items (FK -> marketplace_products ON DELETE CASCADE)
-DROP TABLE IF EXISTS customer_cart_items CASCADE;
-
--- 3. buy-order headers
-DROP TABLE IF EXISTS marketplace_orders CASCADE;
-
--- 4. product catalog (referenced by the two tables dropped above)
-DROP TABLE IF EXISTS marketplace_products CASCADE;
-
--- 5. Sell/buy listings board (independent — no FK to products)
-DROP TABLE IF EXISTS marketplace_listings CASCADE;
-
-COMMIT;
+-- SUPERSEDED (2026-11): the marketplace tables are live again (cart, Sell
+-- module listings/products, fixed-price buy orders), so this migration is now a
+-- no-op. Running the original DROPs would destroy live data. Fresh installs get
+-- any missing tables back from 114/115.
+SELECT 1;
