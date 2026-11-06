@@ -133,6 +133,7 @@ public class SellListingService {
             if (DELETED.equals(s)) continue;
             long n = ((Number) row[1]).longValue();
             counts.merge("ALL", n, Long::sum);
+            if (RESERVED.equals(s)) s = ACTIVE;
             if (!"ALL".equals(s) && counts.containsKey(s)) counts.merge(s, n, Long::sum);
         }
         return counts;
@@ -196,6 +197,7 @@ public class SellListingService {
         MarketplaceProduct p = lockOwned(shopId, id);
         String cur = normalizeStatus(p.getStatus());
         if (SOLD.equals(cur)) throw new ConflictException("A sold listing can't be edited.");
+        if (RESERVED.equals(cur)) throw new ConflictException("This listing has an open order; it can't be edited until the order is completed or cancelled.");
         if (DELETED.equals(cur)) throw new ConflictException("This listing was deleted.");
 
         List<String> errors = validate(req, true);

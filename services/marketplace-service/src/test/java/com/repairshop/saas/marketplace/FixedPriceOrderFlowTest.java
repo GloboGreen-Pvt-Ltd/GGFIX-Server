@@ -160,7 +160,8 @@ class FixedPriceOrderFlowTest {
         String pid = publish(1, "SHIPPING");
         String id = call(post("/customer/buy-orders"), customer, order(pid, "HOME_DELIVERY", "a"), 200).get("id").asText();
         call(post("/customer/buy-orders"), customer2, order(pid, "HOME_DELIVERY", "b"), 409); // sold out
-        assertEquals("SOLD", call(get("/shop/marketplace/products/" + pid), owner, null, 200).get("status").asText());
+        // Stock is held, not sold, until the order is handed over.
+        assertEquals("RESERVED", call(get("/shop/marketplace/products/" + pid), owner, null, 200).get("status").asText());
 
         call(post("/shop/buy-orders/" + id + "/confirm"), owner, null, 200);
         call(post("/shop/buy-orders/" + id + "/assign"), owner, Map.of("staffUserId", staffId.toString()), 200);

@@ -34,6 +34,8 @@ public class FixedPriceOrderService {
     public static final String HOME = "HOME_DELIVERY", VISIT = "VISIT_SHOP";
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Set<String> OPEN_FOR_CANCEL = Set.of("PLACED", "CONFIRMED", "ASSIGNED", "ACCEPTED");
+    // Orders still holding stock (not yet handed over, cancelled or returned).
+    private static final Set<String> OPEN = Set.of("PLACED", "CONFIRMED", "ASSIGNED", "ACCEPTED", "PICKED_UP", "OUT_FOR_DELIVERY", "DELIVERY_FAILED");
 
     private final MarketplaceOrderRepository orders;
     private final MarketplaceOrderEventRepository events;
@@ -76,7 +78,8 @@ public class FixedPriceOrderService {
         int available = nz(p.getQuantity()) - nz(p.getSoldQuantity());
         if (available < qty) throw conflict("Only " + Math.max(available, 0) + " in stock");
         p.setSoldQuantity(nz(p.getSoldQuantity()) + qty);
-        if (nz(p.getSoldQuantity()) >= nz(p.getQuantity())) p.setStatus("SOLD");
+        // Stock is held, not sold: the listing reads SOLD only once an order is handed over.
+        if (nz(p.getSoldQuantity()) >= nz(p.getQuantity())) p.setStatus("RESERVED");
         products.save(p);
 
         MarketplaceOrder o = orders.save(MarketplaceOrder.builder()
@@ -149,6 +152,7 @@ public class FixedPriceOrderService {
                 if (!VISIT.equals(o.getFulfilmentType())) throw conflict("Home-delivery orders are completed by the employee");
                 require(o, "CONFIRMED");
                 verifyPaymentAndOtp(o, body);
+                markSoldIfFullyHandedOver(o);
                 return move(o, "COMPLETED", actor, "SHOP", "Paid & handed over in store", false);
             }
             case "return-received" -> {
@@ -197,6 +201,7 @@ public class FixedPriceOrderService {
             case "deliver" -> {
                 require(o, "OUT_FOR_DELIVERY");
                 verifyPaymentAndOtp(o, body);
+                markSoldIfFullyHandedOver(o);
                 savePhotos(o, body, 1);
             }
             case "fail" -> {
@@ -236,11 +241,21 @@ public class FixedPriceOrderService {
         } catch (Exception e) { throw bad("Invalid photos"); }
     }
 
+    // RESERVED → SOLD once no other order still holds this listing's stock.
+    private void markSoldIfFullyHandedOver(MarketplaceOrder o) {
+        products.findByIdForUpdate(o.getProductId()).ifPresent(p -> {
+            if (!"RESERVED".equals(p.getStatus())) return;
+            boolean othersOpen = orders.findByProductId(p.getId()).stream()
+                    .anyMatch(x -> !x.getId().equals(o.getId()) && OPEN.contains(x.getStatus()));
+            if (!othersOpen) { p.setStatus("SOLD"); products.save(p); }
+        });
+    }
+
     private void release(MarketplaceOrder o) {
         if (Boolean.TRUE.equals(o.getStockReleased())) return;
         products.findByIdForUpdate(o.getProductId()).ifPresent(p -> {
             p.setSoldQuantity(Math.max(0, nz(p.getSoldQuantity()) - nz(o.getQuantity())));
-            if ("SOLD".equals(p.getStatus()) && nz(p.getSoldQuantity()) < nz(p.getQuantity())) p.setStatus("ACTIVE");
+            if (("SOLD".equals(p.getStatus()) || "RESERVED".equals(p.getStatus())) && nz(p.getSoldQuantity()) < nz(p.getQuantity())) p.setStatus("ACTIVE");
             products.save(p);
         });
         o.setStockReleased(true);

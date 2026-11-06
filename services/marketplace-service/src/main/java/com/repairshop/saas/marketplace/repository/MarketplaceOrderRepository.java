@@ -18,6 +18,8 @@ public interface MarketplaceOrderRepository extends JpaRepository<MarketplaceOrd
 
     List<MarketplaceOrder> findByAssignedStaffUserIdOrderByCreatedAtDesc(UUID staffUserId);
 
+    List<MarketplaceOrder> findByProductId(UUID productId);
+
     java.util.Optional<MarketplaceOrder> findByCustomerUserIdAndIdempotencyKey(UUID customerUserId, String key);
 
     @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
