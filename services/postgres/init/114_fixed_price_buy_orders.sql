@@ -16,7 +16,8 @@ ALTER TABLE marketplace_orders
     ADD COLUMN IF NOT EXISTS handover_otp           VARCHAR(6),
     ADD COLUMN IF NOT EXISTS stock_released         BOOLEAN,
     ADD COLUMN IF NOT EXISTS photos_json            TEXT,
-    ADD COLUMN IF NOT EXISTS note                   TEXT;
+    ADD COLUMN IF NOT EXISTS note                   TEXT,
+    ADD COLUMN IF NOT EXISTS verified_imei          VARCHAR(40);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_marketplace_orders_idem
     ON marketplace_orders(customer_user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;

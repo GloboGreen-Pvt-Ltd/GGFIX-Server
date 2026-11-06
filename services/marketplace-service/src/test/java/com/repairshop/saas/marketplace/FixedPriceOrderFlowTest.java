@@ -129,7 +129,13 @@ class FixedPriceOrderFlowTest {
         call(post("/staff/buy-orders/" + id + "/accept"), staff, null, 200);
         call(post("/staff/buy-orders/" + id + "/pickup"), staff, Map.of("productVerified", false), 400);
         call(post("/staff/buy-orders/" + id + "/pickup"), staff,
-                Map.of("productVerified", true, "photos", List.of("https://cdn.neargfix.com/p1.jpg")), 200);
+                Map.of("productVerified", true, "imei", "123456789012345", "photos", List.of("https://cdn.neargfix.com/p1.jpg")), 400); // bad Luhn
+        call(post("/staff/buy-orders/" + id + "/pickup"), staff,
+                Map.of("productVerified", true, "imei", "490154203237518", "photos", List.of("https://cdn.neargfix.com/p1.jpg")), 200);
+        JsonNode sv = call(get("/staff/buy-orders/" + id), staff, null, 200);
+        assertEquals("490154203237518", sv.get("verifiedImei").asText());
+        assertEquals(false, sv.has("handoverOtp")); // employee never sees the OTP
+        assertEquals(true, sv.has("shopAddress") && sv.has("customerName"));
         call(post("/staff/buy-orders/" + id + "/start-delivery"), staff, null, 200);
 
         Map<String, Object> deliver = new HashMap<>(Map.of("amountCollected", 52999, "otp", "XXXX",

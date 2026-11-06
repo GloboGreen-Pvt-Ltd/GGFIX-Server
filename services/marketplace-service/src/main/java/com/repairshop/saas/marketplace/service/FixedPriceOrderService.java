@@ -40,6 +40,7 @@ public class FixedPriceOrderService {
     private final MarketplaceProductRepository products;
     private final ObjectMapper json;
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
+    private final ChatSnapshotService snapshots;
 
     // ---------- customer ----------
 
@@ -189,6 +190,7 @@ public class FixedPriceOrderService {
             case "pickup" -> {
                 require(o, "ACCEPTED");
                 if (!Boolean.TRUE.equals(body.get("productVerified"))) throw bad("Verify product, IMEI, quantity and condition first");
+                o.setVerifiedImei(verifyImei(o, str(body.get("imei"))));
                 savePhotos(o, body, 1);
             }
             case "start-delivery" -> require(o, "PICKED_UP");
@@ -282,6 +284,15 @@ public class FixedPriceOrderService {
 
     private Map<String, Object> detail(MarketplaceOrder o, boolean customer) {
         Map<String, Object> m = view(o, customer);
+        m.put("verifiedImei", o.getVerifiedImei());
+        if (!customer) { // shop + assigned employee: who to deliver to, where to pick up
+            m.put("customerName", snapshots.loadCustomer(o.getCustomerUserId()).name());
+            ChatSnapshotService.ShopSnapshot shop = snapshots.loadShop(o.getShopId());
+            m.put("shopName", shop.name());
+            m.put("shopPhone", shop.phone());
+            m.put("shopAddress", shopAddress(o.getShopId()));
+            m.put("productImeiRequired", products.findById(o.getProductId()).map(p -> p.getImei() != null && !p.getImei().isBlank()).orElse(false));
+        }
         m.put("photos", o.getPhotosJson());
         m.put("events", events.findByOrderIdOrderByCreatedAtAsc(o.getId()).stream()
                 .map(e -> Map.of("status", e.getStatus(), "at", e.getCreatedAt(), "role", String.valueOf(e.getActorRole()),
@@ -300,6 +311,38 @@ public class FixedPriceOrderService {
     private MarketplaceOrder staffOwned(UUID staff, UUID shopId, MarketplaceOrder o) {
         if (!staff.equals(o.getAssignedStaffUserId()) || shopId == null || !shopId.equals(o.getShopId())) throw notFound("Order not found");
         return o;
+    }
+
+    /** IMEI/serial seen on the device at pickup: must match a listed IMEI; else a valid IMEI or serial if given. */
+    private String verifyImei(MarketplaceOrder o, String seen) {
+        String listed = products.findById(o.getProductId()).map(MarketplaceProduct::getImei).filter(v -> !v.isBlank()).orElse(null);
+        String v = seen == null ? null : seen.replaceAll("\\s", "").toUpperCase();
+        if (listed != null) {
+            if (v == null) throw bad("Enter the IMEI shown on the device");
+            if (!listed.replaceAll("\\s", "").equalsIgnoreCase(v)) throw bad("IMEI does not match the listed device");
+            return v;
+        }
+        if (v == null) return null;
+        if (v.matches("\\d{15}") ? !luhn(v) : !v.matches("[A-Z0-9-]{4,30}")) throw bad("Invalid IMEI / serial number");
+        return v;
+    }
+
+    private static boolean luhn(String d) {
+        int sum = 0;
+        for (int i = 0; i < d.length(); i++) {
+            int n = d.charAt(d.length() - 1 - i) - '0';
+            if (i % 2 == 1) { n *= 2; if (n > 9) n -= 9; }
+            sum += n;
+        }
+        return sum % 10 == 0;
+    }
+
+    private String shopAddress(UUID shopId) {
+        try {
+            return jdbc.queryForObject("SELECT address FROM shops WHERE id = ?", String.class, shopId);
+        } catch (Exception e) { // H2 tests have no shops table; never fail the order view over it
+            return null;
+        }
     }
 
     private boolean isShopEmployee(UUID userId, UUID shopId) {

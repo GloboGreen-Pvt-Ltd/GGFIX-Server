@@ -54,6 +54,7 @@ public class MarketplaceOrder {
     @Column(name = "stock_released") private Boolean stockReleased;
     @Column(name = "photos_json", columnDefinition = "TEXT") private String photosJson;
     @Column(name = "note", columnDefinition = "TEXT") private String note;
+    @Column(name = "verified_imei", length = 40) private String verifiedImei;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
