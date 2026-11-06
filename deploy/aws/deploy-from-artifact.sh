@@ -276,6 +276,9 @@ require_command openssl
 prepare_layout
 ensure_env_file
 load_env
+# Schema first: new jars validate against it (ddl-auto=validate). A failed
+# migration exits here, before any jar is replaced or service restarted.
+bash "$SCRIPT_DIR/run-migrations.sh" "$PAYLOAD_DIR/migrations"
 copy_jars
 restart_services
 
