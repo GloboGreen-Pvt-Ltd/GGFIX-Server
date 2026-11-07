@@ -43,6 +43,7 @@ public class FixedPriceOrderService {
     private final ObjectMapper json;
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
     private final ChatSnapshotService snapshots;
+    private final com.repairshop.saas.common.notify.PushService push;
 
     // ---------- customer ----------
 
@@ -145,7 +146,15 @@ public class FixedPriceOrderService {
                 if (!isShopEmployee(staff, o.getShopId())) throw bad("Employee does not belong to this shop");
                 boolean re = o.getAssignedStaffUserId() != null;
                 o.setAssignedStaffUserId(staff);
-                return move(o, "ASSIGNED", actor, "SHOP", re ? "Reassigned" : null, false);
+                Map<String, Object> res = move(o, "ASSIGNED", actor, "SHOP", re ? "Reassigned" : null, false);
+                // Tell the employee (Staff app); best-effort, never fails the assignment.
+                try {
+                    String title = products.findById(o.getProductId()).map(MarketplaceProduct::getTitle).orElse("Product");
+                    push.pushToUser(com.repairshop.saas.common.notify.PushApp.EMPLOYEE, staff, "New delivery assigned",
+                            o.getOrderNumber() + " · " + title + " — collect from the shop and deliver.",
+                            Map.of("kind", "BUY_DELIVERY", "orderId", o.getId().toString()));
+                } catch (RuntimeException ignored) { }
+                return res;
             }
             case "handover" -> { // visit shop: customer paid in store and showed the OTP
                 if ("COMPLETED".equals(s)) return view(o, false);
