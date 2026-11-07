@@ -363,7 +363,16 @@ public class FixedPriceOrderService {
     private boolean isShopEmployee(UUID userId, UUID shopId) {
         Integer n = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM users WHERE id = ? AND shop_id = ? AND COALESCE(is_active, TRUE)", Integer.class, userId, shopId);
-        return n != null && n > 0;
+        if (n != null && n > 0) return true;
+        // Shop employees are also linked through ticket-service's technicians.user_id
+        // (the login a Staff-app token carries), even when users.shop_id differs.
+        try {
+            Integer t = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM technicians WHERE user_id = ? AND shop_id = ?", Integer.class, userId, shopId);
+            return t != null && t > 0;
+        } catch (org.springframework.dao.DataAccessException e) {
+            return false; // no technicians table (tests / other deployments)
+        }
     }
 
     private static void require(MarketplaceOrder o, String... allowed) {
